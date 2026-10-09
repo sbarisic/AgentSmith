@@ -26,7 +26,7 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
             ["store"] = false,
             ["input"] = new JsonArray(request.Input.Select(i => (JsonNode)i.DeepClone()).ToArray()),
             ["include"] = new JsonArray("reasoning.encrypted_content"),
-            ["tools"] = new JsonArray(new JsonObject { ["type"] = "namespace", ["name"] = "agentsmith", ["description"] = "AgentSmith tools enabled for this conversation", ["tools"] = functions })
+            ["tools"] = request.Tools.Count == 0 ? new JsonArray() : new JsonArray(new JsonObject { ["type"] = "namespace", ["name"] = "agentsmith", ["description"] = "AgentSmith tools enabled for this conversation", ["tools"] = functions })
         };
     }
     public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -39,7 +39,7 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         await foreach (var ev in ParseStreamAsync(stream, cancellationToken)) yield return ev;
     }
-    public static async IAsyncEnumerable<ModelEvent> ParseStreamAsync(Stream stream, [EnumeratorCancellation] CancellationToken ct)
+    public static async IAsyncEnumerable<ModelEvent> ParseStreamAsync(Stream stream, [EnumeratorCancellation] CancellationToken ct, string provider = "ChatGPT")
     {
         // Read chunks rather than ReadLineAsync: a malicious or broken server cannot allocate an unbounded line.
         using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: true);
@@ -83,7 +83,7 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
                     var index = item["output_index"]!.GetValue<int>();
                     if (index < 0 || index > 255 || !finishedItems.TryAdd(index, (JsonObject)finished.DeepClone())) throw new UserFacingException("Invalid or duplicate output index.");
                 }
-                if (type is "response.failed" or "response.incomplete" or "error") throw new UserFacingException("ChatGPT returned an unsuccessful response. Check access, usage, and context limits.");
+                if (type is "response.failed" or "response.incomplete" or "error") throw new UserFacingException($"{provider} returned an unsuccessful response. Check model access, output budget, and context limits.");
                 if (type == "response.completed")
                 {
                     var result = item["response"]?.AsObject();

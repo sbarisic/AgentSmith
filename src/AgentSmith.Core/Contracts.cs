@@ -16,12 +16,21 @@ public enum WorkflowMode { Work, Plan }
 public enum ToolEffect { ReadOnly, SessionState, Workspace, Process }
 public sealed class Session
 {
+    public ModelConnection Connection { get; set; } = new();
+    public List<WorkerProfile> EnabledWorkers { get; set; } = [];
+    public string? ParentConversationId { get; set; }
+    public string? WorkerId { get; set; }
+    public string WorkerInstructions { get; set; } = "";
+    public string? WorkerReport { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Workspace { get; set; } = "";
     public string AccountId { get; set; } = "";
     public string Model { get; set; } = "";
     public PermissionMode Mode { get; set; } = PermissionMode.Execute;
     public WorkflowMode Workflow { get; set; }
+    public List<ContextSnapshot> ContextSnapshots { get; set; } = [];
+    public string? ActiveContextId { get; set; }
+    public List<CompactionAttempt> CompactionAttempts { get; set; } = [];
     public string? ActivePlanId { get; set; }
     public string? PendingPlanPrompt { get; set; }
     public List<WorkPlan> Plans { get; set; } = [];
@@ -55,6 +64,8 @@ public sealed class ToolCall
     public string Arguments { get; set; } = "";
     public CallState State { get; set; }
     public string? Result { get; set; }
+    public ActivitySummary? Activity { get; set; }
+    public double DurationMilliseconds { get; set; }
     public PreparedOperation? Prepared { get; set; }
 }
 public sealed class Question
@@ -107,6 +118,7 @@ public sealed class ProcessRecord
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string OwnerId { get; set; } = "";
     public string RunId { get; set; } = "";
+    public int DisplayNumber { get; set; }
     public string Executable { get; set; } = "";
     public string State { get; set; } = "Prepared";
     public string? Reason { get; set; }
@@ -116,7 +128,7 @@ public sealed class ProcessRecord
     public string LogPath { get; set; } = "";
     public bool Truncated { get; set; }
 }
-public sealed record ToolOutput(string Content, Question? Question = null, bool PlanReview = false);
+public sealed record ToolOutput(string Content, Question? Question = null, bool PlanReview = false, bool FinishRun = false);
 public sealed record ModelRequest(string Model, string Instructions, IReadOnlyList<JsonObject> Input, IReadOnlyList<ToolDefinition> Tools);
 public sealed record ModelEvent(string Type, string? Text = null, IReadOnlyList<JsonObject>? Output = null, string? Usage = null);
 public sealed record ContextResult(ModelRequest Request, string Manifest);
@@ -127,6 +139,10 @@ public interface IModelClient
 }
 public interface IToolDispatcher
 {
+    Task<IDisposable> AcquireToolLeaseAsync(ToolExecutionContext context, ToolCall call) => Task.FromResult<IDisposable>(NoopLease.Instance);
+    string SessionInstructions(Session session) => session.WorkerInstructions;
+    Task<bool> CanCompleteAsync(ToolExecutionContext context) => Task.FromResult(true);
+    Task RunEndedAsync(ToolExecutionContext context) => Task.CompletedTask;
     IReadOnlyList<ToolDefinition> Definitions { get; }
     string Instructions(string workspace);
     Task<ToolOutput> ExecuteAsync(string workspace, ToolCall call, CancellationToken cancellationToken);

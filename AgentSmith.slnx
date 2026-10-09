@@ -3,6 +3,7 @@
     <Project Path="src/AgentSmith.BuildLogger/AgentSmith.BuildLogger.csproj" />
     <Project Path="src/AgentSmith.Cli/AgentSmith.Cli.csproj" />
     <Project Path="src/AgentSmith.Core/AgentSmith.Core.csproj" />
+    <Project Path="src/AgentSmith.LmStudio/AgentSmith.LmStudio.csproj" />
     <Project Path="src/AgentSmith.OpenAI/AgentSmith.OpenAI.csproj" />
     <Project Path="src/AgentSmith.Runtime/AgentSmith.Runtime.csproj" />
     <Project Path="src/AgentSmith.Storage/AgentSmith.Storage.csproj" />

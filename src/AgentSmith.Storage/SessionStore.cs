@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace AgentSmith.Storage;
 
-public sealed class SessionStore : ISessionStore
+public sealed partial class SessionStore : ISessionStore, IWorkerStore
 {
     private readonly string root;
     public string DataDirectory => root;
@@ -59,9 +59,25 @@ public sealed class SessionStore : ISessionStore
                 CREATE TABLE receipts(conversation_id TEXT NOT NULL, call_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(conversation_id,call_id));
                 UPDATE schema_version SET version=3;
                 """;
-            command.ExecuteNonQuery(); migration.Commit();
+            command.ExecuteNonQuery(); migration.Commit(); version = 3; command.Transaction = null;
         }
-        else if (version != 3) throw new UserFacingException("Unsupported session database version.");
+        if (version == 3)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v3-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE context_snapshots(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE prompt_queue(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, sequence INTEGER NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(conversation_id,sequence)); CREATE TABLE queue_holds(conversation_id TEXT PRIMARY KEY, reason TEXT); UPDATE schema_version SET version=4;";
+            command.ExecuteNonQuery(); migration.Commit(); version = 4; command.Transaction = null;
+        }
+        if (version == 4)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v4-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE worker_profiles(name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL); CREATE TABLE workers(id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, run_id TEXT NOT NULL, call_id TEXT NOT NULL, child_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, UNIQUE(parent_id,run_id,call_id)); UPDATE schema_version SET version=5;";
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 5;
+        }
+        if (version != 5) throw new UserFacingException("Unsupported session database version.");
     }
     private SqliteConnection Open()
     {
@@ -97,6 +113,11 @@ public sealed class SessionStore : ISessionStore
                 session.Processes.RemoveAll(p => p.Id == process.Id); session.Processes.Add(process);
             }
         }
+        if (session is not null)
+        {
+            var number = session.Processes.Select(p => p.DisplayNumber).DefaultIfEmpty().Max();
+            foreach (var process in session.Processes.Where(p => p.DisplayNumber == 0).OrderBy(p => p.Id, StringComparer.Ordinal)) process.DisplayNumber = ++number;
+        }
         return session;
     }
     public IReadOnlyList<Session> List()
@@ -115,6 +136,11 @@ public sealed class SessionStore : ISessionStore
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
+        SaveInTransaction(session, agentEvent, db, tx);
+        tx.Commit();
+    }
+    private static void SaveInTransaction(Session session, AgentEvent agentEvent, SqliteConnection db, SqliteTransaction tx)
+    {
         void Execute(string sql, params (string, object?)[] args)
         {
             using var command = db.CreateCommand();
@@ -148,7 +174,8 @@ public sealed class SessionStore : ISessionStore
         foreach (var receipt in session.Receipts)
             Execute("INSERT OR REPLACE INTO receipts VALUES($conversation,$call,$payload)", ("$conversation", session.Id), ("$call", receipt.Key), ("$payload", Json.Serialize(receipt.Value)));
         Execute("INSERT INTO events(conversation_id,run_id,timestamp,type,payload) VALUES($conversation,$run,$timestamp,$type,$payload)", ("$conversation", session.Id), ("$run", agentEvent.RunId), ("$timestamp", session.UpdatedAt.ToString("O")), ("$type", agentEvent.Type), ("$payload", Json.Serialize(agentEvent.Payload)));
-        tx.Commit();
+        foreach (var snapshot in session.ContextSnapshots)
+            Execute("INSERT OR REPLACE INTO context_snapshots VALUES($id,$conversation,$payload)", ("$id", snapshot.Id), ("$conversation", session.Id), ("$payload", Json.Serialize(snapshot)));
     }
     public void SaveProcess(string conversationId, ProcessRecord process)
     {

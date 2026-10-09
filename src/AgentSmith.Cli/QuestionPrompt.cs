@@ -92,7 +92,7 @@ public static class QuestionPrompt
         return text[..end] + "…";
     }
 
-    public static async Task<string?> ReadAsync(Question question, bool color, CancellationToken ct)
+    public static async Task<string?> ReadAsync(Question question, bool color, CancellationToken ct, Func<CancellationToken, Task<ConsoleKeyInfo>>? readKey = null)
     {
         var state = new QuestionInput(question.Choices);
         var previousLines = 0;
@@ -121,8 +121,8 @@ public static class QuestionPrompt
                 }
                 if (color) Console.Write("\u001b[0m");
                 previousLines = lines.Length;
-                while (!Console.KeyAvailable) { ct.ThrowIfCancellationRequested(); await Task.Delay(25, ct); }
-                state.Handle(Console.ReadKey(intercept: true));
+                if (readKey is not null) state.Handle(await readKey(ct));
+                else { while (!Console.KeyAvailable) { ct.ThrowIfCancellationRequested(); await Task.Delay(25, ct); } state.Handle(Console.ReadKey(intercept: true)); }
             }
             Console.Write($"\u001b[{previousLines}A\r\u001b[J");
             if (state.Answer is null) Console.WriteLine("  Question saved. Resume this conversation to answer.");

@@ -21,7 +21,7 @@ public static class ArtifactAccess
     }
     public static ArtifactRecord Register(ToolExecutionContext ctx, string path, string kind, string? processId = null)
     {
-        if (kind is not ("process-log" or "build-diagnostics" or "test-report" or "verification")) throw new UserFacingException("Unsupported artifact kind.");
+        if (kind is not ("process-log" or "build-diagnostics" or "test-report" or "verification" or "agent-report" or "agent-transcript")) throw new UserFacingException("Unsupported artifact kind.");
         var full = Validate(ctx, path);
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Path.Equals(full, StringComparison.OrdinalIgnoreCase));
         if (artifact is not null) return artifact;

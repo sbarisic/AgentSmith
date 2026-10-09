@@ -101,7 +101,7 @@ public sealed class PlanningTests
         var session = new Session { Mode = PermissionMode.Edit, Runs = [new Run { Calls = [new ToolCall { Id = "old-call" }] }] };
         store.Save(session, new("created", session.Id, null, new { }));
         using (var db = new SqliteConnection("Data Source=" + Path.Combine(dir.Path, "sessions.db")))
-        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE plans; DROP TABLE artifacts; DROP TABLE verifications; DROP TABLE receipts; UPDATE schema_version SET version=2; UPDATE conversations SET snapshot=json_remove(snapshot,'$.workflow');"; cmd.ExecuteNonQuery(); }
+        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE worker_profiles; DROP TABLE workers; DROP TABLE context_snapshots; DROP TABLE prompt_queue; DROP TABLE queue_holds; DROP TABLE plans; DROP TABLE artifacts; DROP TABLE verifications; DROP TABLE receipts; UPDATE schema_version SET version=2; UPDATE conversations SET snapshot=json_remove(snapshot,'$.workflow');"; cmd.ExecuteNonQuery(); }
         var upgraded = new SessionStore(dir.Path).Get(session.Id)!;
         Assert.Equal(WorkflowMode.Work, upgraded.Workflow); Assert.Equal(PermissionMode.Edit, upgraded.Mode); Assert.Equal("old-call", upgraded.Runs.Single().Calls.Single().Id);
         Assert.NotEmpty(Directory.GetFiles(dir.Path, "sessions-v2-*.backup.db"));

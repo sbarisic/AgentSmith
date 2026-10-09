@@ -9,5 +9,6 @@
     <ProjectReference Include="../../src/AgentSmith.Storage/AgentSmith.Storage.csproj" />
     <ProjectReference Include="../../src/AgentSmith.Tools/AgentSmith.Tools.csproj" />
     <ProjectReference Include="../../src/AgentSmith.OpenAI/AgentSmith.OpenAI.csproj" />
+    <ProjectReference Include="../../src/AgentSmith.LmStudio/AgentSmith.LmStudio.csproj" />
   </ItemGroup>
 </Project>

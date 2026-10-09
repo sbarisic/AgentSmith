@@ -5,13 +5,15 @@ using AgentSmith.Core;
 namespace AgentSmith.Cli;
 
 /// <summary>Human-facing presentation only. Machine events and persisted state bypass this renderer.</summary>
-public sealed class TerminalRenderer(TextWriter output, bool color, int width = 90, TimeProvider? timeProvider = null)
+public sealed partial class TerminalRenderer(TextWriter output, bool color, int width = 90, TimeProvider? timeProvider = null)
 {
-    private readonly int width = Math.Clamp(width, 32, 100);
+    private int width = Math.Clamp(width, 32, 100);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private long? startedAt;
     private bool streaming;
     private MarkdownWriter? markdownStream;
+    public void Resize(int columns) => width = Math.Clamp(columns, 32, 160);
+    public bool Verbose { get; set; }
     public bool MarkdownEnabled { get; set; } = true;
     private long inputTokens;
     private long outputTokens;
@@ -35,6 +37,11 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
         EndStream();
         switch (type)
         {
+            case "agent.started":
+                MessageText("› " + Text(data, "message"));
+                if (data.TryGetProperty("writePaths", out var assigned) && assigned.GetArrayLength() > 0) MessageText("Assigned: " + string.Join(", ", assigned.EnumerateArray().Select(p => p.GetString())), "dim");
+                break;
+            case "agent.finished": MessageText(Text(data, "message"), Text(data, "state") == "Completed" ? "accent" : "warning"); break;
             case "plan.display":
                 Plan(data.GetProperty("plan")); break;
             case "plan.review": Plan(data); break;
@@ -42,7 +49,7 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
             case "plan.decision": MessageText("Plan decision: " + Text(data, "decision") + " " + Text(data, "mode"), "accent"); break;
             case "plan.updated":
                 MessageText("Plan revision " + Text(data, "revision"), "accent");
-                if (data.TryGetProperty("steps", out var progress)) foreach (var step in progress.EnumerateArray()) MessageText("[" + Text(step, "status") + "] " + Text(step, "id"), "dim");
+                if (data.TryGetProperty("steps", out var progress)) foreach (var step in progress.EnumerateArray()) Progress(step);
                 break;
             case "artifact.result": if (TryJson(Text(data, "content"), out var artifact)) Artifact(artifact); break;
             case "tools":
@@ -59,7 +66,7 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
             case "processes":
                 Title("Processes owned by this conversation");
                 foreach (var process in data.EnumerateArray())
-                { Wrapped("  " + Text(process, "id") + " · " + Text(process, "state") + " · exit " + Text(process, "exitCode"), "accent"); Wrapped("    " + Text(process, "executable")); Wrapped("    " + Text(process, "logPath"), "dim"); }
+                { Wrapped("  " + (Number(process, "displayNumber") > 0 ? "#" + Text(process, "displayNumber") : Text(process, "id")) + " · " + Text(process, "state") + " · exit " + Text(process, "exitCode"), "accent"); Wrapped("    " + Text(process, "executable")); Wrapped("    " + Text(process, "logPath"), "dim"); }
                 break;
             case "operation":
                 if (TryJson(Text(data, "content"), out var operation)) Operation(operation);
@@ -76,7 +83,11 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
                 break;
             case "tool.started":
                 tools++;
-                Line("  │ › " + ToolLabel(Text(data, "name")), "dim");
+                if (Verbose || Text(data, "name") != "process_poll")
+                {
+                    if (data.TryGetProperty("activity", out var activity)) MessageText("› " + Text(activity, "action") + " " + Text(activity, "target") + (Text(activity, "options").Length > 0 ? " · " + Text(activity, "options") : ""));
+                    else Line("  │ › " + ToolLabel(Text(data, "name")), "dim");
+                }
                 break;
             case "tool.completed":
                 if (TryJson(Text(data, "content"), out var result))
@@ -92,6 +103,7 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
                     else if (result.TryGetProperty("files", out var files)) MessageText($"  {files.GetArrayLength()} files" + (Flag(result, "truncated") ? " · more available" : ""), "dim");
                     else if (result.TryGetProperty("matches", out var matches)) MessageText($"  {matches.GetArrayLength()} matches" + (Flag(result, "limitReached") ? " · limit reached" : ""), "dim");
                 }
+                if (Text(data, "name") != "process_poll" && data.TryGetProperty("durationMilliseconds", out var callDuration)) MessageText($"Call completed · {callDuration.GetDouble() / 1000:0.000}s", "dim");
                 break;
             case "tool.rejected":
                 if (TryJson(Text(data, "result"), out var rejection)) MessageText(Text(rejection, "error"), "warning");
@@ -127,6 +139,7 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
             case "question.heading":
                 Message("Your input", Text(data, "text"));
                 break;
+            case "user.submitted":
             case "answer.submitted":
                 Message("You", Text(data, "text"));
                 break;
@@ -165,6 +178,8 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
                 break;
             case "status":
                 Field("Workflow", Text(data, "workflow") + " / " + Text(data, "mode"));
+                if (Text(data, "provider").Length > 0) Field("Provider", Text(data, "provider") + " · " + Text(data, "model"));
+                if (data.TryGetProperty("workers", out var workerStates)) Field("Workers", workerStates.GetArrayLength().ToString());
                 Title("Conversation details"); Field("Session", Text(data, "id")); Field("State", Text(data, "state"));
                 if (TryJson(Text(data, "context"), out var context)) Context(context);
                 break;
@@ -180,14 +195,20 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
             case "resume.confirmation":
                 Title("Continue saved work", "warning"); Field("State", Text(data, "state")); Field("Reason", Text(data, "reason")); Wrapped("  " + Text(data, "message")); break;
             case "help":
+                Wrapped("  /agents · /agent <id|#number> [cancel]", "accent");
                 Wrapped("  /plan new <task> · /plan show · /plan revise <note> · /plan implement · /plan leave", "accent");
                 Wrapped("  /tasks · /artifacts · /artifact <id> [search <text>]", "accent");
+                Wrapped("  /display compact|verbose · /details <call-id|#process> · /compact", "accent");
+                Wrapped("  /queue [remove <id>|clear|continue] · /cancel · Escape stop", "accent");
                 Title("Chat commands");
                 foreach (var (command, description) in new[] { ("/help", "Show these commands"), ("/status", "Session and context details"), ("/context", "Inspect the context budget"), ("/markdown on|off", "Format Markdown or show its source"), ("/paste", "Multiline input; finish with /end"), ("/exit", "Leave this conversation"), ("Ctrl+C", "Stop the current run") })
                     Line("  " + command.PadRight(20) + description);
                 foreach (var (command, description) in new[] { ("/tools", "List registry tools and enabled capabilities"), ("/mode <mode>", "Inspect, Edit, or Execute"), ("/changes", "Review file-tool checkpoints"), ("/undo <id>", "Undo a checkpoint if files still match"), ("/processes", "List process states and logs"), ("/stop <id>", "Stop an owned process tree"), ("/recover [abandon]", "Inspect or acknowledge uncertain operations") })
                     Wrapped("  " + command.PadRight(20) + description);
                 output.WriteLine(); break;
+            case "context.compaction.started": MessageText("Compacting older context…", "dim"); break;
+            case "context.compaction.completed": MessageText("Context compacted · " + Text(data, "before") + " → " + Text(data, "after") + " estimated characters", "dim"); break;
+            case "context.compaction.failed": MessageText("Compaction paused: " + Text(data, "reason"), "warning"); break;
             case "error": Title("Error", "warning"); Wrapped("  " + Text(data, "message")); output.WriteLine(); break;
             default:
                 if (!string.IsNullOrEmpty(Text(data, "message"))) Wrapped("  " + Text(data, "message"));
@@ -220,12 +241,13 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
         Line("  ╭" + new string('─', inner) + "╮", "border");
         Box("AgentSmith", "bright", inner);
         var mode = Text(data, "mode");
-        Box(Text(data, "model") + "  ·  ChatGPT plan  ·  " + (Text(data, "workflow").Length == 0 ? "Work" : Text(data, "workflow")) + " / " + (mode.Length == 0 ? "Inspect" : mode), "accent", inner);
+        var local = Text(data, "provider") == "LmStudio";
+        Box(Text(data, "model") + (local ? "  ·  LM Studio  ·  " : "  ·  ChatGPT plan  ·  ") + (Text(data, "workflow").Length == 0 ? "Work" : Text(data, "workflow")) + " / " + (mode.Length == 0 ? "Inspect" : mode), "accent", inner);
         Box(Text(data, "workspace"), "dim", inner);
         Line("  ╰" + new string('─', inner) + "╯", "border");
         if (mode == "Execute") Wrapped("  Processes run as your Windows account; the workspace is not a sandbox.", "dim");
-        Wrapped("  Remaining usage unavailable", "dim");
-        Wrapped("  Manage usage: https://chatgpt.com/settings/usage", "dim");
+        if (local) Wrapped("  " + Text(data, "endpoint") + " · Loaded context: " + Text(data, "loadedContextTokens") + " tokens", "dim");
+        else { Wrapped("  Remaining usage unavailable", "dim"); Wrapped("  Manage usage: https://chatgpt.com/settings/usage", "dim"); }
         Line("  /help commands   /exit leave   Ctrl+C stop", "dim");
         output.WriteLine();
     }
@@ -260,20 +282,17 @@ public sealed class TerminalRenderer(TextWriter output, bool color, int width = 
         Field("Context", $"{Number(data, "characters"):N0} / {Number(data, "limit"):N0} characters");
         Field("History", $"{Number(data, "historyItems")} items");
         Field("Guidance", Text(data, "instructionSource"));
+        if (Text(data, "snapshotId").Length > 0) Field("Summary", Text(data, "snapshotId") + " · through item " + Text(data, "through"));
     }
     private void Operation(JsonElement data)
     {
         if (data.TryGetProperty("checkpointId", out _))
-        { MessageText("Checkpoint " + Text(data, "checkpointId") + " · " + Text(data, "state"), "accent"); MessageText(Text(data, "diff")); }
+        { MessageText("Checkpoint " + Text(data, "checkpointId") + " · " + Text(data, "state"), "accent"); Preview(Text(data, "diff")); }
         if (data.TryGetProperty("processId", out _))
         {
-            MessageText("Process " + Text(data, "processId") + " · " + Text(data, "state") + (Text(data, "exitCode").Length > 0 ? " · exit " + Text(data, "exitCode") : ""), "dim");
-            if (data.TryGetProperty("durationMilliseconds", out var elapsed)) MessageText($"Elapsed {elapsed.GetDouble() / 1000:0.0}s", "dim");
-            if (data.TryGetProperty("output", out var chunks)) foreach (var chunk in chunks.EnumerateArray()) MessageText("[" + Text(chunk, "stream") + "] " + Text(chunk, "text"));
-            if (Flag(data, "truncated")) MessageText("Output truncated; inspect the retained process log.", "warning");
-            if (Flag(data, "hasMoreOutput")) MessageText("More retained output is available from the next cursor.", "dim");
+            ProcessOutput(data);
         }
-        else if (data.TryGetProperty("content", out _)) MessageText(Text(data, "content"));
+        else if (data.TryGetProperty("content", out _)) Preview(Text(data, "content"));
     }
     private void Plan(JsonElement data)
     {

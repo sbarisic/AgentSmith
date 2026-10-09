@@ -129,9 +129,9 @@ public sealed class ToolRegistry : IWorkspaceTools, IDisposable
             else Planning.Submit(ctx.Session);
             var review = Planning.Active(ctx.Session)?.PendingReview is not null;
             var activePlan = Planning.Active(ctx.Session)!;
-            var result = new ToolOutput(Json.Serialize(new { activePlan.Id, revision = activePlan.Current.Revision, activePlan.State, workflow = ctx.Session.Workflow.ToString(), mode = ctx.Session.Mode.ToString(), reviewRequired = review, steps = activePlan.Current.Steps.Select(s => new { s.Id, s.Status }) }), PlanReview: review);
+            var result = new ToolOutput(Json.Serialize(new { activePlan.Id, revision = activePlan.Current.Revision, activePlan.State, workflow = ctx.Session.Workflow.ToString(), mode = ctx.Session.Mode.ToString(), reviewRequired = review, steps = activePlan.Current.Steps.Select(s => new { s.Id, s.Status, s.Description }) }), PlanReview: review);
             ctx.Session.Receipts.Add(call.Id, new(result.Content, review));
-            ctx.Save(review ? "plan.submitted" : "plan.updated", new { planId = ctx.Session.ActivePlanId, revision = activePlan.Current.Revision, steps = activePlan.Current.Steps.Select(s => new { s.Id, s.Status }) });
+            ctx.Save(review ? "plan.submitted" : "plan.updated", new { planId = ctx.Session.ActivePlanId, revision = activePlan.Current.Revision, steps = activePlan.Current.Steps.Select(s => new { s.Id, s.Status, s.Description }) });
             return result;
         }
         return await reads.ExecuteAsync(ctx.Workspace, call, ctx.Cancellation);

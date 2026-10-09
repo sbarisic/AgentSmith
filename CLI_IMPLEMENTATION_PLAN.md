@@ -2,9 +2,58 @@
 
 Updated: 2026-10-09
 
-## Planned milestone: Readable long-running conversations
+Delivery status: the continuous-conversation and LM Studio/worker milestones are implemented, verified, and published to the local Windows build folder. This documentation refresh accompanies the user-requested local source commit of both milestones. No remote push or public publication is included. Older delivery sections below retain their original test counts and no-commit statements as historical records; the latest verification total is 158 passing tests.
 
-**Status: planned, not implemented.** This is the next milestone after Plan, Track, and Verify. The existing verification results below describe the delivered build only. This documentation update does not change source code or publish an executable.
+## Delivered milestone: LM Studio and Model-Specific Subagents
+
+Implemented on 2026-10-09. Initial configuration is a ChatGPT parent with `bonsai-edit` and `bonsai-review` profiles using the loaded `prism-ml/bonsai-27b` model at `http://127.0.0.1:1234`. The server reports 262144 loaded context tokens. Provider selection is persisted; local inference and compaction use the same factory and do not require account credentials.
+
+### Delivered behavior
+
+- Separate LM Studio Responses adapter, flat function schemas, streamed text/calls, loaded-model discovery, 8192-token output budget, server-default reasoning, and no automatic fallback/retry. Reasoning-only or output-limited results fail before dispatch.
+- Schema v5 with consistent v4 backup, durable profiles, atomic parent/run/call spawn identity, independent child sessions, reports, lifecycle events and reservations. Existing conversations remain ChatGPT with delegation disabled.
+- `smith workers add|list|remove`, `--provider`, `--endpoint`, `--max-output-tokens`, `--workers`, `/agents`, and `/agent <id|#number> [cancel]`.
+- Parent tools `agent_spawn`, `agent_wait`, `agent_result`, `agent_cancel`; worker-only `agent_finish` ends dispatch, including subsequent calls from that model response.
+- Two concurrent workers, eight launches per parent run, ten rounds/five minutes per worker within the parent deadline. Workers read and edit assigned files but cannot launch arbitrary processes, create subagents or control user decisions.
+- Exact file ownership with case/ancestor checks, both move endpoints, existing workspace/link exclusions, serialized mutation critical sections and unchanged stale-hash/checkpoint rules. Editing workers require stopped processes; their reservations block parent edits, undo and process launches.
+- Parent completion and FIFO follow-ups wait for collected results. Cancellation settles the task tree and holds queued prompts. Restart interrupts children without relaunching, retaining uncertain reservations for explicit recovery.
+- Parent-visible child reports/transcripts and checkpoint undo; explicitly shared registered artifact excerpts use child-local copies. Terminal activity includes worker identity, model/profile, state and elapsed time; child raw text does not interleave into the composer.
+
+### Observed acceptance
+
+- Automated verification: `dotnet test AgentSmith.slnx` passed 158 tests (123 core/tool tests and 35 CLI integration tests). This includes worker persistence-failure injection before effects, after effects, and before result persistence; provider/credential boundaries; reservations; report/queue barriers; and all existing regression suites.
+- Real ChatGPT (`gpt-6.1-sol`) parent conversation `047827604fcb411da17f1d749f9e6098` delegated separate Arithmetic and Parity fixes to two real Bonsai workers. Each finished in four model rounds with one applied checkpoint. The parent independently inspected the diff, obtained build exit 0, and read a complete VSTest report with 5 passed, 0 failed, 0 skipped.
+- An unrelated `notes.txt` edit remained byte-for-byte unchanged. After restarting, worker artifacts were readable and both child checkpoints were undone. Git then showed only the unrelated note diff; source defects were deliberately restored as undo evidence.
+- A local-only Bonsai parent read `notes.txt` and quoted its actual content in 21.5 seconds.
+- A live editing-capable Bonsai worker held its assigned file reservation while injected parent `file_create` and `process_start` attempts were rejected before effects; the worker then cancelled cleanly. Evidence: `artifacts/lm-worker-live-guards.json`.
+- Forced termination of an earlier test CLI left five durable child identities. Resume marked its two unfinished workers interrupted, retained the completed/failed records, and created no replacement workers. No uncertain effects were replayed.
+- Earlier live attempts against compact one-line code produced incorrect unified patches, rejected by the exact-context guard, and some workers reached their round limit. Separate worker instructions and clear patch-format guidance improved the subsequent run; successful acceptance is not a guarantee of model reliability.
+- Live Plan conversation `18c166caa1f140a4b07176b6f0f9ccbc` collected a blocked Bonsai report, exposed its clarification through the parent, kept a queued follow-up pending, and accepted an explicitly addressed answer before continuing.
+- Live cancellation conversation `83121561f8cc47c6bac3ccfda9ae4388` cancelled its real worker, held two submitted prompts, and ran them as distinct FIFO runs after `/queue continue`. Cancellation used the same `/cancel` path as Escape; the new worker test did not require a physical keyboard event.
+- Real LM Studio compaction in `c2ff9664420a4ed280b5595a656f2e59` reduced request context from 48715 to 15626 estimated characters in 99.6 seconds. This used supplied fixture history; the source history hash was unchanged. Local-only file interaction was independently tested above.
+- Additional live workflow evidence is recorded in `artifacts/lm-worker-workflow-summary.json`.
+
+Evidence is local and ignored: `artifacts/lm-workers-formatted-events.jsonl`, `lm-workers-observed.json`, `lm-local-parent-events.jsonl`, `lm-workers-crash-resume.jsonl`, `lm-worker-undo-events.jsonl`, and `lm-worker-workflow-summary.json`. The disposable repository is `artifacts/lm-workers-formatted-20261009`. Release publish succeeded with `dotnet publish src/AgentSmith.Cli -c Release -r win-x64 --self-contained true -o artifacts/publish/win-x64`. Published help, profile listing, and live local model discovery passed; the saved user PATH includes this folder (an already-running shell may need a new terminal). Source, tests, and documentation are included in the requested local commit; generated builds, private local state, acceptance fixtures, and the unrelated `bonsai/` directory are excluded.
+
+Deferred: authenticated/remote local servers, model downloads/loading, image input, nested workers, worker shell/build/test tools, separate worktrees/change integration, and provider switching inside a saved conversation. File reservations coordinate the current conversation tree, not unrelated applications or separate AgentSmith conversations.
+
+## Delivered milestone: Readable, Continuous Conversations
+
+**Status: implemented, verified, and published locally.** This milestone follows Plan, Track, and Verify. The sections below retain the agreed implementation contract, with actual behavior and verification notes taking precedence.
+
+### Delivered behavior and evidence
+
+- Typed activity summaries, stable process aliases, readable task descriptions, compact/verbose output, bounded previews, stream-line assembly, and sanitized call details are implemented.
+- Schema v4 stores summaries/attempts and an independent durable prompt queue. Queue claims create their user message and run transactionally. Context projection preserves original history and complete protocol groups.
+- Automatic compaction uses ordinary tools-disabled ChatGPT requests, the 96,000/72,000 character trigger/target, 48,000-character summary inputs, 8,000-character outputs, and at most eight calls per attempt.
+- The scrolling composer and status row share one console owner with question/review pickers. Escape and /cancel stop current work; queued follow-ups stay held until explicit continuation. Read-only busy commands operate on committed snapshots, not the runner's mutable session.
+- Redirected chat requires addressed question/review responses after concurrent input begins, even if no prompt has yet entered the queue. This closes the completion/input race. Idle legacy resume without queued input keeps existing line answers.
+- Live ChatGPT conversation `00da3506ae174e76baf4f1b83ea427c1` completed nine runs in FIFO order with two compactions: **68,086 → 22,835** and **64,809 → 20,219** estimated characters. The acceptance harness used an 80,000-character guard to exercise compaction sooner; the shipped default remains 120,000.
+- A real clarification blocked queued work until an explicitly addressed Addition answer. The agent then repaired the disposable calculator through a hash-checked patch, completed structured build/test verification, searched retained artifacts, and finished. Checkpoint undo restored the original file hash; the unrelated note was unchanged.
+- Native terminal Escape acceptance used conversation `9540cb86674d4da8b5ddc72c8890f287`: a real `pwsh` process stopped with termination confirmed, the submitted follow-up stayed pending, and `/queue continue` released it to return `ESC_QUEUE_OK`.
+- Evidence is local and ignored: `artifacts/continuity-live-events.jsonl`, `continuity-live-summary.json`, `continuity-live-session.txt`, plus the review/crash/restart evidence described in the final verification record. Fixture files intentionally contain the original defect after successful undo.
+
+The terminal keeps normal scrollback and a bounded horizontal composer. `/details` shows sanitized activity identity/arguments and timing; retained process content is available through artifacts. In-place status shows run elapsed time; process transitions retain append-only summaries. Display previews do not reduce the model's original tool results; context compaction handles that separately.
 
 ### Scope and user-visible behavior
 
@@ -13,7 +62,22 @@ Updated: 2026-10-09
 3. Let Escape cancel active work while preserving question/review semantics and recovery guarantees.
 4. Accept additional prompts while the agent works and start them in order immediately after the preceding prompt completes.
 
-Keep serial dispatch, ChatGPT account sign-in, the provider abstraction, Work/Plan workflows, Inspect/Edit/Execute permissions, checkpoints, durable questions, and Windows process ownership. Do not add mid-request steering, parallel agents, process reattachment, or a background daemon. Future implementation ends with verification and refresh of the existing local Windows publish folder; no commit or public release is included.
+Keep serial dispatch, ChatGPT account sign-in, the provider abstraction, Work/Plan workflows, Inspect/Edit/Execute permissions, checkpoints, durable questions, and Windows process ownership. Do not add mid-request steering, parallel agents, process reattachment, or a background daemon. Delivery ends with verification and refresh of the existing local Windows publish folder; no commit or public release is included.
+
+### Final verification and local delivery — 2026-10-09
+
+Release verification: **131 passed, 0 failed** (97 core/runtime/tool tests and 34 CLI/terminal/integration tests). The CLI integration suite was rerun after the final process-details display adjustment and all 34 passed. Build and self-contained Windows publish succeeded. Updated executable: `artifacts/publish/win-x64/smith.exe`.
+
+Additional live gates passed:
+
+- Review conversation `e031af561b654614b94fd5fdaa840bc3`: queued input waited for explicit implementation review, the approved workflow ran first, then the follow-up completed. Exit code 0.
+- Crash conversation `76a7f64af7d748e0ad91272853ee9d78`: killed a test CLI after dispatch and process launch. Its owned child exited, the side-effect marker contained exactly one line, and restarted inspection/abandonment issued no tool calls. The remaining prompt stayed queued.
+- Published restart recovered the compaction snapshot and artifact registry without a new run or tool replay. Published no-color output contained no ANSI escapes; `/details #1` showed the launch command and stored call timing.
+- Structured live verification reported **4 passed, 0 failed**, build/test exit codes 0, and confirmed process termination. Undo and unrelated-file hash checks passed.
+
+Acceptance found and fixed two integration bugs: Windows' synchronous implementation of console `ReadLineAsync` could delay a decision transition, and a workflow-generated implementation prompt could mistakenly enter the ordinary FIFO. Both have dedicated regression tests. Redirected reads now use one persistent reader task; explicit plan continuation takes priority over queued user prompts.
+
+Evidence: `artifacts/continuity-release-tests.txt`, `continuity-integration-final.txt`, `continuity-publish.txt`, `continuity-plan-review-summary.json`, `continuity-crash-summary.json`, `continuity-crash-restart.jsonl`, `continuity-escape-summary.json`, `continuity-published-restart.jsonl`, and `continuity-published-text.txt`. All evidence and disposable fixtures remain ignored. No commit, remote repository change, or public publication was made.
 
 ### 1. Readable tool activity and bounded output
 
@@ -40,7 +104,7 @@ Coalesce process chunks into logical lines per stream, retaining partial lines a
 
 Default compact preview budget: 20 lines or 4 KiB per tool result, whichever is reached first. For larger results show head/tail excerpts with an explicit omitted count and an artifact reference/cursor; preserve error state, exit code, and truncation outside that budget. Detailed artifact access provides the retained content within existing bounds. This display budget does not change process retention or tool-result protocol limits.
 
-Proposed local commands: `/display compact|verbose` and `/details <call-id>` (also accept an unambiguous process alias). Verbose exposes bounded call/result details and empty polls without changing execution. `/tasks` continues to show the complete plan; normal activity shows only changed task descriptions. JSON retains structured data with additive, documented event fields. Old saved events without argument summaries still render safely.
+Local commands: `/display compact|verbose` and `/details <call-id>` (also accept an unambiguous process alias). Verbose exposes bounded call/result details and empty polls without changing execution. `/tasks` continues to show the complete plan; normal activity shows only changed task descriptions. JSON retains structured data with additive, documented event fields. Old saved events without argument summaries still render safely.
 
 Example layout (illustrative command):
 
@@ -61,7 +125,7 @@ Extract the existing inline context assembly from `AgentRunner` into a testable 
 Budget policy:
 
 - Count instructions, available tool schemas, approved scope/current tasks, the current request, unresolved state, summaries, and retained exchanges. Pending queue text is not model context until dispatched.
-- Initially use the existing conservative 120,000-character guard, explicitly labeled as an estimate. Trigger automatically at 80% and aim for at most 60% after compaction, leaving headroom for responses and tool results. These thresholds are proposed defaults to validate, not token limits or provider guarantees. Use validated model metadata/token accounting when available without equating character counts with tokens.
+- Initially use the existing conservative 120,000-character guard, explicitly labeled as an estimate. Trigger automatically at 80% and aim for at most 60% after compaction, leaving headroom for responses and tool results. These thresholds are the shipped defaults, not token limits or provider guarantees. Use validated model metadata/token accounting when available without equating character counts with tokens.
 - Run only at a protocol-safe boundary before the next model request, after completed response items and tool results have been persisted. Never split required call/result groups or opaque continuation groups. Defer while an unresolved call/review is awaiting resolution; if no valid boundary exists, pause rather than drop required state.
 - Keep the active user request, recent complete exchanges, unresolved questions/reviews, current plan and approval ceiling, pending/recovery operations, and active process/artifact references. Load authoritative permission and plan state from storage on every request. A file hash in a summary is historical evidence; editing still requires a fresh read.
 - Summarize older completed exchanges into goal, decisions, constraints, observed work and verification, unresolved issues, and source references. Distinguish user instructions, project/tool data, and assistant conclusions; do not promote quoted content into instructions. Summaries cannot approve a plan, answer a question, change permissions, or mark verification successful.
@@ -70,7 +134,7 @@ Budget policy:
 
 Persist a completed summary and its source boundary transactionally before activating it. Interrupted, malformed, empty, or over-budget summaries never replace the prior context. A failed attempt leaves history intact and pauses with a reason and retry path; credentials/access/network failures remain explicit. Compaction can run during Work or Plan but cannot use workspace/process tools.
 
-Emit `context.compaction.started`, `context.compaction.completed`, and `context.compaction.failed` with reason, source range, estimated sizes, duration, and available usage. Display one compact notice. Extend `/context` to show active summary provenance and retained context. Proposed `/compact` requests the same operation while idle or paused at a context limit; it does not resume unfinished work or resolve pending decisions. Automatic compaction before the next request needs no additional approval.
+Emit `context.compaction.started`, `context.compaction.completed`, and `context.compaction.failed` with reason, source range, estimated sizes, duration, and available usage. Display one compact notice. Extend `/context` to show active summary provenance and retained context. `/compact` requests the same operation while idle or paused at a context limit; it does not resume unfinished work or resolve pending decisions. Automatic compaction before the next request needs no additional approval.
 
 ### 3. One input owner and Escape cancellation
 
@@ -80,13 +144,13 @@ During active inference, tool work, or compaction, Escape requests cancellation 
 
 Escape in a question or plan-review picker leaves that decision pending, with no default answer or approval; preserve the existing rule that unsent picker notes are discarded. With no active run, Escape may dismiss a transient view but does not exit or submit/clear the composer. Escape during an active run preserves both the unsent follow-up draft and already submitted queue items. Key autorepeat must not cancel a subsequent run accidentally. Queued work is held after cancellation until explicit continuation.
 
-Redirected input has no physical Escape semantics: retain Ctrl+C signal handling and define `/cancel` as a local control in line-oriented chat input. Literal escape characters in pasted/redirected text must not act as key presses. Unknown slash commands remain local errors. Single-request `smith run` retains its existing exit semantics and does not become an interactive queue consumer.
+Redirected input has no physical Escape semantics: retain Ctrl+C signal handling and use `/cancel` as a local control in line-oriented chat input. Literal escape characters in pasted/redirected text must not act as key presses. Unknown slash commands remain local errors. Single-request `smith run` retains its existing exit semantics and does not become an interactive queue consumer.
 
 ### 4. Durable FIFO prompt queue
 
 Keep a composer visible while a run is active. Submitting a nonempty prompt with Enter persists a queue item and displays its ID, position, and a bounded preview. Typing without submission remains a local draft. Queue items are user-authored follow-up requests, not tool calls, live steering, answers, or plan approvals.
 
-Proposed limits: 20 pending prompts and 32 KiB UTF-8 per prompt; reject excess visibly without discarding the composer. Persist ID, conversation, ordered sequence, submitted text/time, status, and eventual run ID. States are Pending, Dispatched, Completed, and Removed; queue-level hold reasons describe cancellation, failure, limits, decisions, recovery, and restart. A run's failure/cancellation remains on its linked record and does not requeue it automatically.
+Queue limits: 20 pending prompts and 32 KiB UTF-8 per prompt; reject excess visibly without discarding the composer. Persist ID, conversation, ordered sequence, submitted text/time, status, and eventual run ID. States are Pending, Dispatched, Completed, and Removed; queue-level hold reasons describe cancellation, failure, limits, decisions, recovery, and restart. A run's failure/cancellation remains on its linked record and does not requeue it automatically.
 
 Dispatch rules:
 
@@ -100,15 +164,15 @@ Dispatch rules:
 
 Append the queued user message to model history and create/link its run in the same transaction that claims the queue item. This prevents a crash from turning one submitted item into duplicate runs; uncertain external effects still follow normal recovery, not an exactly-once guarantee. If arrival races with completion, the serialized owner either dispatches it immediately while idle or takes it after the current run, preserving FIFO order.
 
-Answers and review decisions use their existing durable IDs and focused input flow. A pending queue item must never be consumed as an answer, even if it contains `implement execute`. Choosing Implement can create its existing workflow-linked implementation run; queued follow-ups wait until that workflow finishes. For redirected chat, use explicit `/answer <question-id> <text>` and `/review <review-id> <decision>` while a queue is active, rather than treating unread stdin lines as implicit answers. Preserve ordinary idle line input and document this distinction.
+Answers and review decisions use their existing durable IDs and focused input flow. A pending queue item must never be consumed as an answer, even if it contains `implement execute`. Choosing Implement can create its existing workflow-linked implementation run; queued follow-ups wait until that workflow finishes. For redirected chat, use explicit `/answer <question-id> <text>` and `/review <review-id> <decision>` after concurrent chat input begins or a queue exists, rather than treating unread stdin lines as implicit answers. Preserve ordinary idle line input and document this distinction.
 
-Proposed commands: `/queue` lists pending items and hold state; `/queue remove <id>` and `/queue clear` remove only pending items; `/queue continue` resumes dispatch when barriers are resolved. `/cancel` cancels the active run without deleting queued items. Do not add editing/reordering in the first slice. Slash commands execute locally or return a clear busy error; they are never silently queued as model prompts. Mutating commands such as `/undo`, `/mode`, and `/plan new` require an idle transition; read-only status/queue controls and cancellation remain usable while busy. Explicit `/paste` mode continues to permit literal slash-prefixed prompts.
+Queue commands: `/queue` lists pending items and hold state; `/queue remove <id>` and `/queue clear` remove only pending items; `/queue continue` resumes dispatch when barriers are resolved. `/cancel` cancels the active run without deleting queued items. Do not add editing/reordering in the first slice. Slash commands execute locally or return a clear busy error; they are never silently queued as model prompts. Mutating commands such as `/undo`, `/mode`, and `/plan new` require an idle transition; read-only status/queue controls and cancellation remain usable while busy. Explicit `/paste` mode continues to permit literal slash-prefixed prompts.
 
 The scheduler remains inside the current CLI instance and holds the existing exclusive conversation lease. Process sessions can outlive a completed prompt within that instance under existing rules; the queue does not promise that all background processes have exited. It does not introduce a daemon. JSON adds `prompt.queued`, `prompt.dispatched`, `prompt.removed`, and `queue.held` events with stable IDs; display coalescing never drops durable events.
 
 ### 5. Storage and implementation order
 
-Plan schema v4 with a SQLite-consistent v3 backup and a transactional migration. Preserve conversation IDs, workflows, permissions, history, reviews, call IDs, journals, and artifact references. Add context snapshots/lineage, compaction attempt receipts, queue items/run links, and stable activity aliases. Existing sessions start with no summary or queued prompts. Recovery can reuse a committed summary and a claimed queue item but never repeat a dispatched run automatically.
+Schema v4 with a SQLite-consistent v3 backup and a transactional migration. Preserve conversation IDs, workflows, permissions, history, reviews, call IDs, journals, and artifact references. Add context snapshots/lineage, compaction attempt receipts, queue items/run links, and stable activity aliases. Existing sessions start with no summary or queued prompts. Recovery can reuse a committed summary and a claimed queue item but never repeat a dispatched run automatically.
 
 1. Add typed activity summaries, task descriptions, process aliases, bounded previews, chunk-aware stream formatting, and compact/verbose rendering.
 2. Add v4 persistence and extract context assembly; implement compaction with failure/restart tests before enabling its automatic trigger.
@@ -262,7 +326,7 @@ Real browser sign-in, account-specific model discovery, file-tool inference, and
 
 ## Remaining boundaries
 
-Windows is the supported release platform. LM Studio, API-key access, Roslyn, browser/web tools, MCP/plugins, desktop UI, and full terminal emulation remain deferred. Automatic compaction, improved activity display, active-run Escape cancellation, and queued follow-ups are planned above but are not in the delivered build. Current context uses bounded character accounting and pauses rather than automatically compacting. Mid-request steering and cross-instance process control are not included in the next milestone either.
+Windows is the supported release platform. LM Studio and bounded worker delegation are implemented in the newer milestone above. API-key access, Roslyn, browser/web tools, MCP/plugins, desktop UI, and full terminal emulation remain deferred. Automatic compaction, improved activity display, active-run Escape cancellation, and queued follow-ups are implemented above. Context still uses estimated character accounting and pauses when required context cannot be compacted safely. Mid-request steering and cross-instance process control remain outside this milestone.
 
 Persistence uses a versioned aggregate with transactional projections; large-history optimization remains future work. File boundaries do not defend against an adversarial process racing filesystem changes. Process logs and conversations can contain workspace/user data. Checkpoints do not roll back commands.
 

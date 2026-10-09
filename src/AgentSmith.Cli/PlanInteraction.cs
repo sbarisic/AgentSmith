@@ -23,14 +23,14 @@ internal sealed partial class CliApp
         {
             if (Planning.Active(session)?.PendingReview is not null) return;
             if (Unfinished(session)) throw new UserFacingException("Finish or explicitly abandon the current run before reviewing a plan.");
-            await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan; Planning.Submit(session);
+            await Agents.StopAllAsync(session.Id); await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan; Planning.Submit(session);
             Store.Save(session, new("plan.submitted", session.Id, null, new { session.ActivePlanId })); return;
         }
         if (verb is not ("new" or "revise") || string.IsNullOrWhiteSpace(note)) throw new UserFacingException("Usage: /plan new <task>, show, revise <note>, implement, or leave.");
         if (verb == "revise" && Planning.Active(session)?.PendingReview is { } review)
         { ResolveReview(session, review.Id, "revise", note); return; }
         if (Unfinished(session)) throw new UserFacingException("Finish or explicitly abandon the current run before changing workflows.");
-        await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan;
+        await Agents.StopAllAsync(session.Id); await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan;
         session.PendingPlanPrompt = null;
         if (verb == "new") session.ActivePlanId = null;
         else if (Planning.Active(session) is { } active) active.State = "Draft";
@@ -64,9 +64,15 @@ internal sealed partial class CliApp
             var chooseMode = review.Stage == "Mode";
             var question = new Question { Id = review.Id, Text = chooseMode ? "Choose implementation permissions explicitly." : "Review this saved plan. Implementation requires your explicit selection.", Choices = chooseMode ? ["Edit", "Execute"] : ["Implement", "Revise", "Keep planning"] };
             Write("plan.review.pending", new { review.Id, review.Revision, review.Stage, question.Text, question.Choices, responses = "implement edit | implement execute | revise <note> | keep planning" });
-            var answer = !json && QuestionPrompt.IsInteractive ? await QuestionPrompt.ReadAsync(question, color, ct) : await ReadInput(ct);
+            var answer = !json && QuestionPrompt.IsInteractive ? await QuestionPrompt.ReadAsync(question, color, ct, input.ReadKeyAsync) : await ReadInput(ct);
             if (answer is null || answer.Trim() == "/exit") return false;
             if (string.IsNullOrWhiteSpace(answer)) continue;
+            if (!input.Interactive && (decisionRequiresAddress || Store.Queue(session.Id).Items.Count > 0))
+            {
+                var prefix = "/review " + review.Id + " ";
+                if (answer.StartsWith(prefix, StringComparison.Ordinal)) answer = answer[prefix.Length..];
+                else { if (answer.StartsWith('/')) await HandleCommand(answer, session); else Write("error", new { message = "Use /review " + review.Id + " <decision>; queued input cannot approve a plan." }); continue; }
+            }
             if (answer.TrimStart().StartsWith('/')) { await HandleCommand(answer, session); continue; }
             var pieces = answer.Split("\n\nNote: ", 2, StringSplitOptions.None); var choice = pieces[0].Trim(); var note = pieces.Length > 1 ? pieces[1] : "";
             try

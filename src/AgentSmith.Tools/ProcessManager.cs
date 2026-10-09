@@ -8,7 +8,7 @@ namespace AgentSmith.Tools;
 public sealed class ProcessManager : IDisposable
 {
     public string OwnerId { get; } = Guid.NewGuid().ToString("N");
-    private readonly Dictionary<string, Owned> children = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Owned> children = new();
     private sealed class Owned
     {
         public required WindowsChild Child;
@@ -44,6 +44,7 @@ public sealed class ProcessManager : IDisposable
     {
         if (call.Name != "process_start")
         {
+            args["processId"] = AgentSmith.Core.Activity.ProcessId(ctx.Session, args["processId"]!.GetValue<string>());
             Find(ctx, args["processId"]!.GetValue<string>());
             if (call.Name == "process_poll" && (args["cursor"]!.GetValue<long>() < 0 || args["waitMilliseconds"]!.GetValue<int>() is < 0 or > 10000)) throw new UserFacingException("Invalid output cursor or poll wait.");
             if (call.Name == "process_input" && args["text"]!.GetValue<string>().Length > 32768) throw new UserFacingException("Input exceeds 32 KiB.");
@@ -61,7 +62,7 @@ public sealed class ProcessManager : IDisposable
             var name = item!["name"]!.GetValue<string>(); var value = item["value"]!.GetValue<string>();
             if (name.Length == 0 || name.Contains('=') || name.Contains('\0') || value.Contains('\0')) throw new UserFacingException("Invalid environment variable.");
         }
-        var record = new ProcessRecord { OwnerId = OwnerId, RunId = ctx.Run.Id, Executable = args["executable"]!.GetValue<string>() };
+        var record = new ProcessRecord { DisplayNumber = ctx.Session.Processes.Select(p => p.DisplayNumber).DefaultIfEmpty().Max() + 1, OwnerId = OwnerId, RunId = ctx.Run.Id, Executable = args["executable"]!.GetValue<string>() };
         record.LogPath = Path.Combine(ctx.ArtifactDirectory, record.Id + ".jsonl");
         ctx.Session.Processes.Add(record);
         return new(args.ToJsonString(), record.Id);
@@ -82,7 +83,7 @@ public sealed class ProcessManager : IDisposable
             catch { log.Dispose(); record.State = "Failed"; record.Reason = "Launch failed before execution."; record.TerminationConfirmed = true; ctx.Store.SaveProcess(ctx.Session.Id, record); throw; }
             var owned = new Owned { Child = child, Record = record, SessionId = ctx.Session.Id, Output = Task.CompletedTask, Error = Task.CompletedTask, Monitor = Task.CompletedTask,
                 Log = log };
-            children.Add(record.Id, owned); record.State = "Running";
+            if (!children.TryAdd(record.Id, owned)) throw new UserFacingException("Process identity already exists."); record.State = "Running";
             owned.Output = Task.Run(() => Drain(owned, child.Output, "stdout"));
             owned.Error = Task.Run(() => Drain(owned, child.Error, "stderr"));
             var seconds = args["timeoutSeconds"]!.GetValue<int>();
@@ -98,7 +99,7 @@ public sealed class ProcessManager : IDisposable
             if (process.Monitor.IsCompleted) throw new UserFacingException("Process has exited.");
             await process.Child.Input.WriteAsync(args["text"]!.GetValue<string>()).WaitAsync(ctx.Cancellation);
             if (args["closeStdin"]!.GetValue<bool>()) process.Child.Input.Close();
-            return new(Json.Serialize(new { processId = process.Record.Id, inputDelivered = true }));
+            return new(Json.Serialize(new { processId = process.Record.Id, alias = "#" + process.Record.DisplayNumber, state = "Input delivered", inputDelivered = true }));
         }
         if (call.Name == "process_stop") { await Stop(process, "Stopped by user or agent."); return Snapshot(ctx, process, process.Sequence); }
         var cursor = args["cursor"]!.GetValue<long>();
@@ -166,7 +167,7 @@ public sealed class ProcessManager : IDisposable
             foreach (var chunk in owned.Chunks.Where(c => c.Cursor > cursor))
             { var bytes = Encoding.UTF8.GetByteCount(Json.Serialize(chunk)); if (size + bytes > 28000) break; chunks.Add(chunk); size += bytes; }
             var nextCursor = chunks.Count > 0 ? chunks[^1].Cursor : cursor;
-            payload = new { processId = owned.Record.Id, state = owned.Record.State, exitCode = owned.Record.ExitCode, reason = owned.Record.Reason, durationMilliseconds = owned.Record.TerminationConfirmed ? owned.Record.DurationMilliseconds : owned.Timer.Elapsed.TotalMilliseconds, owned.Record.TerminationConfirmed, owned.Record.Truncated, logPath = owned.Record.LogPath, cursor = nextCursor, hasMoreOutput = nextCursor < owned.Sequence, output = chunks };
+            payload = new { processId = owned.Record.Id, alias = "#" + owned.Record.DisplayNumber, state = owned.Record.State, exitCode = owned.Record.ExitCode, reason = owned.Record.Reason, durationMilliseconds = owned.Record.TerminationConfirmed ? owned.Record.DurationMilliseconds : owned.Timer.Elapsed.TotalMilliseconds, owned.Record.TerminationConfirmed, owned.Record.Truncated, logPath = owned.Record.LogPath, cursor = nextCursor, hasMoreOutput = nextCursor < owned.Sequence, output = chunks };
         }
         ctx.Save("process.observed", new { owned.Record.Id });
         return new(Json.Serialize(payload));
