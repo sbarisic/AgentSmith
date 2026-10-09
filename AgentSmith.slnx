@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AgentSmith.BuildLogger/AgentSmith.BuildLogger.csproj" />
+    <Project Path="src/AgentSmith.Cli/AgentSmith.Cli.csproj" />
+    <Project Path="src/AgentSmith.Core/AgentSmith.Core.csproj" />
+    <Project Path="src/AgentSmith.OpenAI/AgentSmith.OpenAI.csproj" />
+    <Project Path="src/AgentSmith.Runtime/AgentSmith.Runtime.csproj" />
+    <Project Path="src/AgentSmith.Storage/AgentSmith.Storage.csproj" />
+    <Project Path="src/AgentSmith.Tools/AgentSmith.Tools.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AgentSmith.ProcessFixture/AgentSmith.ProcessFixture.csproj" />
+    <Project Path="tests/AgentSmith.IntegrationTests/AgentSmith.IntegrationTests.csproj" />
+    <Project Path="tests/AgentSmith.Tests/AgentSmith.Tests.csproj" />
+  </Folder>
+</Solution>

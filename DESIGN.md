@@ -1,8 +1,20 @@
 # AgentSmith: idea and implementation plan
 
-Status: initial design draft for discussion; no application has been implemented.
+Status: the CLI supports inspection, checkpointed edits, process execution, recovery, a separate Plan workflow, durable task tracking, artifact access, and structured .NET verification. Live acceptance details are maintained in the CLI implementation plan. The broader architecture below remains a roadmap.
 
 Created: 2026-10-09
+
+Updated: 2026-10-09. Next milestone: readable activity, automatic context compaction, Escape cancellation, and queued follow-up prompts. These are planned features; the delivered status below is unchanged.
+
+## Current milestone: Plan, Track, and Verify
+
+The implementation uses ChatGPT account OAuth only. It includes streamed text, a serial C# model/tool loop, a capability registry, Inspect/Edit/Execute modes, checkpointed file tools, curated Git inspection, owned process sessions, durable questions, SQLite conversations, resume, cancellation, and protected Windows credentials. New conversations default to Execute; legacy conversations migrate to Inspect. See [README](README.md) for usage and verification and [CLI implementation plan](CLI_IMPLEMENTATION_PLAN.md) for delivery status.
+
+Plan is a workflow, not a fourth permission level. It permits investigation and internal task updates but blocks workspace/process effects. A persisted Implement/Revise/Keep planning decision waits for explicit input; implementation additionally requires Edit or Execute selection. Routine progress preserves approved scope, while scope changes return to review. Schema v3 adds plans, revisions, receipts, artifacts, and verification results without changing existing permissions. .NET builds use an MSBuild logger and VSTest runs use retained TRX reports.
+
+LM Studio, API-key access, desktop UI, extensions, and automatic publishing remain deferred. Automatic compaction has moved into the next planned CLI milestone, alongside readable activity, Escape cancellation, and queued follow-ups; none of those changes is implemented by this documentation update. The provider-neutral `IModelClient` remains the extension point. File-tool undo checks recorded result hashes and preserves newer work. Execute runs as the Windows user, not in an OS sandbox; its process trees die with the CLI. Checkpoints do not cover process side effects. There is no public publication or automatic commit step.
+
+The [next CLI milestone](CLI_IMPLEMENTATION_PLAN.md#planned-milestone-readable-long-running-conversations) is the detailed delivery and acceptance specification. The [README](README.md#planned-readable-long-running-conversations) separates current commands from proposed controls. The architecture additions below describe that plan without claiming new runtime behavior.
 
 ## 1. The idea
 
@@ -24,7 +36,7 @@ The longer-term direction is broader personal and technical work: documents, loc
 - We build our own agent engine.
 - ChatGPT/OpenAI provides the driving model capability.
 - Codex CLI and the ChatGPT desktop experience are reference points.
-- This document develops the idea and plan before implementation.
+- This document records the architecture and future plans; delivered behavior is identified separately.
 
 ### Proposed defaults, still open to revision
 
@@ -35,7 +47,7 @@ The longer-term direction is broader personal and technical work: documents, loc
 - Use SQLite for structured persistence and separate files for larger artifacts.
 - Start with one agent and serial tool execution.
 - Make authentication and model selection explicit rather than hard-coding one account route or model name.
-- Select the .NET version and UI framework at the implementation milestone after checking their current support and project needs.
+- The CLI now targets .NET 10 and pins SDK 10.0.401. Select the desktop UI framework in a later milestone.
 
 These are design proposals, not additional user requirements.
 
@@ -61,7 +73,7 @@ Present a file edit as a diff, a command as captured output and an exit status, 
 
 Adding a local capability should mean implementing a small tool contract. The engine supplies validation, policy checks, cancellation, event recording, and result handling. External MCP servers can later join through an adapter.
 
-## 4. First release scope
+## 4. Broader coding-release scope (after the read-only foundation)
 
 The first useful release should support:
 
@@ -130,6 +142,8 @@ Keep these boundaries practical. A small implementation may initially combine pr
 | Artifact | File, diff, or output produced or referenced by a run |
 | Memory entry | Durable knowledge with scope, source, and review state |
 | Event | Ordered observation used for persistence and UI updates |
+| Context snapshot (planned) | Bounded summary and retained-history projection with source provenance; never a replacement for source history |
+| Queued prompt (planned) | Durable user request awaiting one serial run, separate from answers and approval decisions |
 
 Initial conceptual interfaces:
 
@@ -159,6 +173,8 @@ For each user request:
 9. Return the correctly associated tool results to the model.
 10. Continue until the model finishes, the user interrupts, input is required, a budget is reached, or a failure prevents continuation.
 
+Planned additions: before step 4, compact eligible older context when the request reaches its trigger, using a tools-disabled model request and a transactionally saved snapshot. After a run reaches Completed and its result is persisted, dispatch the next queued prompt as a new run. Questions, reviews, cancellation, failures, paused limits, and recovery are explicit barriers; finishing a single model step does not release the queue.
+
 OpenAI function calling supplies the request/result mechanism; AgentSmith performs the local execution and controls continuation. See [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling).
 
 ### Rules the runtime must enforce
@@ -172,9 +188,9 @@ OpenAI function calling supplies the request/result mechanism; AgentSmith perfor
 - Distinguish a finished assistant turn from independently verified task success.
 - Begin with serial tools. Add parallel reads only after dependency and resource ownership rules exist.
 
-## 8. Model integration and authentication
+## 8. Model integration and authentication roadmap
 
-“ChatGPT-powered” has two possible account routes. The runtime should share a model adapter while preserving the differences in authentication and available features.
+The current implementation supports ChatGPT account sign-in only. Direct API credentials are a future route; the following comparison remains architectural context.
 
 | Route | Intended use | Design consequence |
 | --- | --- | --- |
@@ -196,7 +212,7 @@ Implementation approach:
 - Handle expiration, revoked access, rate limits, and interrupted streams explicitly.
 - Never silently switch account routes or change the model to recover from failure.
 
-Authentication availability is an early feasibility check, not a capability already demonstrated in this project. No credentials are needed to develop this document or the deterministic test harness.
+Authentication and live inference have passed for the tested account/model route; the CLI implementation plan records the evidence. Broader account eligibility remains route-dependent. Synthetic credentials remain sufficient for deterministic tests.
 
 ## 9. Context and memory
 
@@ -206,7 +222,9 @@ Start with application instructions, the user's current request, applicable proj
 
 Each request gets a context manifest containing source references, inclusion reasons, hashes or versions where useful, and estimated size. Preserve the actual replayable protocol history locally, with credential filtering and explicit retention controls.
 
-When context becomes too large:
+The current implementation pauses above its conservative 120,000-character context guard. The next milestone replaces that hard stop where possible with automatic compaction before the next request. Proposed initial defaults trigger at 80% and target at most 60% of that guard; these are character estimates, not an advertised model token capacity.
+
+When compacting context:
 
 - Keep the current request and unresolved questions intact.
 - Preserve complete tool-call/result relationships.
@@ -214,6 +232,12 @@ When context becomes too large:
 - Summarize older material with provenance and record that summarization happened.
 - Reserve room for the response and subsequent tool results.
 - Show uncertainty in token estimates rather than pretending they are exact usage.
+
+Preserve the immutable local history and construct a separate request projection containing a provenance-linked summary plus recent complete exchanges. Keep the active request, approved plan scope and permission ceiling, task state, pending questions/reviews, recovery state, and active process/artifact references. Rebuild authoritative state from storage, not from summary text. Queued prompts enter context only when dispatched. File hashes from old exchanges do not replace fresh reads before mutation.
+
+Use ordinary model requests with tools disabled behind `IModelClient`; do not depend on an unverified hosted compaction endpoint. Bound summary inputs through protocol-complete chunks and a bounded merge. Preserve required call/result and opaque continuation groups; compact only at safe boundaries after persisted results. Record source ranges/hashes, summary lineage, model/prompt version, estimated sizes, and available usage. Treat quoted source content as evidence, not new authority. A summary cannot grant permission, approve a plan, answer a question, or turn unverified work into success.
+
+Activate a snapshot only after durable validation and commit. Failure or cancellation retains the previous projection and all source records. If mandatory context cannot fit, pause with a recoverable explanation. Limit retries per unchanged source boundary and include compaction in active time/cancellation accounting. Do not reset step/time budgets. `/context` will expose summary provenance; proposed `/compact` allows an idle or context-paused request without automatically resuming unfinished work. This is conversation compaction, separate from durable memory extraction.
 
 Memory is separate from conversation history. Begin with explicit project notes. Later entries can record preferences, decisions, and stable facts with their source, scope, timestamp, and review status. Model-generated suggestions should not silently become authoritative memory. Users can inspect, edit, and delete entries.
 
@@ -253,6 +277,20 @@ Store the reason for a pause or failure separately. Waiting on the model or a pr
 
 Propagate cancellation to requests and tools. Stop owned process trees where supported, collect final output, and report the observed result. Cancellation cannot undo changes already made or guarantee that external effects were prevented.
 
+Planned: one input coordinator owns the composer, key events, paste mode, and pickers while runtime work continues asynchronously. Escape during active work follows Ctrl+C's cancellation path, including inference, processes, and compaction. Show cancellation progress until cleanup and persistence finish; uncertain effects remain RecoveryRequired. Escape does not exit the CLI, delete queued prompts, or discard the unsent follow-up draft. Repeated key events cannot spill into the next run.
+
+Question/review focus takes precedence: Escape leaves that durable decision pending and never submits an answer or approval. Redirected/pasted escape characters are text, not key events; line-oriented chat can use proposed `/cancel`. Existing picker rules and indefinite waits remain unchanged.
+
+### Queued follow-up prompts (planned)
+
+Accept explicit submissions during work into a bounded, durable FIFO queue. Show an acknowledgement and keep the composer available. Dispatch one prompt as a new run immediately after the preceding run's Completed result is saved; do not inject it into the in-flight model request. Turn completion remains distinct from independently verified task success.
+
+Queue items have stable identity/order, text, submission time, state, and run linkage. Claiming an item, appending its user message to history, and creating the linked run must be one transaction under the conversation lease. An item already dispatched never becomes a new run merely because the CLI restarted. External effects retain their existing recovery guarantees and uncertainties.
+
+Questions and plan reviews block queue dispatch and require explicitly addressed answers/decisions. Cancellation, failure, a paused limit, recovery, and restart hold queued work until explicit continuation. EOF retains submitted items but cannot submit a draft. Current workflow and permissions are checked when each item starts; queue submission cannot authorize a higher mode or approve a draft. Workflow-linked implementation runs take precedence over queued follow-ups until that workflow completes.
+
+Proposed `/queue`, `/queue remove <id>`, `/queue clear`, and `/queue continue` manage pending requests only. Commands remain local, with a clear busy response where they require an idle state; unknown commands never reach the model. Redirected chat must distinguish addressed question/review input from queued prompts. No concurrent agent runs, live steering, process daemon, or implicit approval is added. `smith run` stays a single-request command.
+
 ### Crash recovery
 
 Persist intent before a tool starts and its result after it finishes. A crash between the effect and the result leaves an uncertain outcome. On restart, reconcile it where possible; otherwise report it and require a deliberate recovery decision. Do not automatically retry a mutating tool just because its result is missing.
@@ -275,11 +313,19 @@ Track duration, reported token usage, tool failures, retries, and context size. 
 
 Conversation replay reconstructs the UI and supports debugging. It must not rerun tools. Restoring a file checkpoint is a separate action and cannot undo arbitrary external effects.
 
+Planned schema v4 adds context snapshots/lineage, compaction receipts, queued prompts/run links, and stable process display aliases. Use a SQLite-consistent v3 backup and transactional migration; existing sessions start with no summaries or queued items. Compaction commit and queue claim require failure-injection tests. Add structured compaction and queue events without dropping raw activity events when normal display coalesces polls. Input, run transitions, and render events are serialized by the CLI coordinator rather than competing console readers or uncoordinated storage writes.
+
 ## 13. User interfaces
 
 ### CLI first
 
-Provide streaming conversation, readable tool activity, explicit questions, cancellation, model selection, and conversation resume. Keep terminal formatting outside the runtime. A later machine-readable output mode can expose the same event stream.
+The CLI provides streaming conversation, tool activity, explicit questions, Ctrl+C cancellation, model selection, resume, and structured JSON events. Keep terminal formatting outside the runtime.
+
+The next display revision shows a friendly action plus key arguments, such as `Read src/Program.cs · lines 40–120` or `Run dotnet test · process #1`, with normal-contrast command/path text and dim metadata. Task updates show descriptions rather than bare step IDs. Stable short process aliases map to full stored IDs. Call duration, total process duration, and active response time have separate labels.
+
+Compact display suppresses empty unchanged polls, groups logical stdout/stderr lines across chunks, and shows bounded head/tail previews with omitted counts and artifact references. It must still surface errors, truncation, exit codes, and unconfirmed termination. Preserve stream identity without promising exact cross-stream order. Commands/scripts receive bounded argument previews; omit environment values and stdin bodies, redact recognized secrets, and escape terminal controls. This presentation change alone does not shrink the model's tool results.
+
+Proposed `/display compact|verbose` and `/details <call-id>` expose detail without flooding the transcript. The composer stays visible while work runs. One rendering owner coordinates background output and editing; optional in-place progress follows the append-only implementation and has a redirected/no-color fallback. JSON and durable events retain all call/result transitions even when the human transcript coalesces them. Detailed bounds and acceptance tests are in the CLI implementation plan.
 
 Possible commands, subject to revision:
 
@@ -305,13 +351,15 @@ Choose the UI framework after deciding whether Windows integration or cross-plat
 | 1. Engine skeleton | Domain types, run loop, events, cancellation, scripted model adapter | Deterministic tests cover normal completion, tool cycles, malformed calls, failure, and interruption |
 | 2. Read-only assistant | CLI chat, context assembly, list/read/search tools, basic persistence | The agent answers a question using an unfamiliar temporary project and the conversation resumes after restart |
 | 3. Editing and commands | Patch tool, process runner, policy decisions, pending questions, recovery | It changes a small project, runs checks, shows the actual diff, and avoids overwriting a concurrent edit |
-| 4. Dependable local release | Context limits, compaction, usage display, export, recovery hardening | Crash and disconnect tests produce accurate states and never silently repeat uncertain mutations |
+| 4a. Plan, Track, and Verify (delivered) | Plan workflow, durable tasks/reviews, artifact access, structured .NET results | Recorded automated and live acceptance in the CLI implementation plan |
+| 4b. Readable long-running conversations (next, planned) | Argument summaries, bounded activity/output, automatic compaction, Escape cancellation, durable prompt queue | Real long conversation continues after compaction; FIFO prompts run once; cancellation and review barriers survive restart |
+| 4c. Further release hardening | Export, context accounting refinements, recovery hardening | Crash and disconnect tests produce accurate states and never silently repeat uncertain mutations |
 | 5. Desktop client | Shared-runtime graphical interface | A saved CLI conversation opens in the desktop client with matching history and behavior |
 | 6. Extensions | MCP, richer memory, optional background host and specialized tools | Each capability has an explicit permission boundary, lifecycle, and focused acceptance test |
 
 Phases 0 and 1 can overlap through a fake model adapter if live credentials are not available. A live integration remains a release requirement, and its absence must stay visible.
 
-The first implementation slice should be deliberately small: one model connection, one conversation, one harmless local tool, one persisted run, and an end-to-end test. Expand only after that full path works.
+The original implementation slice proved one model connection, a persisted conversation, and a harmless local tool before expanding. Apply the same incremental approach to the next milestone: readable activity, context/persistence, cancellation input coordination, then queued dispatch and integrated acceptance.
 
 ## 15. Verification strategy
 
@@ -329,6 +377,10 @@ High-value scenarios include:
 - A crash after a tool starts produces recovery work rather than blind repetition.
 - Context reduction preserves the current request and required protocol pairs.
 - Resuming or replaying history never re-executes completed tool calls.
+- Compaction preserves source history, approved scope, pending decisions, required protocol groups, and observed verification; an interrupted summary never replaces working context.
+- Escape cancels active work without approving a picker or discarding queued input; process cleanup is independently observed.
+- Queued prompts run in FIFO order after completed turns, never become question answers, and remain held across cancellation, recovery, and restart.
+- Compact rendering suppresses empty polls but retains errors, useful arguments, timing, stream identity, and access to omitted output.
 
 The first live acceptance exercise uses a disposable C# project with a known defect. AgentSmith must inspect it, make the intended change, run meaningful checks, and report the actual result. Verify filesystem changes and process outcomes independently of the assistant's final message.
 
@@ -355,7 +407,7 @@ The engine is ready to expand when these behaviors hold under failures as well a
 
 ## 18. Documentation references
 
-OpenAI integration details were checked on 2026-10-09. Recheck availability and request requirements during Phase 0; the links establish documented behavior, not a successful integration in this repository.
+OpenAI integration details were checked during the 2026-10-09 implementation. The links describe protocol requirements; separate live acceptance evidence is recorded in the CLI implementation plan. This documentation-only roadmap update does not revalidate remote contracts or establish support for a hosted compaction endpoint.
 
 - [Function calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [Sign in with ChatGPT: overview](https://developers.openai.com/siwc/token-sharing-open-source)

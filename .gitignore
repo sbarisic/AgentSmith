@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+artifacts/
+TestResults/
+*.user
+*.db
+*.db-shm
+*.db-wal
+*.dpapi
+.agentsmith/

@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentSmith.Tools/AgentSmith.Tools.csproj" />
+    <ProjectReference Include="../../src/AgentSmith.Storage/AgentSmith.Storage.csproj" />
+  </ItemGroup>
+</Project>
