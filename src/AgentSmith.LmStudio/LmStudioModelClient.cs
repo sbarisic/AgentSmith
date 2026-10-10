@@ -7,7 +7,7 @@ using AgentSmith.OpenAI;
 
 namespace AgentSmith.LmStudio;
 
-public sealed record LocalModel(string Id, string Name, bool Loaded, int? ContextTokens, bool ToolUse);
+public sealed record LocalModel(string Id, string Name, bool Loaded, int? ContextTokens, bool ToolUse, bool Vision = false);
 public sealed class LmStudioModelClient(HttpClient http, ModelConnection connection) : IModelClient
 {
     public static Uri Endpoint(string endpoint)
@@ -26,7 +26,7 @@ public sealed class LmStudioModelClient(HttpClient http, ModelConnection connect
         {
             var loaded = m!["loaded_instances"]?.AsArray();
             return new LocalModel(m["key"]!.ToString(), m["display_name"]?.ToString() ?? m["key"]!.ToString(), loaded?.Count > 0,
-                loaded?.FirstOrDefault()?["config"]?["context_length"]?.GetValue<int>(), m["capabilities"]?["trained_for_tool_use"]?.GetValue<bool>() == true);
+                loaded?.FirstOrDefault()?["config"]?["context_length"]?.GetValue<int>(), m["capabilities"]?["trained_for_tool_use"]?.GetValue<bool>() == true, m["capabilities"]?["vision"]?.GetValue<bool>() == true);
         }).ToArray();
     }
     private void CheckHeaders()
@@ -39,11 +39,11 @@ public sealed class LmStudioModelClient(HttpClient http, ModelConnection connect
         var body = new JsonObject
         {
             ["model"] = request.Model, ["instructions"] = request.Instructions, ["stream"] = true, ["store"] = false,
-            ["max_output_tokens"] = maxOutputTokens,
+            ["max_output_tokens"] = request.MaxOutputTokens ?? maxOutputTokens,
             ["input"] = new JsonArray(request.Input.Select(i => (JsonNode)i.DeepClone()).ToArray())
         };
         if (request.Tools.Count > 0) body["tools"] = new JsonArray(request.Tools.Select(t => (JsonNode)new JsonObject
-        { ["type"] = "function", ["name"] = t.Name, ["description"] = t.Description, ["parameters"] = t.Parameters.DeepClone(), ["strict"] = true }).ToArray());
+        { ["type"] = "function", ["name"] = t.Name, ["description"] = t.Description, ["parameters"] = t.Parameters.DeepClone(), ["strict"] = t.Name != "agent_spawn" }).ToArray());
         return body;
     }
     public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)

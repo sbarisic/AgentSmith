@@ -14,10 +14,11 @@ internal sealed partial class CliApp
     private bool queueInitialized;
     public void PrepareResume(Session session)
     {
-        currentConversation = session.Id; continuous = true; queueInitialized = true;
+        SetConversation(session); continuous = true; queueInitialized = true;
         Store.HoldQueue(session.Id, Store.Queue(session.Id).Items.Any(i => i.State is "Pending" or "Dispatched") ? "Restart: inspect /queue and continue explicitly" : null);
         foreach (var run in session.Runs.Where(r => r.State is RunState.Completed or RunState.Cancelled or RunState.Failed)) Store.SettleQueue(session.Id, run);
     }
+    private readonly Queue<string> addressedDecisions = new();
     private bool exitRequested;
     private bool pasteActive;
     private readonly List<string> pasteLines = [];
@@ -30,18 +31,21 @@ internal sealed partial class CliApp
         if (currentConversation is not null) Store.HoldQueue(currentConversation, "Cancelled");
         Write("run.cancelling", new { message = "Cancelling… Waiting for cleanup and saved outcomes." });
     }
-    private void QueueMessage(Session session, string text)
+    private void QueueMessage(Session session, string text, UserPrompt? rich = null)
     {
         try
         {
-            var item = Store.Enqueue(session.Id, text);
+            var item = rich is null ? Store.Enqueue(session.Id, text) : Store.Enqueue(session.Id, rich);
             var position = Store.Queue(session.Id).Items.Count(i => i.State == "Pending");
             Write("prompt.queued", new { item.Id, position, message = $"Queued #{position} · {item.Id} · {Activity.Clean(text, 100)}" });
         }
-        catch (UserFacingException ex) { input.Restore(text); Write("error", new { message = ex.Message }); }
+        catch (UserFacingException ex) { if (rich is null) input.Restore(text); else input.RestorePrompt(rich); Write("error", new { message = ex.Message, failure = ex.Detail?.Sanitized() }); }
     }
     private async Task BusyInput(Session session, string line)
     {
+        var literal = input.SubmittedLiteral;
+        var rich = TakeSubmittedPrompt();
+        if (literal || rich?.Parts.Any(p => p.Kind == "image") == true) { QueueMessage(session, line, rich); return; }
         if (pasteActive)
         {
             if (line == "/end") { QueueMessage(session, string.Join('\n', pasteLines)); pasteLines.Clear(); pasteActive = false; }
@@ -49,11 +53,19 @@ internal sealed partial class CliApp
             return;
         }
         if (line.Trim() == "/paste") { pasteActive = true; Write("paste", new { message = "Enter lines; /end submits a queued prompt." }); return; }
-        if (!line.TrimStart().StartsWith('/')) { QueueMessage(session, line); return; }
+        if (!line.TrimStart().StartsWith('/')) { QueueMessage(session, line, rich); return; }
         var name = line.Trim().Split(' ', 2)[0].ToLowerInvariant();
+        if (name is "/answer" or "/review")
+        {
+            var saved = Store.Get(session.Id);
+            var valid = name == "/answer" && saved?.Runs.LastOrDefault() is { State: RunState.AwaitingUser, Question: { } q } && line.StartsWith("/answer " + q.Id + " ", StringComparison.Ordinal)
+                || name == "/review" && saved is not null && Planning.Active(saved)?.PendingReview is { } review && line.StartsWith("/review " + review.Id + " ", StringComparison.Ordinal);
+            if (valid) { addressedDecisions.Enqueue(line); return; }
+        }
+
         if (name == "/cancel") { CancelActive(); return; }
         if (name == "/exit") { exitRequested = true; CancelActive(); Store.HoldQueue(session.Id, "CLI exit"); return; }
-        if (name is "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/status" or "/context" or "/tools" or "/tasks" or "/processes" or "/changes")
+        if (name is "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/tasks" or "/processes" or "/changes")
         {
             // Queue storage is independent; other busy reads use a committed snapshot, never the runner's mutable session.
             await HandleCommand(line, Store.Get(session.Id) ?? throw new UserFacingException("Conversation is unavailable.")); return;
@@ -62,6 +74,7 @@ internal sealed partial class CliApp
     }
     private async Task<T> Pump<T>(Session session, Func<CancellationToken, Task<T>> work, CancellationToken ct)
     {
+        attention.Working();
         using var source = CancellationTokenSource.CreateLinkedTokenSource(ct); activeRun = source;
         if (continuous && !input.Interactive) decisionRequiresAddress = true;
         var task = Task.Run(() => work(source.Token), CancellationToken.None);
@@ -72,7 +85,12 @@ internal sealed partial class CliApp
             while (!task.IsCompleted)
             {
                 var second = (int)elapsed.Elapsed.TotalSeconds;
-                if (continuous && second != lastSecond) { lastSecond = second; input.Status = (source.IsCancellationRequested ? "Cancelling" : "Running") + $" · {second}s"; input.Refresh(); }
+                if (continuous && second != lastSecond)
+                {
+                    lastSecond = second;
+                    var pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending");
+                    input.Status = (source.IsCancellationRequested ? "Cancelling" : terminal.RunningStatus) + $" · run {TerminalDuration.Format(TimeSpan.FromSeconds(second), "0")}" + (pendingSteering > 0 ? $" · {pendingSteering} steering pending" : ""); input.Refresh();
+                }
                 if (continuous && !exitRequested)
                 {
                     var next = await input.PollAsync(CancellationToken.None);
@@ -108,6 +126,10 @@ internal sealed partial class CliApp
     }
     private async Task<bool> ContinuityCommand(string name, string args, Session session)
     {
+        if (SteeringCommand(name, args, session)) return true;
+        if (name == "/attach") { if (input.ResumeConfirmation) throw new UserFacingException("Continue the saved work first, then attach an image in the chat composer."); if (args.Length == 0) throw new UserFacingException("Usage: /attach <image path>"); AttachFile(session, args); return true; }
+        if (PolicyCommand(name, args, session)) return true;
+        if (name == "/memory") { MemoryCommand(args, session); return true; }
         if (await AgentCommand(name, args, session)) return true;
         switch (name)
         {
@@ -121,8 +143,9 @@ internal sealed partial class CliApp
             case "/details":
                 var id = args.StartsWith('#') ? Activity.ProcessId(session, args) : args;
                 var call = session.Runs.SelectMany(r => r.Calls).Where(c => c.Id == id || c.Activity?.ProcessId == id || c.Prepared?.OperationId == id).OrderBy(c => c.Name == "process_start" || c.Name.StartsWith("dotnet_", StringComparison.Ordinal) ? 0 : 1).FirstOrDefault() ?? throw new UserFacingException("Unknown call or process alias.");
-                var summary = call.Activity ?? Activity.Describe(session, call);
-                var timing = call.DurationMilliseconds > 0 ? $"Call {call.DurationMilliseconds / 1000:0.000}s" : "Call time not recorded";
+                var summary = call.Name.StartsWith("agent_", StringComparison.Ordinal)
+                    ? Activity.Describe(session, call, Store.Workers(session.Id)) : call.Activity ?? Activity.Describe(session, call);
+                var timing = call.DurationMilliseconds > 0 ? $"Call {TerminalDuration.Format(TimeSpan.FromMilliseconds(call.DurationMilliseconds), "0.000")}" : "Call time not recorded";
                 var resultSummary = "";
                 try
                 {
@@ -153,16 +176,21 @@ internal sealed partial class CliApp
                 Write("queue.status", new { queue.HoldReason, pending = pending.Select(i => new { i.Id, i.Sequence, preview = Activity.Clean(i.Text, 100) }), message = (queue.HoldReason is null ? "Queue ready" : "Queue held: " + queue.HoldReason) + $" · {pending.Length} pending\n" + string.Join('\n', pending.Select(i => i.Id + " · " + Activity.Clean(i.Text, 100))) }); return true;
             case "/compact":
                 if (args.Length > 0 || activeRun is not null || session.Runs.LastOrDefault()?.State is RunState.Running or RunState.AwaitingPlan or RunState.AwaitingUser or RunState.RecoveryRequired) throw new UserFacingException("Use /compact while idle or paused for context, with no pending decision.");
-                if (session.Runs.LastOrDefault() is { State: RunState.Paused } paused && !(paused.Reason?.Contains("context", StringComparison.OrdinalIgnoreCase) == true || paused.Reason?.Contains("compaction", StringComparison.OrdinalIgnoreCase) == true)) throw new UserFacingException("Resolve this pause before compacting.");
+                if (session.Runs.LastOrDefault() is { State: RunState.Paused } paused && paused.PauseReason is not (PauseReason.ContextLimit or PauseReason.CompactionFailed) && !(paused.PauseReason == PauseReason.None && (paused.Reason?.Contains("context", StringComparison.OrdinalIgnoreCase) == true || paused.Reason?.Contains("compaction", StringComparison.OrdinalIgnoreCase) == true))) throw new UserFacingException("Resolve this pause before compacting.");
                 var client = ModelClient(session);
+                var compactTimer = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    var context = await Pump(session, token => new ContextBuilder(Store, client, Agents).PrepareAsync(session, session.Runs.LastOrDefault() ?? new(), e => Write(e.Type, e.Payload), token, true), CancellationToken.None);
+                    var compactRun = session.Runs.LastOrDefault() ?? new(); compactRun.BatchRequests = 0;
+                    using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(session.Execution.MaxMinutes));
+                    var context = await Pump(session, token => new ContextBuilder(Store, client, Agents) { RequestBudget = session.Execution.MaxRequests }.PrepareAsync(session, compactRun, e => Write(e.Type, e.Payload), token, true), deadline.Token);
                     if (session.Runs.LastOrDefault() is { } last) last.ContextManifest = context.Manifest;
                     Store.Save(session, new("context.updated", session.Id, session.Runs.LastOrDefault()?.Id, new { context.Manifest }));
                 }
                 catch (ContextBudgetException ex) { Write("error", new { message = ex.Message }); }
+                catch (RequestLimitException) { Write("error", new { message = "Compaction request budget reached; inspect /limits." }); }
                 catch (OperationCanceledException) { Store.HoldQueue(session.Id, "Compaction cancelled"); }
+                finally { if (session.Runs.LastOrDefault() is { } timedRun) { timedRun.ExecutionMilliseconds += compactTimer.Elapsed.TotalMilliseconds; Store.Save(session, new("context.compaction.timing", session.Id, timedRun.Id, new { milliseconds = compactTimer.Elapsed.TotalMilliseconds })); } }
                 return true;
         }
         return false;

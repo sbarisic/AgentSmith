@@ -5,6 +5,34 @@ namespace AgentSmith.IntegrationTests;
 
 public sealed class TerminalRendererTests
 {
+    [Theory]
+    [InlineData(false, "workflow_read")]
+    [InlineData(true, "workflow_read")]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    public void WorkflowReadsRenderReportsWithOrWithoutASavedRevision(bool saved, string? name)
+    {
+        using var output = new StringWriter();
+        var renderer = new TerminalRenderer(output, false);
+        var content = AgentSmith.Core.Json.Serialize(new
+        {
+            id = "report-1", revision = saved ? 1 : 0, state = "InProgress",
+            task = "Update documentation", targetKind = "changes", target = ".",
+            current = saved ? new { summary = "Read the source", coverage = "README.md", findings = Array.Empty<object>() } : null,
+            drift = Array.Empty<string>(), baseline = (object?)null
+        });
+        renderer.Render("tool.completed", new { name, content, durationMilliseconds = 13 });
+        renderer.Render("text.delta", new { text = "Continuing investigation." });
+        renderer.Render("run.outcome", new { state = "Completed" });
+        var text = output.ToString();
+        Assert.Contains("Report report-1", text);
+        Assert.Contains("revision " + (saved ? 1 : 0), text);
+        Assert.Contains("Update documentation", text);
+        Assert.DoesNotContain("Call completed", text);
+        Assert.Contains("Continuing investigation.", text);
+        Assert.DoesNotContain("Plan report-1", text);
+    }
+
     [Fact]
     public void FragmentedAnswerStaysReadableAndMetadataBecomesASummary()
     {
@@ -81,7 +109,7 @@ public sealed class TerminalRendererTests
         var text = output.ToString();
         Assert.Contains("Question ready  ·  Executed in 3.0s", text);
         Assert.Contains("✓ Done  ·  Executed in 2.0s", text);
-        Assert.Contains("  ╭─ You", text);
+        Assert.Contains("  ┌─ You", text);
         Assert.Contains("  │ Note: For travel", text);
         Assert.DoesNotContain("303.0s", text);
         Assert.False(text.Contains('\u001b'));

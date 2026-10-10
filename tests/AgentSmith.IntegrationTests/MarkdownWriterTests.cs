@@ -50,6 +50,6 @@ public sealed class MarkdownWriterTests
         using var styled = new StringWriter();
         var colored = new MarkdownWriter(styled, true, 80);
         colored.Append("**bold**\n"); colored.Finish();
-        Assert.Contains("\u001b[1mbold\u001b[0m", styled.ToString());
+        Assert.Contains("\u001b[1;92mbold\u001b[0m", styled.ToString());
     }
 }

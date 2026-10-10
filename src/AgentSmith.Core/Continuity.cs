@@ -2,6 +2,7 @@ namespace AgentSmith.Core;
 
 public sealed class ContextSnapshot
 {
+    public string Unit { get; set; } = "characters";
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string? ParentId { get; set; }
     public int Through { get; set; }
@@ -16,12 +17,14 @@ public sealed class ContextSnapshot
 }
 public sealed class CompactionAttempt
 {
+    public string? PolicyIdentity { get; set; }
     public string BoundaryHash { get; set; } = "";
     public string State { get; set; } = "Started";
     public string? Reason { get; set; }
 }
 public sealed class QueuedPrompt
 {
+    public UserPrompt? Prompt { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public long Sequence { get; set; }
     public string Text { get; set; } = "";

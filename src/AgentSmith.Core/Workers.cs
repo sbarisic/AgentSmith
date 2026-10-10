@@ -1,12 +1,24 @@
 namespace AgentSmith.Core;
 
-public enum ModelProvider { ChatGpt, LmStudio }
+public enum ModelProvider { ChatGpt, LmStudio, Local }
+public sealed class WorkerPolicy
+{
+    // Keep the legacy total limit; default local admission to one to avoid contention.
+    public int MaxConcurrent { get; set; } = 2;
+    public int MaxLocalConcurrent { get; set; } = 1;
+    public void Validate()
+    {
+        if (MaxConcurrent is < 1 or > 16 || MaxLocalConcurrent is < 1 or > 16)
+            throw new UserFacingException("Worker limits must each be 1..16. The local limit is also bounded by the total limit.");
+    }
+}
 public sealed class ModelConnection
 {
     public ModelProvider Provider { get; set; }
     public string Endpoint { get; set; } = "http://127.0.0.1:1234";
     public int MaxOutputTokens { get; set; } = 8192;
     public int? LoadedContextTokens { get; set; }
+    public ModelCapabilities Capabilities { get; set; } = new();
 }
 public sealed class WorkerProfile
 {
@@ -26,12 +38,18 @@ public sealed class WorkerRecord
     public string ChildId { get; set; } = "";
     public WorkerProfile Profile { get; set; } = new();
     public string Task { get; set; } = "";
+    public string Purpose { get; set; } = "general";
+    public double WaitingMilliseconds { get; set; }
     public string[] WritePaths { get; set; } = [];
     public string State { get; set; } = "Prepared";
     public bool ReservationsHeld { get; set; }
     public bool Collected { get; set; }
     public string? Report { get; set; }
     public string? Reason { get; set; }
+    public FailureDetail? Failure { get; set; }
+    public int? AppliedCheckpointCount { get; set; }
+    public int? RequestsUsed { get; set; }
+    public int? RequestLimit { get; set; }
     public double DurationMilliseconds { get; set; }
     public string? Usage { get; set; }
     public List<string> RequestUsage { get; set; } = [];

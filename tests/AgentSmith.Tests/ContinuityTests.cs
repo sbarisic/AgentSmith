@@ -44,17 +44,53 @@ public sealed class ContinuityTests
         var builder = new ContextBuilder(store, model, new CountingTools()) { Limit = 30000 };
         await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default));
         Assert.Null(s.ActiveContextId); Assert.Empty(s.ContextSnapshots);
+        Assert.True(builder.RequiresExplicitRetry(store.Get(s.Id)!));
         await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default)); Assert.Single(model.Requests);
         await builder.PrepareAsync(s, new(), _ => { }, default, true); Assert.NotNull(store.Get(s.Id)!.ActiveContextId);
+        Assert.False(builder.RequiresExplicitRetry(store.Get(s.Id)!));
     }
     [Fact]
     public async Task OversizedSummaryAndMandatoryContextPauseWithoutLosingHistory()
     {
         using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store); LongHistory(s);
         var original = ContextBuilder.Hash(s.History);
-        var builder = new ContextBuilder(store, new ScriptedModel([Summary(new string('x', 8001))]), new CountingTools()) { Limit = 30000 };
+        var model = new ScriptedModel([Summary(new string('x', 8001))], [Summary(new string('x', 8001))]);
+        var builder = new ContextBuilder(store, model, new CountingTools()) { Limit = 30000 };
         await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default));
         Assert.Equal(original, ContextBuilder.Hash(s.History)); Assert.Null(s.ActiveContextId);
+        Assert.Equal(2, model.Requests.Count); Assert.True(builder.RequiresExplicitRetry(s));
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OversizedSummaryRetriesSameEvidenceOnceWithoutTruncating(bool streamed)
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store); LongHistory(s);
+        var original = ContextBuilder.Hash(s.History);
+        var model = new ScriptedModel([streamed ? new ModelEvent("text", new string('x', 8001)) : Summary(new string('x', 8001))], [Summary("Verified observations; unresolved task; source records retained.")]);
+        var events = new List<AgentEvent>();
+        var builder = new ContextBuilder(store, model, new CountingTools()) { Limit = 30000 };
+        await builder.PrepareAsync(s, new(), events.Add, default);
+        Assert.Equal(2, model.Requests.Count);
+        Assert.Equal(model.Requests[0].Input[0].ToJsonString(), model.Requests[1].Input[0].ToJsonString());
+        Assert.Contains("2000 characters", model.Requests[1].Instructions);
+        Assert.All(model.Requests, r => { Assert.Empty(r.Tools); Assert.True(r.Instructions.Length + r.Input.Sum(i => i.ToJsonString().Length) <= 48000); });
+        Assert.Single(events, e => e.Type == "context.compaction.retry");
+        Assert.Equal(original, ContextBuilder.Hash(store.Get(s.Id)!.History));
+        Assert.Equal("Verified observations; unresolved task; source records retained.", ContextBuilder.Active(s)!.Summary);
+        Assert.False(builder.RequiresExplicitRetry(s));
+    }
+    [Fact]
+    public async Task ShorterSummaryRetriesRemainWithinEightRequestLimit()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        for (var n = 0; n < 12; n++) { s.History.Add(User(new string('x', 20000))); s.History.Add(new() { ["role"] = "assistant", ["content"] = "Evidence " + n }); }
+        s.History.Add(User("Finish the task")); var original = ContextBuilder.Hash(s.History);
+        var responses = Enumerable.Range(0, 8).Select(n => new[] { Summary(n % 2 == 0 ? new string('x', 8001) : "Observed evidence") }).ToArray();
+        var model = new ScriptedModel(responses); var builder = new ContextBuilder(store, model, new CountingTools());
+        var error = await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default));
+        Assert.Contains("request limit", error.Message); Assert.Equal(8, model.Requests.Count);
+        Assert.Null(s.ActiveContextId); Assert.Equal(original, ContextBuilder.Hash(store.Get(s.Id)!.History));
     }
     [Fact]
     public void ProtocolGroupsPreserveReasoningAllCallsAndAllResults()
@@ -91,7 +127,7 @@ public sealed class ContinuityTests
     {
         using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store); s.Mode = PermissionMode.Edit; s.Workflow = WorkflowMode.Plan; store.Save(s, new("saved", s.Id, null, new { }));
         using (var db = new SqliteConnection("Data Source=" + Path.Combine(dir.Path, "sessions.db")))
-        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE worker_profiles; DROP TABLE workers; DROP TABLE context_snapshots; DROP TABLE prompt_queue; DROP TABLE queue_holds; UPDATE schema_version SET version=3"; cmd.ExecuteNonQuery(); }
+        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE worker_profiles; DROP TABLE workers; DROP TABLE context_snapshots; DROP TABLE prompt_queue; DROP TABLE queue_holds; DROP TABLE workflow_reports; DROP TABLE workflow_revisions; DROP TABLE steering; UPDATE schema_version SET version=3"; cmd.ExecuteNonQuery(); }
         var upgraded = new SessionStore(dir.Path); Assert.Empty(upgraded.Queue(s.Id).Items); Assert.Null(upgraded.Get(s.Id)!.ActiveContextId); Assert.Equal(PermissionMode.Edit, upgraded.Get(s.Id)!.Mode); Assert.Equal(WorkflowMode.Plan, upgraded.Get(s.Id)!.Workflow);
         Assert.NotEmpty(Directory.GetFiles(dir.Path, "sessions-v3-*.backup.db"));
     }

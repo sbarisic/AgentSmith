@@ -19,9 +19,10 @@ public static partial class Program
         using var helpRegistry = new ToolRegistry();
         var root = new RootCommand("AgentSmith: ChatGPT and local-model project assistant\n" + string.Join('\n', helpRegistry.Definitions.Concat(WorkerCoordinator.DelegationDefinitions).GroupBy(t => t.Capability).Select(g => $"{g.Key} tools: {string.Join(", ", g.Select(t => t.Name == "agent_finish" ? "agent_finish (worker only)" : t.Name))}")));
         root.Options.Add(dataOption); root.Options.Add(jsonOption); root.Options.Add(noColor);
-        var provider = new Option<ModelProvider>("--provider") { Recursive = true, DefaultValueFactory = _ => ModelProvider.ChatGpt };
-        var endpoint = new Option<string>("--endpoint") { Recursive = true, DefaultValueFactory = _ => "http://127.0.0.1:1234" };
-        var outputBudget = new Option<int>("--max-output-tokens") { Recursive = true, DefaultValueFactory = _ => 8192 };
+        MemoryCommands(root, dataOption, jsonOption, noColor);
+        var provider = new Option<ModelProvider>("--provider") { Description = "chatgpt, lmstudio (Responses), or local (Chat Completions).", Recursive = true, DefaultValueFactory = _ => ModelProvider.ChatGpt };
+        var endpoint = new Option<string?>("--endpoint") { Description = "Loopback HTTP endpoint; local defaults to http://127.0.0.1:8080/v1, LM Studio to port 1234.", Recursive = true };
+        var outputBudget = new Option<int>("--max-output-tokens") { Recursive = true, DefaultValueFactory = _ => 0, Description = "Output reserve; default ChatGPT 16384, local 8192." };
         root.Options.Add(provider); root.Options.Add(endpoint); root.Options.Add(outputBudget);
         WorkerCommands(root, dataOption, jsonOption, noColor, provider, endpoint, outputBudget);
         var auth = new Command("auth", "Manage ChatGPT account registrations."); root.Subcommands.Add(auth);
@@ -64,13 +65,24 @@ public static partial class Program
         }).GetAwaiter().GetResult());
         var models = new Command("models", "List models available to the selected account."); root.Subcommands.Add(models);
         models.SetAction(async (p, ct) => await Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), async app =>
-        { await app.ShowModels(p.GetValue(provider), p.GetValue(endpoint)!, ct); return 0; }));
+        { await app.ShowModels(p.GetValue(provider), ResolveEndpoint(p.GetValue(provider), p.GetValue(endpoint)), ct); return 0; }));
         foreach (var name in new[] { "chat", "run" })
         {
             var command = new Command(name, name == "chat" ? "Start interactive project chat." : "Execute one request.");
             var mode = new Option<PermissionMode>("--mode") { Description = "Inspect, Edit, or Execute. Execute runs as your Windows account, not sandboxed.", DefaultValueFactory = _ => PermissionMode.Execute };
             var workerNames = new Option<string?>("--workers") { Description = "Comma-separated enabled worker profiles." };
+            var maxWorkers = new Option<int>("--max-workers") { DefaultValueFactory = _ => 6, Description = "Maximum active workers, excluding parent (1..16; default 6)." };
+            var maxLocalWorkers = new Option<int>("--max-local-workers") { DefaultValueFactory = _ => 1, Description = "Maximum local workers within the total limit (1..16; default 1)." };
+            command.Options.Add(maxWorkers); command.Options.Add(maxLocalWorkers);
+            var contextBudget = new Option<string>("--context-budget") { DefaultValueFactory = _ => "balanced" };
+            var maxSteps = new Option<int>("--max-steps") { DefaultValueFactory = _ => 150 };
+            var maxMinutes = new Option<int>("--max-minutes") { DefaultValueFactory = _ => 60 };
+            var delegation = new Option<string>("--delegation") { DefaultValueFactory = _ => "proactive" };
+            var images = new Option<string[]>("--image") { Description = "Attach an image file; repeat up to four times.", AllowMultipleArgumentsPerToken = true };
+            command.Options.Add(contextBudget); command.Options.Add(maxSteps); command.Options.Add(maxMinutes); command.Options.Add(delegation); command.Options.Add(images);
             command.Options.Add(workerNames);
+            var workflow = new Option<string?>("--workflow") { Description = "work, plan, document or review. Task workflows return to Work on completion." };
+            command.Options.Add(workflow);
             var plan = new Option<bool>("--plan") { Description = "Investigate and prepare a plan; implementation requires an explicit review decision." };
             var workspace = new Option<string?>("--workspace") { Description = "Project directory; defaults to the current directory." };
             var model = new Option<string>("--model") { Description = "Explicit model ID from smith models.", Required = true };
@@ -80,27 +92,44 @@ public static partial class Program
             {
                 var path = WorkspaceTools.ValidateRoot(p.GetValue(workspace) ?? Environment.CurrentDirectory);
                 var selected = p.GetValue(model)!;
-                var session = new Session { Workspace = path, Model = selected, Mode = p.GetValue(mode), Workflow = p.GetValue(plan) ? WorkflowMode.Plan : WorkflowMode.Work,
-                    Connection = new() { Provider = p.GetValue(provider), Endpoint = p.GetValue(endpoint)!, MaxOutputTokens = p.GetValue(outputBudget) } };
+                var session = new Session { Workspace = path, Model = selected, Mode = p.GetValue(mode), Workflow = CliApp.ParseWorkflow(p.GetValue(workflow), p.GetValue(plan)),
+                    Connection = new() { Provider = p.GetValue(provider), Endpoint = ResolveEndpoint(p.GetValue(provider), p.GetValue(endpoint)), MaxOutputTokens = p.GetValue(outputBudget) } };
+                session.EnabledWorkers = app.ResolveWorkers(p.GetValue(workerNames));
+                session.WorkerPolicy = new() { MaxConcurrent = p.GetValue(maxWorkers), MaxLocalConcurrent = p.GetValue(maxLocalWorkers) }; session.WorkerPolicy.Validate();
+                session.Execution = new() { MaxRequests = p.GetValue(maxSteps), MaxMinutes = p.GetValue(maxMinutes) }; session.Execution.Validate();
+                session.ContextPolicy.Budget = p.GetValue(contextBudget)!; session.ContextPolicy.Validate();
+                session.Delegation = p.GetValue(delegation)!;
+                if (session.Delegation is not ("proactive" or "manual")) throw new UserFacingException("Delegation must be proactive or manual.");
                 await app.ConfigureModel(session, ct);
-                foreach (var profileName in (p.GetValue(workerNames) ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase))
-                    session.EnabledWorkers.Add(app.Store.Profiles().SingleOrDefault(w => w.Name.Equals(profileName, StringComparison.OrdinalIgnoreCase)) ?? throw new UserFacingException("Unknown worker profile: " + profileName));
+                session.ContextPolicy.WorkingTokens(session.Connection);
+                foreach (var profile in session.EnabledWorkers) await app.RefreshWorker(profile, ct);
                 app.Acquire(session.Id);
                 app.Store.Save(session, new("conversation.created", session.Id, null, new { workspace = path, model = selected }));
+                app.SetConversation(session);
+                foreach (var image in p.GetValue(images) ?? []) app.AttachFile(session, image);
                 app.Write("conversation", app.Header(session));
                 return await app.Chat(session, p.GetValue(prompt), name == "chat", ct);
             }));
         }
-        var resume = new Command("resume", "Inspect and explicitly continue a saved conversation.");
-        var conversationArgument = new Argument<string>("conversation-id"); resume.Arguments.Add(conversationArgument); root.Subcommands.Add(resume);
+        var resume = new Command("resume", "Open the most recently updated session, or a specific saved conversation.");
+        var conversationArgument = new Argument<string?>("conversation-id") { Arity = ArgumentArity.ZeroOrOne, Description = "Saved conversation ID; omitted selects the latest parent session in the data directory." }; resume.Arguments.Add(conversationArgument); root.Subcommands.Add(resume);
         resume.SetAction(async (p, ct) => await Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), async app =>
         {
-            var id = p.GetValue(conversationArgument)!;
+            var id = p.GetValue(conversationArgument) ?? app.Store.List().FirstOrDefault(s => s.ParentConversationId is null)?.Id
+                ?? throw new UserFacingException("No saved sessions found in this data directory. Start one with smith chat.");
             app.Acquire(id);
             var session = app.Store.Get(id) ?? throw new UserFacingException("Conversation not found.");
             WorkspaceTools.ValidateRoot(session.Workspace);
             if (session.ParentConversationId is not null) throw new UserFacingException("Resume the parent conversation; child sessions are inspectable only.");
             if (session.Connection.Provider == ModelProvider.ChatGpt) app.Vault.Active(session.AccountId);
+            try
+            {
+                using var discovery = CancellationTokenSource.CreateLinkedTokenSource(ct); discovery.CancelAfter(TimeSpan.FromSeconds(5));
+                await app.ConfigureModel(session, discovery.Token);
+                foreach (var profile in session.EnabledWorkers) await app.RefreshWorker(profile, discovery.Token);
+            }
+            catch (Exception ex) when (ex is UserFacingException or HttpRequestException or OperationCanceledException or System.Text.Json.JsonException or InvalidOperationException)
+            { ct.ThrowIfCancellationRequested(); app.Write("model.warning", new { message = "Model metadata refresh unavailable. Saved capabilities retained; local session inspection remains available." }); }
             app.Agents.RecoverChildren(session);
             app.PrepareResume(session);
             app.Registry.RecoverSession(app.Context(session));
@@ -116,14 +145,7 @@ public static partial class Program
                 else
                 {
                     app.Write("resume.confirmation", new { state = last.State.ToString(), last.Reason, message = "Type continue to resume, cancel to abandon, or leave blank to keep this run unchanged." });
-                    var input = await app.ReadInput(ct);
-                    while (input?.TrimStart().StartsWith('/') == true)
-                    {
-                        if (input.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return 3;
-                        await app.HandleCommand(input, session);
-                        if (last.State == RunState.Cancelled) break;
-                        input = await app.ReadInput(ct);
-                    }
+                    var input = await app.ReadResumeDecision(session, ct);
                     if (input == "cancel") AgentRunner.Abandon(session, app.Store);
                     else if (input == "continue") await app.Run(session, null, null, ct);
                     else if (last.State != RunState.Cancelled) return 3;
@@ -139,6 +161,10 @@ public static partial class Program
         var sessions = new Command("sessions", "List saved conversations."); root.Subcommands.Add(sessions);
         sessions.SetAction(p => Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), app =>
         { app.Write("sessions", app.Store.List().Where(s => s.ParentConversationId is null).Select(s => new { s.Id, s.Workspace, s.Model, s.UpdatedAt, state = s.Runs.LastOrDefault()?.State.ToString() })); return Task.FromResult(0); }).GetAwaiter().GetResult());
+        var usage = new Command("usage", "Show recorded cloud/local token usage for a conversation and its workers.");
+        var usageConversation = new Argument<string>("conversation-id"); usage.Arguments.Add(usageConversation); root.Subcommands.Add(usage);
+        usage.SetAction(p => Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), app =>
+        { app.Write("usage", app.Store.Usage(p.GetValue(usageConversation)!)); return Task.FromResult(0); }).GetAwaiter().GetResult());
         var inspect = new Command("inspect", "Read stored run evidence without executing anything.");
         var runArgument = new Argument<string>("run-id"); inspect.Arguments.Add(runArgument); root.Subcommands.Add(inspect);
         inspect.SetAction(p => Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), app =>
@@ -151,19 +177,23 @@ public static partial class Program
     private static async Task<int> Execute(string? directory, bool json, bool noColor, Func<CliApp, Task<int>> action)
     {
         CliApp? app = null;
-        void Error(string message)
+        void Error(string message, FailureDetail? failure = null)
         {
+            failure = failure?.Sanitized();
+            if (failure is not null) message = failure.Reason;
             try
             {
-                if (app is not null) app.Write("error", new { message });
-                else if (json) Console.WriteLine(Json.Serialize(new { schemaVersion = 1, type = "error", payload = new { message } }));
-                else Console.Error.WriteLine(message);
+                if (app is not null) app.Write("error", new { message, failure });
+                else if (json) Console.WriteLine(Json.Serialize(new { schemaVersion = 1, type = "error", payload = new { message, failure } }));
+                else Console.Error.WriteLine(failure is null ? message : $"{failure.Category}: {failure.Reason}\nEffect: {failure.Effect}\nNext: {failure.Next}\nCode: {failure.Code}");
             }
             catch (IOException) { }
         }
         try { app = new CliApp(directory, json, noColor); return await action(app); }
         catch (OperationCanceledException) { Error("Cancelled."); return 130; }
-        catch (UserFacingException ex) { Error(ex.Message); return 2; }
+        catch (UserFacingException ex) { Error(ex.Message, ex.Detail); return 2; }
+        catch (Microsoft.Data.Sqlite.SqliteException ex)
+        { var failure = Failures.Storage(ex.SqliteErrorCode); Error(failure.Reason, failure); return 1; }
         catch (Exception) { Error("Operation failed. Check connectivity, local state access, and account availability. An unfinished saved run can be inspected and resumed. Secret response bodies are not logged."); return 1; }
         finally { app?.Dispose(); }
     }
@@ -176,13 +206,14 @@ internal sealed partial class CliApp : IDisposable
     private readonly bool color;
     private bool interactiveQuestions;
     private readonly TerminalRenderer terminal;
+    private readonly InputAttention attention;
     private long sequence;
     private CancellationTokenSource? activeRun;
     private readonly ConsoleCancelEventHandler cancelHandler;
     public CredentialVault Vault { get; }
     public ChatGptAuth Auth { get; }
     public SessionStore Store { get; }
-    public ToolRegistry Registry { get; } = new();
+    public ToolRegistry Registry { get; }
     private readonly List<IDisposable> leases = [];
     public void Acquire(string id) => leases.Add(Store.Acquire(id));
     public ToolExecutionContext Context(Session session) => new(session, session.Runs.LastOrDefault() ?? new Run(), Store, CancellationToken.None);
@@ -192,10 +223,12 @@ internal sealed partial class CliApp : IDisposable
         color = !json && !noColor && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null;
         var width = Console.IsOutputRedirected ? 90 : Console.WindowWidth;
         terminal = new TerminalRenderer(Console.Out, color, width);
-        input = new ConsoleInput(!json && !Console.IsInputRedirected && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb", reader);
+        input = new ConsoleInput(!json && !Console.IsInputRedirected && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb", reader, color);
+        attention = InputAttention.Create(!json && reader is null && !Console.IsInputRedirected && !Console.IsOutputRedirected);
         var root = Path.GetFullPath(directory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentSmith"));
         Vault = new(root, new WindowsSecretProtector());
         Auth = new(http, Vault, new IdentityValidator()); Store = new(root);
+        Registry = new(Store);
         Agents = new(Store, Store, Registry, ModelClient);
         cancelHandler = (_, e) => { if (activeRun is not null) { e.Cancel = true; CancelActive(); } };
         Console.CancelKeyPress += cancelHandler;
@@ -207,17 +240,27 @@ internal sealed partial class CliApp : IDisposable
         else if (type != "question.pending" || !interactiveQuestions) { if (input.Interactive) terminal.Resize(Console.WindowWidth); terminal.Render(type, payload); }
         });
     }
-    public async Task<string?> ReadInput(CancellationToken ct)
+    public async Task<string?> ReadInput(CancellationToken ct, string attentionKey = "composer")
     {
+        if (addressedDecisions.TryDequeue(out var decision)) return decision;
+        ct.ThrowIfCancellationRequested();
+        attention.WaitFor(attentionKey);
         return await input.ReadLineAsync(ct);
     }
     public async Task<Run> Run(Session session, string? prompt, string? answer, CancellationToken ct)
     {
+        if (prompt is null && answer is null && session.Runs.LastOrDefault() is { State: RunState.Paused } paused
+            && new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.RequiresExplicitRetry(session))
+        {
+            Write("error", new { message = "Compaction needs an explicit retry. Run /compact, then type continue after it succeeds. /context shows the saved context. No work was restarted; queued prompts remain held." });
+            return paused;
+        }
         if (Store.Queue(session.Id).HoldReason is "AwaitingUser" or "AwaitingPlan") Store.HoldQueue(session.Id, null);
+        var rich = nextPrompt; nextPrompt = null;
         var run = await Pump(session, token =>
         {
             var client = ModelClient(session);
-            return new AgentRunner(Store, client, Agents) { MaxContextCharacters = ContextLimit }.RunAsync(session, prompt, answer, e => Write(e.Type, e.Payload, e.ConversationId, e.RunId), token);
+            return new AgentRunner(Store, client, Agents) { MaxContextCharacters = ContextLimit }.RunAsync(session, prompt, answer, e => Write(e.Type, e.Payload, e.ConversationId, e.RunId), token, rich);
         }, ct);
         Store.SettleQueue(session.Id, run);
         if (run.State != RunState.Completed)
@@ -235,7 +278,9 @@ internal sealed partial class CliApp : IDisposable
             var question = session.Runs.Last().Question!;
             interactiveQuestions = !json && QuestionPrompt.IsInteractive;
             Write("question.pending", new { question.Id, question.Text, question.Choices });
-            var answer = interactiveQuestions ? await QuestionPrompt.ReadAsync(question, color, ct, input.ReadKeyAsync) : await ReadInput(ct);
+            ct.ThrowIfCancellationRequested();
+            attention.WaitFor("question:" + question.Id);
+            var answer = interactiveQuestions ? await QuestionPrompt.ReadAsync(question, color, ct, input.ReadKeyAsync, PasteNote) : await ReadInput(ct, "question:" + question.Id);
             if (answer is null) return false;
             if (string.IsNullOrWhiteSpace(answer)) continue;
             if (!input.Interactive && (decisionRequiresAddress || Store.Queue(session.Id).Items.Count > 0))
@@ -244,7 +289,7 @@ internal sealed partial class CliApp : IDisposable
                 if (answer.StartsWith(prefix, StringComparison.Ordinal)) answer = answer[prefix.Length..];
                 else { if (answer.StartsWith('/')) await HandleCommand(answer, session, answering: true); else Write("error", new { message = "Use /answer " + question.Id + " <text>; queued input cannot answer this question." }); continue; }
             }
-            var command = await HandleCommand(answer, session, answering: true);
+            var command = interactiveQuestions ? CommandAction.Prompt : await HandleCommand(answer, session, answering: true);
             if (command == CommandAction.Exit) return false;
             if (command != CommandAction.Prompt) continue;
             await Run(session, null, answer, ct);
@@ -253,6 +298,8 @@ internal sealed partial class CliApp : IDisposable
     }
     public async Task<int> Chat(Session session, string? initial, bool interactive, CancellationToken ct)
     {
+        SetConversation(session);
+        if (initial is not null && input.HasBlocks) { nextPrompt = input.Compose(initial); input.ClearDraft(); }
         continuous = interactive;
         currentConversation = session.Id;
         if (Store.Queue(session.Id).Items.Any(i => i.State is "Pending" or "Dispatched") && !queueInitialized)
@@ -272,7 +319,7 @@ internal sealed partial class CliApp : IDisposable
             {
                 Write("resume.confirmation", new { message = "A saved plan decision is ready to continue. Type continue explicitly, or leave it pending." });
                 if (!interactive) return 3;
-                var continuation = await ReadInput(ct);
+                var continuation = await ReadInput(ct, "plan-continuation:" + session.ActivePlanId);
                 if (continuation?.TrimStart().StartsWith('/') == true)
                 { if (await HandleCommand(continuation, session) == CommandAction.Exit) return 3; continue; }
                 if (continuation != "continue") return 3;
@@ -291,9 +338,14 @@ internal sealed partial class CliApp : IDisposable
                 prompt = await ReadInput(ct);
             }
             if (prompt is null && !claimed) { Store.HoldQueue(session.Id, "End of input"); return 0; }
-            var command = claimed ? CommandAction.Prompt : await HandleCommand(prompt!, session);
+            if (!input.Interactive && !claimed && input.HasBlocks && prompt?.TrimStart().StartsWith('/') != true)
+            { nextPrompt = input.Compose(prompt); input.ClearDraft(); }
+            var literalPaste = input.SubmittedLiteral;
+            if (!claimed && input.SubmittedPrompt is { } submitted) { nextPrompt = submitted; input.ClearSubmission(); }
+            if (nextPrompt?.Parts.Any(p => p.Kind == "image") == true && string.IsNullOrWhiteSpace(prompt)) prompt = "[Image attached]";
+            var command = claimed || literalPaste || nextPrompt?.Parts.Any(p => p.Kind == "image") == true ? CommandAction.Prompt : await HandleCommand(prompt!, session);
             if (command == CommandAction.Exit) return 0;
-            if (command == CommandAction.Handled) { prompt = null; continue; }
+            if (command == CommandAction.Handled) { prompt = null; nextPrompt = null; continue; }
             if (command == CommandAction.Paste)
             {
                 Write("paste", new { message = "Enter lines; finish with /end on its own line. Slash-prefixed text here is sent literally." });
@@ -301,16 +353,16 @@ internal sealed partial class CliApp : IDisposable
                 string? line;
                 while ((line = await ReadInput(ct)) is not null && line != "/end") lines.Add(line);
                 if (line is null) return 0; // EOF does not submit an unfinished paste.
-                prompt = string.Join('\n', lines);
+                prompt = string.Join('\n', lines); nextPrompt = UserPrompt.Text(prompt); input.ClearSubmission();
             }
             if (!claimed && string.IsNullOrWhiteSpace(prompt)) { prompt = null; continue; }
             var continuing = !claimed && prompt == "continue" && session.Runs.LastOrDefault()?.State == RunState.Paused;
-            if (continuing) { claimed = true; prompt = null; }
+            if (continuing && !literalPaste) { claimed = true; prompt = null; nextPrompt = null; }
             if (!claimed && !workflowPrompt && Store.Queue(session.Id).Items.Any(i => i.State == "Pending"))
-            { QueueMessage(session, prompt!); prompt = null; continue; }
+            { QueueMessage(session, prompt!, nextPrompt); nextPrompt = null; prompt = null; continue; }
             if (!claimed && Unfinished(session))
-            { Write("error", new { message = "Resume or explicitly abandon unfinished work before a new prompt. Use /recover." }); prompt = null; continue; }
-            if (!continuing) Write("user.submitted", new { text = claimed ? session.History.Last(i => i["role"]?.ToString() == "user")["content"]?.ToString() : prompt });
+            { if (nextPrompt is not null) input.RestorePrompt(nextPrompt); nextPrompt = null; Write("error", new { message = "Resume or explicitly abandon unfinished work before a new prompt. Use /recover." }); prompt = null; continue; }
+            if (!continuing) Write("user.submitted", new { workflow = session.Workflow.ToString(), text = claimed ? session.History.Last(i => i["role"]?.ToString() == "user")["content"]?.ToString() : prompt });
             var run = await Run(session, prompt, null, ct); prompt = null;
             if (run.State == RunState.AwaitingUser)
             {
@@ -319,7 +371,7 @@ internal sealed partial class CliApp : IDisposable
             }
             var code = run.State switch { RunState.Completed => 0, RunState.Cancelled => 130, RunState.Paused => 4, RunState.RecoveryRequired => 5, RunState.AwaitingUser or RunState.AwaitingPlan => 3, _ => 1 };
             if (!interactive) return code;
-            if (run.State == RunState.Paused) Write("resume.confirmation", new { message = "Work paused. Inspect /context; /compact can reduce context. Type continue explicitly to retry, or use /recover abandon. Queued follow-ups remain held." });
+            if (run.State == RunState.Paused) Write("resume.confirmation", new { message = PauseGuidance.For(run) });
         }
     }
 
@@ -332,41 +384,52 @@ internal sealed partial class CliApp : IDisposable
         var parts = text.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries);
         var name = parts[0].ToLowerInvariant();
         var args = parts.Length == 2 ? parts[1].Trim() : "";
-        void Error(string message) => Write("error", new { message });
-        try { if (await ContinuityCommand(name, args, session)) return CommandAction.Handled; }
-        catch (UserFacingException ex) { Error(ex.Message); return CommandAction.Handled; }
-        if (name is not ("/help" or "/status" or "/context" or "/paste" or "/exit" or "/markdown" or "/tools" or "/mode" or "/changes" or "/undo" or "/processes" or "/stop" or "/recover" or "/plan" or "/tasks" or "/artifacts" or "/artifact"))
+        void Error(string message, FailureDetail? failure = null) => Write("error", new { message = failure?.Sanitized().Reason ?? message, failure = failure?.Sanitized() });
+        try { if (await WorkflowCommand(name, args, session) || await ContinuityCommand(name, args, session)) return CommandAction.Handled; }
+        catch (UserFacingException ex) { Error(ex.Message, ex.Detail); return CommandAction.Handled; }
+        if (name is not ("/work" or "/help" or "/usage" or "/status" or "/context" or "/paste" or "/exit" or "/markdown" or "/tools" or "/mode" or "/changes" or "/undo" or "/processes" or "/stop" or "/recover" or "/plan" or "/tasks" or "/artifacts" or "/artifact"))
         { Error($"Unknown command: {TerminalRenderer.Safe(parts[0])[..Math.Min(80, TerminalRenderer.Safe(parts[0]).Length)]}. Type /help for available commands. Use /paste for literal slash-prefixed text."); return CommandAction.Handled; }
-        if (name is not ("/markdown" or "/mode" or "/undo" or "/stop" or "/recover" or "/plan" or "/artifact") && args.Length > 0)
+        if (name is not ("/help" or "/markdown" or "/mode" or "/undo" or "/stop" or "/recover" or "/plan" or "/artifact") && args.Length > 0)
         { Error($"{name} does not accept arguments. Type /help for usage."); return CommandAction.Handled; }
         try { switch (name)
         {
+            case "/work": await WorkflowModeCommand(session, "work"); break;
+            case "/usage": Write("usage", Store.Usage(session.Id)); break;
             case "/plan": await PlanCommand(session, args); break;
             case "/tasks": Write("plan.display", new { plan = Planning.Active(session) }); break;
             case "/artifacts": Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), "artifact_list", new System.Text.Json.Nodes.JsonObject()).Content }); break;
             case "/artifact":
                 var artifactParts = args.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-                if (artifactParts.Length == 0 || artifactParts.Length > 1 && (artifactParts.Length != 3 || artifactParts[1] != "search")) throw new UserFacingException("Usage: /artifact <id> [search <text>]");
-                var artifactArgs = new System.Text.Json.Nodes.JsonObject { ["artifactId"] = artifactParts[0], ["cursor"] = 0, ["maxCharacters"] = 4000 };
-                if (artifactParts.Length == 3) artifactArgs["query"] = artifactParts[2];
-                Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), artifactParts.Length == 3 ? "artifact_search" : "artifact_read", artifactArgs).Content }); break;
+                if (artifactParts.Length == 0 || artifactParts.Length > 1 && (artifactParts.Length != 3 || artifactParts[1] is not ("search" or "read"))) throw new UserFacingException("Usage: /artifact <id|process:#number> [read <cursor>|search <text>]");
+                var artifactId = ArtifactCommands.ResolveId(Context(session), artifactParts[0]);
+                var artifactCursor = 0;
+                if (artifactParts.Length == 3 && artifactParts[1] == "read" && (!int.TryParse(artifactParts[2], out artifactCursor) || artifactCursor < 0)) throw new UserFacingException("Artifact cursor must be a nonnegative integer.");
+                var searchingArtifact = artifactParts.Length == 3 && artifactParts[1] == "search";
+                var artifactArgs = new System.Text.Json.Nodes.JsonObject { ["artifactId"] = artifactId, ["cursor"] = artifactCursor, ["maxCharacters"] = 4000 };
+                if (searchingArtifact) artifactArgs["query"] = artifactParts[2];
+                Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), searchingArtifact ? "artifact_search" : "artifact_read", artifactArgs).Content }); break;
             case "/tools":
                 Write("tools", Agents.Definitions.Where(t => t.Name != "agent_finish").Select(t => new { t.Name, t.Description, capability = t.Capability.ToString(), enabled = Agents.Available(session).Any(d => d.Name == t.Name), t.HasEffects, effect = t.Effect.ToString() })); break;
             case "/mode":
+                if (await WorkflowModeCommand(session, args)) break;
+                if (activeRun is not null) throw new UserFacingException("Wait for the active run or use /cancel before changing permissions.");
                 if (args.Length > 0)
                 {
-                    if (!Enum.TryParse<PermissionMode>(args, true, out var next) || !Enum.IsDefined(next) || int.TryParse(args, out _)) { Error("Usage: /mode inspect|edit|execute"); break; }
+                    if (!Enum.TryParse<PermissionMode>(args, true, out var next) || !Enum.IsDefined(next) || int.TryParse(args, out _)) { Error("Usage: /mode work|plan|document|review or /mode inspect|edit|execute"); break; }
                     if (next < session.Mode) await Agents.StopAllAsync(session.Id);
                     if (session.Mode == PermissionMode.Execute && next != PermissionMode.Execute) await Registry.Processes.StopAsync(session);
-                    if (session.Workflow == WorkflowMode.Work && Planning.Active(session) is { State: "Implementing" } approved && next > approved.Approvals.Last().Mode)
-                    { await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan; approved.State = "Draft"; Planning.Submit(session); }
+                    if (session.Workflow != WorkflowMode.Plan && Planning.Active(session) is { State: "Implementing" } approved && next > approved.Approvals.Last().Mode)
+                    {
+                        if (WorkflowPolicy.IsTask(session.Workflow)) throw new UserFacingException("The requested permission exceeds the approved plan ceiling. Finish or leave this workflow before requesting a new plan approval.");
+                        await Registry.Processes.StopAsync(session); session.Workflow = WorkflowMode.Plan; approved.State = "Draft"; Planning.Submit(session);
+                    }
                     session.Mode = next; Store.Save(session, new("mode.changed", session.Id, null, new { mode = next.ToString() }));
                 }
-                Write("mode", new { message = $"Mode: {session.Mode}." + (session.Mode == PermissionMode.Execute ? " Processes run as your Windows account; working directories are not a sandbox." : "") }); break;
+                Write("mode", new { workflow = session.Workflow.ToString(), message = $"Workflow: {session.Workflow} · Permissions: {session.Mode}." + (session.Mode == PermissionMode.Execute ? " Processes run as your Windows account; working directories are not a sandbox." : "") }); break;
             case "/changes":
                 Write("changes", new[] { session }.Concat(Agents.ChildSessions(session)).SelectMany(s => s.Mutations).Select(m => new { m.Id, m.Kind, m.State, m.UndoOf, diff = FileOperations.Diff(m) })); break;
             case "/undo":
-                if (session.Workflow == WorkflowMode.Plan) throw new UserFacingException("Undo is disabled during Plan workflow.");
+                if (session.Workflow is WorkflowMode.Plan or WorkflowMode.Review) throw new UserFacingException("Undo is disabled during Plan and Review workflows.");
                 Write("operation", new { content = (await Agents.UndoAsync(session, args)).Content }); break;
             case "/processes":
                 Write("processes", session.Processes); break;
@@ -391,10 +454,11 @@ internal sealed partial class CliApp : IDisposable
                 break;
             case "/exit": return CommandAction.Exit;
             case "/help":
-                Write("help", new { commands = "/help /agents /agent <id> [cancel] /plan new|show|revise|implement|leave /tasks /artifacts /artifact <id> [search <text>] /tools /mode inspect|edit|execute /changes /undo <checkpoint> /processes /stop <id> /recover [abandon] /status /context /markdown on|off /paste /exit; Tools execute serially." }); break;
+                Write("help", CommandHelp.Build(args)); break;
             case "/status":
             case "/context":
-                Write("status", new { session.Id, provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), context = session.Runs.LastOrDefault()?.ContextManifest, snapshot = ContextBuilder.Active(session) }); break;
+                var currentContext = activeRun is null ? new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.Build(session).Manifest : session.Runs.LastOrDefault()?.ContextManifest;
+                Write("status", new { pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending"), session.Id, session.Execution, session.Delegation, session.WorkerPolicy, remainingMinutes = Math.Max(0, session.Execution.MaxMinutes - (session.Runs.LastOrDefault() is { } currentRun ? (currentRun.State == RunState.Running && currentRun.BatchStartedAt is { } batchStart ? (DateTimeOffset.UtcNow - batchStart).TotalMinutes : currentRun.BatchExecutionMilliseconds / 60000) : 0)), remainingRequests = Math.Max(0, session.Execution.MaxRequests - (session.Runs.LastOrDefault()?.BatchRequests ?? 0)), provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), report = WorkflowPolicy.Active(session), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), context = currentContext, snapshot = ContextBuilder.Active(session) }); break;
             case "/markdown":
                 if (args.Length == 0) Write("display", new { message = $"Markdown display is {(terminal.MarkdownEnabled ? "on" : "off")}. Use /markdown on or /markdown off." });
                 else if (args.Equals("on", StringComparison.OrdinalIgnoreCase) || args.Equals("off", StringComparison.OrdinalIgnoreCase))
@@ -409,11 +473,12 @@ internal sealed partial class CliApp : IDisposable
                 else return CommandAction.Paste;
                 break;
         } }
-        catch (Exception ex) when (ex is UserFacingException or IOException or UnauthorizedAccessException) { Error(ex is UserFacingException ? ex.Message : "Operation could not complete. Use /recover to inspect its state."); }
+        catch (Exception ex) when (ex is UserFacingException or IOException or UnauthorizedAccessException) { Error(ex is UserFacingException ? ex.Message : "Operation could not complete. Use /recover to inspect its state.", (ex as UserFacingException)?.Detail); }
         return CommandAction.Handled;
     }
     public void Dispose()
     {
+        attention.Dispose();
         input.Hide();
         if (currentConversation is not null) Store.HoldQueue(currentConversation, "CLI exited");
         try { Agents.Dispose(); }

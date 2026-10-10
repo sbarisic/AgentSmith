@@ -7,6 +7,26 @@ namespace AgentSmith.IntegrationTests;
 public sealed class ActivityRenderingTests
 {
     [Fact]
+    public void WebImageResultShowsSourceAndAttachmentWithoutUrlQuery()
+    {
+        var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
+        renderer.Render("tool.completed", new { name = "image_read", content = Json.Serialize(new
+        { kind = "web-image", url = "https://example.com/image?id=hidden-query", width = 320, height = 160, bytes = 500, attachmentId = "web-image-id" }) });
+        Assert.Contains("https://example.com/image", output.ToString());
+        Assert.Contains("320 × 160", output.ToString());
+        Assert.Contains("web-image-id", output.ToString());
+        Assert.DoesNotContain("hidden-query", output.ToString());
+    }
+    [Fact]
+    public void InspectionResultsAreBoundedEscapedAndReadableWithoutColor()
+    {
+        var output=new StringWriter();var renderer=new TerminalRenderer(output,false);
+        renderer.Render("tool.completed",new{name="image_read",content=Json.Serialize(new{kind="workspace-image",path="image.png",width=320,height=160,bytes=500,attachmentId="image-id"})});
+        renderer.Render("tool.completed",new{name="http_request",content=Json.Serialize(new{kind="http-response",method="GET",url="http://localhost/api",status=200,excerpt="hello\u001b[2J",artifactId="report",truncated=true})});
+        renderer.Render("tool.completed",new{name="workspace_map",content=Json.Serialize(new{kind="workspace-map",path=".",totalEntries=1,entries=new[]{new{path="src",kind="directory"}},artifactId="map",depthLimited=true})});
+        var text=output.ToString();Assert.Contains("320 × 160",text);Assert.Contains("HTTP 200",text);Assert.Contains("/artifact report",text);Assert.Contains("src/",text);Assert.DoesNotContain('\u001b',text);
+    }
+    [Fact]
     public void EmptyPollsAreHiddenButCompletionAndNewOutputRemain()
     {
         var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);

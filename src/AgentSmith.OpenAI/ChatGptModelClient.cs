@@ -8,6 +8,24 @@ namespace AgentSmith.OpenAI;
 
 public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, Task<string>> accessToken) : IModelClient
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> countUnavailable = new();
+    public async Task<TokenMeasurement?> CountTokensAsync(ModelRequest request, CancellationToken ct)
+    {
+        if (countUnavailable.ContainsKey(request.Model)) return null;
+        var body = BuildRequest(request); body.Remove("stream"); body.Remove("store"); body.Remove("include"); body.Remove("max_output_tokens");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        using var message = new HttpRequestMessage(HttpMethod.Post, OAuthProtocol.Resource + "/responses/input_tokens");
+        message.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+        try
+        {
+            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await accessToken(timeout.Token));
+            using var response = await http.SendAsync(message, timeout.Token);
+            if (!response.IsSuccessStatusCode) { countUnavailable[request.Model] = true; return null; }
+            var data = JsonNode.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+            return data?["input_tokens"]?.GetValue<int>() is { } count ? new(count, "provider input-token count", true) : null;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { countUnavailable[request.Model] = true; return null; }
+    }
     public static JsonObject BuildRequest(ModelRequest request)
     {
         var functions = new JsonArray(request.Tools.Select(t => (JsonNode)new JsonObject
@@ -16,11 +34,12 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
             ["name"] = t.Name,
             ["description"] = t.Description,
             ["parameters"] = t.Parameters.DeepClone(),
-            ["strict"] = true
+            ["strict"] = t.Name != "agent_spawn"
         }).ToArray());
         return new JsonObject
         {
             ["model"] = request.Model,
+            ["max_output_tokens"] = request.MaxOutputTokens ?? 16384,
             ["instructions"] = request.Instructions,
             ["stream"] = true,
             ["store"] = false,

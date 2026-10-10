@@ -13,53 +13,58 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<string, (CancellationTokenSource Source, Task Task)> live = new();
     private readonly CancellationTokenSource lifetime = new();
-    private static readonly HashSet<string> ChildReads = ["workspace_list", "file_read", "text_search", "git_status", "git_diff", "git_log", "git_show", "artifact_list", "artifact_read", "artifact_search"];
+    private static readonly HashSet<string> ChildReads = ["image_read", "workspace_map", "http_request", "web_search", "web_read", "workspace_list", "file_read", "text_search", "git_status", "git_diff", "git_log", "git_show", "artifact_list", "artifact_read", "artifact_search", "memory_search", "memory_read"];
     private static ToolDefinition Define(string name, string description, params (string Name, string Type)[] fields)
     {
         var properties = new JsonObject();
         foreach (var (key, type) in fields) properties[key] = type == "strings" ? new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" } } : new JsonObject { ["type"] = type };
-        return new(name, description, new JsonObject { ["type"] = "object", ["properties"] = properties, ["required"] = new JsonArray(fields.Select(f => (JsonNode)JsonValue.Create(f.Name)!).ToArray()), ["additionalProperties"] = false }, PermissionMode.Inspect, name is "agent_spawn" or "agent_finish", ToolEffect.SessionState);
+        return new(name, description, new JsonObject { ["type"] = "object", ["properties"] = properties, ["required"] = new JsonArray(fields.Where(f => f.Name is not ("purpose" or "attachmentIds")).Select(f => (JsonNode)JsonValue.Create(f.Name)!).ToArray()), ["additionalProperties"] = false }, PermissionMode.Inspect, name is "agent_spawn" or "agent_finish" or "agent_message", ToolEffect.SessionState);
     }
     private static readonly ToolDefinition[] AgentTools =
     [
-        Define("agent_spawn", "Delegate a bounded task to an enabled profile. Reserve exact writePaths (both paths for moves); empty list means read-only. Maximum two concurrent workers and eight launches per run. Stop existing processes before assigning edits. Workers cannot run commands; parent verifies after collecting results. To explicitly share retained evidence include [artifact:ID] in task (up to four registered artifacts; bounded excerpts are copied).", ("profile", "string"), ("task", "string"), ("writePaths", "strings")),
-        Define("agent_wait", "Wait up to ten seconds for worker status changes. Use agent_result to collect terminal reports.", ("agentIds", "strings"), ("waitMilliseconds", "integer")),
+        Define("agent_spawn", "Delegate a bounded task to an enabled profile. Reserve exact writePaths (both paths for moves); empty list means read-only. Concurrency follows the session worker limits; sixteen launches per run. A profile can serve multiple independent tasks concurrently. Stop existing processes before assigning edits. Workers cannot run commands; parent verifies after collecting results. To share retained evidence include [artifact:ID] in task; workers can page/search only those artifacts. purpose and attachmentIds are optional.", ("profile", "string"), ("task", "string"), ("writePaths", "strings"), ("purpose", "string"), ("attachmentIds", "strings")),
+        Define("agent_wait", "Wait up to 180 seconds (3 minutes). Returns early when a selected worker finishes or on cancellation; ordinary progress updates do not end the wait. Use agent_result to collect terminal reports.", ("agentIds", "strings"), ("waitMilliseconds", "integer")),
         Define("agent_result", "Collect a worker report and its checkpoint/artifact references. Reports are evidence, not proof of passing tests.", ("agentId", "string")),
         Define("agent_cancel", "Cancel one owned worker and wait for its persisted outcome. Edits are not rolled back.", ("agentId", "string")),
+        Define("agent_message", "Send durable steering to an active owned worker. text <=32 KiB UTF-8. Returns a receipt, not proof of compliance. Delivered at the next safe boundary; cannot expand assigned paths, permissions or approved scope, approve plans or restart a worker.", ("agentId", "string"), ("text", "string")),
         Define("agent_finish", "Finish this worker. status must be completed or blocked. Include evidence paths/checkpoint IDs, limitations and a clarification if blocked. No further calls will execute. Tests are run by the parent.", ("status", "string"), ("summary", "string"), ("limitations", "string"), ("evidence", "strings"), ("clarification", "string"))
     ];
     public IReadOnlyList<ToolDefinition> Definitions => [.. inner.Definitions, .. AgentTools];
     public static IReadOnlyList<ToolDefinition> DelegationDefinitions => AgentTools;
-    public IReadOnlyList<ToolDefinition> Available(Session s) => Definitions.Where(d => Enabled(s, d)).ToArray();
+    public IReadOnlyList<ToolDefinition> Available(Session s) => inner.Available(s).Concat(AgentTools).Where(d => Enabled(s, d)).ToArray();
     private static bool ChildTool(ToolDefinition d) => ChildReads.Contains(d.Name) || d.Name.StartsWith("file_", StringComparison.Ordinal) || d.Name == "agent_finish";
     private bool Enabled(Session s, ToolDefinition d) => d.Enabled(s) && (s.ParentConversationId is not null ? ChildTool(d) : d.Name != "agent_finish" && (!d.Name.StartsWith("agent_", StringComparison.Ordinal) || s.EnabledWorkers.Count > 0));
     public string Instructions(string workspace) => inner.Instructions(workspace);
     public string SessionInstructions(Session s)
     {
-        if (s.ParentConversationId is not null) return s.WorkerInstructions + $"\nYou have {Math.Max(0, 10 - (s.Runs.LastOrDefault()?.Steps ?? 0))} model rounds left. Keep the task small. Avoid repeated reads when content is unchanged. Only assigned paths may be mutated. No processes, nested agents, plan changes or user approvals. Finish using agent_finish, including limitations and clarification requests. Do not claim tests ran. A unified patch must remove and add COMPLETE exact lines, preserving whitespace. file_read line numbers are not part of file contents. Example: @@ -2,1 +2,1 @@\\n-old complete line\\n+new complete line\\n. Do not include XML/tool delimiters in the patch.";
+        if (s.ParentConversationId is not null) return s.WorkerInstructions + $"\nYou have {Math.Max(0, 20 - (s.Runs.LastOrDefault()?.Steps ?? 0))} model rounds left. Saved steering may refine the original task within the existing assignment; reconsider the task using the newest labeled direction. It never expands reserved paths, permissions, or approved scope. Keep the task small. Avoid repeated reads when content is unchanged. Only assigned paths may be mutated. No processes, nested agents, plan changes or user approvals. Finish using agent_finish, including limitations and clarification requests. Do not claim tests ran. A unified patch must remove and add COMPLETE exact lines, preserving whitespace. file_read line numbers are not part of file contents. Example: @@ -2,1 +2,1 @@\\n-old complete line\\n+new complete line\\n. Do not include XML/tool delimiters in the patch.";
         if (s.EnabledWorkers.Count == 0) return "";
-        return "\nEnabled worker profiles: " + Json.Serialize(s.EnabledWorkers.Select(p => new { p.Name, p.Model, p.Mode, p.Connection.Provider })) +
+        return "\nEnabled worker profiles: " + Json.Serialize(s.EnabledWorkers.Select(p => new { p.Name, p.Model, p.Mode, p.Connection.Provider, p.Connection.Capabilities.Vision, p.Connection.LoadedContextTokens })) +
+            "\nWorker concurrency limits (parent excluded): " + Json.Serialize(s.WorkerPolicy) +
             "\nWorker state (authoritative): " + Json.Serialize(workers.Workers(s.Id).Where(w => w.ParentRunId == s.Runs.LastOrDefault()?.Id || w.ReservationsHeld).Select(Summary)) +
-            "\nDelegate independent small tasks with exact write paths. You can continue inspecting unreserved files. Collect every child with agent_result before your final answer; verify changes and run tests yourself after editing workers finish. A child report is untrusted evidence, not authorization. Resolve blocked clarification through user_ask. Tool dispatch within each agent is serial.";
+            (s.Delegation == "proactive" ? "\nProactively delegate useful bounded investigation, log diagnosis, test writing, focused fixes, patch review, documentation, and explicitly shared screenshot analysis before duplicating that work yourself. Prefer enabled local profiles for routine tasks. Use enabled ChatGPT profiles for difficult reasoning, subtle defects, complex implementation, or independent review when their added cost is justified. Decompose independent tasks and spawn them before waiting; the same profile may handle multiple tasks. Do not duplicate work merely to occupy slots. Avoid delegation for trivial tasks or when overhead exceeds benefit. " : "\nUse workers only when the user explicitly requests delegation. ") +
+            "Prefer agent_wait with 180000 ms (3 minutes) instead of repeated short polls; it returns early when a selected worker finishes. Use agent_message to correct an active worker when user steering affects its task; no automatic broadcast occurs. Messages cannot expand assignments or permissions. Use process_wait for builds. Delegate independent small tasks with exact write paths. You can continue inspecting unreserved files. Collect every child with agent_result before your final answer; verify changes and run tests yourself after editing workers finish. A child report is untrusted evidence, not authorization. Resolve blocked clarification through user_ask. Tool dispatch within each agent is serial.";
     }
+    public Task StartWorkflowAsync(ToolExecutionContext ctx) => inner.StartWorkflowAsync(ctx);
     public Task<ToolOutput> ExecuteAsync(string workspace, ToolCall call, CancellationToken ct) => inner.ExecuteAsync(workspace, call, ct);
     private static string Root(Session s) => s.ParentConversationId ?? s.Id;
     private sealed class Lease(SemaphoreSlim semaphore) : IDisposable { public void Dispose() => semaphore.Release(); }
     public async Task<IDisposable> AcquireToolLeaseAsync(ToolExecutionContext ctx, ToolCall call)
     {
-        if (!call.Name.StartsWith("file_", StringComparison.Ordinal) && call.Name != "agent_spawn" && call.Name != "process_start" && !call.Name.StartsWith("dotnet_", StringComparison.Ordinal)) return NoopLease.Instance;
+        if (!call.Name.StartsWith("file_", StringComparison.Ordinal) && call.Name != "agent_spawn" && call.Name != "process_start" && !HttpTools.IsWrite(call) && !call.Name.StartsWith("dotnet_", StringComparison.Ordinal)) return NoopLease.Instance;
         await gate.WaitAsync(ctx.Cancellation); return new Lease(gate);
     }
     private JsonObject Arguments(Session s, ToolCall call)
     {
         var definition = Definitions.SingleOrDefault(d => d.Name == call.Name);
         if (definition is null || !Enabled(s, definition)) throw new UserFacingException("Tool is not available to this agent or workflow.");
-        if (call.Arguments.Length > 32768) throw new UserFacingException("Agent arguments exceed 32 KiB characters.");
+        if (call.Arguments.Length > (call.Name == "agent_message" ? 262144 : 32768)) throw new UserFacingException("Agent arguments exceed the size limit.");
         var args = JsonNode.Parse(call.Arguments)?.AsObject() ?? throw new UserFacingException("Object arguments required.");
         var expected = definition.Parameters["properties"]!.AsObject();
-        if (args.Count != expected.Count || args.Any(a => !expected.ContainsKey(a.Key))) throw new UserFacingException("Unknown or missing agent argument.");
+        if (definition.Parameters["required"]!.AsArray().Any(k => !args.ContainsKey(k!.ToString())) || args.Any(a => !expected.ContainsKey(a.Key))) throw new UserFacingException("Unknown or missing agent argument.");
         foreach (var entry in expected)
         {
+            if (!args.ContainsKey(entry.Key) && entry.Key is "purpose" or "attachmentIds") continue;
             var value = args[entry.Key] ?? throw new UserFacingException("Null argument.");
             var type = entry.Value!["type"]!.ToString();
             if (type == "string") { if (value is not JsonValue v || !v.TryGetValue<string>(out _)) throw new UserFacingException("String argument required."); }
@@ -76,13 +81,20 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     private static bool Overlaps(string a, string b) => a.Equals(b, StringComparison.OrdinalIgnoreCase) || a.StartsWith(b + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || b.StartsWith(a + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     private void CheckWrites(Session s, string[] paths)
     {
+        WorkflowPolicy.CheckFiles(s, paths);
         var all = workers.Workers(Root(s));
         if (s.ParentConversationId is not null)
         {
             var own = all.Single(w => w.Id == s.WorkerId);
-            if (!own.Active || !own.ReservationsHeld || paths.Any(p => !own.WritePaths.Contains(p, StringComparer.OrdinalIgnoreCase))) throw new UserFacingException("Mutation is outside this worker's reserved files.");
+            if (!own.Active || !own.ReservationsHeld) throw Failures.Reject("worker_assignment_inactive", $"Agent #{own.Number} no longer has an active editing assignment.", "Collect the worker result before creating a new assignment.");
+            var outside = paths.FirstOrDefault(p => !own.WritePaths.Contains(p, StringComparer.OrdinalIgnoreCase));
+            if (outside is not null) throw Failures.Reject("worker_path_not_assigned",
+                $"Agent #{own.Number} cannot edit this path. Assigned exact paths: {string.Join(", ", own.WritePaths.Take(4))}" + (own.WritePaths.Length > 4 ? " (additional assignments in /agent)." : ".") + " Folder names do not authorize descendant files.",
+                "Report the blocked path to the parent. Collect or cancel this worker, then create a new assignment naming each required file.", outside);
         }
-        if (all.Any(w => w.Id != s.WorkerId && w.ReservationsHeld && w.WritePaths.Any(a => paths.Any(b => Overlaps(a, b))))) throw new UserFacingException("File is reserved by a worker. Collect or cancel that worker first.");
+        var owner = all.FirstOrDefault(w => w.Id != s.WorkerId && w.ReservationsHeld && w.WritePaths.Any(a => paths.Any(b => Overlaps(a, b))));
+        if (owner is not null) throw Failures.Reject("file_reserved", $"File is reserved by Agent #{owner.Number} ({owner.State}).",
+            $"Inspect /agent #{owner.Number}. Collect or cancel that worker first; unresolved effects require /recover.", paths.First(p => owner.WritePaths.Any(a => Overlaps(a, p))));
     }
     public PreparedOperation Prepare(ToolExecutionContext ctx, ToolCall call)
     {
@@ -93,9 +105,16 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
             var args = Arguments(ctx.Session, call);
             if (call.Name == "agent_spawn") ValidateSpawn(ctx, call, args);
             if (call.Name is "agent_result" or "agent_cancel") Find(ctx.Session, args["agentId"]!.ToString());
+            if (call.Name == "agent_message")
+            {
+                SteeringMessage.ValidateText(args["text"]!.ToString());
+                if (store is not ISteeringStore inbox) throw new UserFacingException("Steering storage unavailable.");
+                if (inbox.SteeringReceipt(ctx.Session.Id, ctx.Run.Id, call.Id) is null && !Find(ctx.Session, args["agentId"]!.ToString()).Active)
+                    throw InactiveWorker(Find(ctx.Session, args["agentId"]!.ToString()));
+            }
             if (call.Name == "agent_wait")
             {
-                if (args["waitMilliseconds"]!.GetValue<int>() is < 0 or > 10000 || args["agentIds"]!.AsArray().Count is < 1 or > 8) throw new UserFacingException("Wait requires 1..8 agents and 0..10000 milliseconds.");
+                if (args["waitMilliseconds"]!.GetValue<int>() is < 0 or > 180000 || args["agentIds"]!.AsArray().Count is < 1 or > 16) throw new UserFacingException("Wait requires 1..16 agents and 0..180000 milliseconds (up to 3 minutes).");
                 foreach (var id in args["agentIds"]!.AsArray()) Find(ctx.Session, id!.ToString());
             }
             if (call.Name == "agent_finish" && (args["status"]!.ToString() is not ("completed" or "blocked") || string.IsNullOrWhiteSpace(args["summary"]!.ToString()) || args.ToJsonString().Length > 8000 || args["status"]!.ToString() == "blocked" && string.IsNullOrWhiteSpace(args["clarification"]!.ToString()))) throw new UserFacingException("Finish requires completed/blocked, a summary, a clarification when blocked, and an at most 8000-character report.");
@@ -106,7 +125,15 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
             var args = JsonNode.Parse(call.Arguments)!;
             CheckWrites(ctx.Session, Paths(ctx.Session, call.Name == "file_move" ? [args["source"]!.ToString(), args["destination"]!.ToString()] : [args["path"]!.ToString()]));
         }
-        if ((call.Name == "process_start" || call.Name.StartsWith("dotnet_", StringComparison.Ordinal)) && workers.Workers(Root(ctx.Session)).Any(w => w.ReservationsHeld)) throw new UserFacingException("Editing workers hold file reservations. Collect or cancel them before starting processes or verification.");
+        if (call.Name == "process_start" || HttpTools.IsWrite(call) || call.Name.StartsWith("dotnet_", StringComparison.Ordinal))
+        {
+            var owners = workers.Workers(Root(ctx.Session)).Where(w => w.ReservationsHeld).ToArray();
+            if (owners.Length > 0) throw Failures.Reject("editing_workers_active",
+                "Editing workers hold file reservations: " + string.Join(", ", owners.Select(w => $"Agent #{w.Number} ({w.State})")) + ".",
+                "Use /agents to inspect them. Wait and collect their results, or cancel them before launching processes or verification. Uncertain effects require /recover.");
+        }
+        if (call.Name == "workflow_finish" && workers.Workers(ctx.Session.Id).Any(w => w.Active || !w.Collected || w.ReservationsHeld))
+            throw new UserFacingException("Collect all worker results and settle reservations before finishing the workflow.");
         return inner.Prepare(ctx, call);
     }
     private WorkerProfile ValidateSpawn(ToolExecutionContext ctx, ToolCall call, JsonObject args)
@@ -115,16 +142,28 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
         var old = all.SingleOrDefault(w => w.ParentRunId == ctx.Run.Id && w.CallId == call.Id);
         if (old is not null) return old.Profile;
         var profile = ctx.Session.EnabledWorkers.SingleOrDefault(p => p.Name.Equals(args["profile"]!.ToString(), StringComparison.OrdinalIgnoreCase)) ?? throw new UserFacingException("Worker profile is not enabled in this conversation.");
-        if (all.Count(w => w.Active) >= 2 || all.Count(w => w.ParentRunId == ctx.Run.Id) >= 8) throw new UserFacingException("Worker capacity reached (two active, eight launches per run). Join existing workers first.");
+        var policy = ctx.Session.WorkerPolicy; policy.Validate();
+        if (all.Count(w => w.ParentRunId == ctx.Run.Id) >= 16)
+            throw new UserFacingException("Worker launch budget reached (sixteen per run). Complete existing work before explicitly starting another batch.");
+        if (all.Count(w => w.Active) >= policy.MaxConcurrent)
+            throw new UserFacingException($"Worker capacity reached ({policy.MaxConcurrent} active total). Join existing workers first.");
+        if (profile.Connection.Provider != ModelProvider.ChatGpt && all.Count(w => w.Active && w.Profile.Connection.Provider != ModelProvider.ChatGpt) >= policy.MaxLocalConcurrent)
+            throw new UserFacingException($"Local worker capacity reached ({policy.MaxLocalConcurrent} active local workers). Join local workers first; enabled ChatGPT profiles can use remaining total capacity.");
         if (string.IsNullOrWhiteSpace(args["task"]!.ToString()) || args["task"]!.ToString().Length > 16000) throw new UserFacingException("Supply a bounded, nonempty task.");
+        if ((args["purpose"]?.ToString().Length ?? 0) > 80) throw new UserFacingException("Worker purpose exceeds 80 characters.");
+        var images = args["attachmentIds"]?.AsArray().Select(i => i!.ToString()).ToArray() ?? [];
+        var submitted = AttachmentFiles.SubmittedIds(ctx.Session);
+        if (images.Length > 4 || images.Distinct().Count() != images.Length || images.Any(id => !submitted.Contains(id) || !store.Attachments(ctx.Session.Id).Any(a => a.Id == id)))
+            throw new UserFacingException("Share at most four distinct images already submitted to this conversation.");
+        if (images.Length > 0 && !profile.Connection.Capabilities.Vision) throw new UserFacingException("Worker model does not advertise image input.");
         var shares = SharedIds(args["task"]!.ToString());
-        if (shares.Length > 4 || shares.Any(id => !ctx.Session.Artifacts.Any(a => a.Id == id))) throw new UserFacingException("Share at most four artifacts registered to the parent conversation.");
+        if (shares.Length > 16 || shares.Any(id => !ctx.Session.Artifacts.Any(a => a.Id == id))) throw new UserFacingException("Share at most sixteen artifacts registered to the parent conversation.");
         var paths = Paths(ctx.Session, args["writePaths"]!.AsArray().Select(p => p!.ToString()));
         if (paths.Any(a => paths.Any(b => a != b && Overlaps(a, b)))) throw new UserFacingException("Assigned file paths overlap as file/directory ancestors.");
-        foreach (var path in paths) if (path == "." || Directory.Exists(Path.Combine(ctx.Workspace, path))) throw new UserFacingException("Assign exact file paths, not directories.");
+        foreach (var path in paths) if (path == "." || Directory.Exists(Path.Combine(ctx.Workspace, path))) throw Failures.Reject("worker_directory_assignment", "Assignments must name exact files; a directory does not include its descendants.", "List the files to edit or create individually in writePaths.", path);
         if (paths.Length > 0)
         {
-            if (profile.Mode < PermissionMode.Edit || ctx.Session.Mode < PermissionMode.Edit || ctx.Session.Workflow == WorkflowMode.Plan) throw new UserFacingException("Editing delegation requires Work and Edit permission in both parent and profile.");
+            if (profile.Mode < PermissionMode.Edit || ctx.Session.Mode < PermissionMode.Edit || ctx.Session.Workflow is WorkflowMode.Plan or WorkflowMode.Review) throw new UserFacingException("Editing delegation requires Work and Edit permission in both parent and profile.");
             CheckWrites(ctx.Session, paths);
             if (ctx.Session.Processes.Any(p => p.State is "Running" or "Prepared" || !p.TerminationConfirmed)) throw new UserFacingException("Stop existing conversation processes with confirmed termination before assigning edits.");
         }
@@ -151,17 +190,25 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
                 child.WorkerId = record.Id;
                 var approvedPlan = Planning.Active(ctx.Session);
                 child.WorkerInstructions = "Parent scope and permission snapshot: " + Json.Serialize(new { ctx.Session.Mode, ctx.Session.Workflow, plan = approvedPlan is null ? null : new { approvedPlan.Id, approvedPlan.State, approvedPlan.Current, approval = approvedPlan.Approvals.LastOrDefault() }, assignedFiles = paths }) + "\nTask: " + record.Task;
+                record.Purpose = args["purpose"]?.ToString() ?? "general";
+                if (record.Purpose.Length > 80) throw new UserFacingException("Worker purpose exceeds 80 characters.");
                 foreach (var sharedId in SharedIds(record.Task))
                 {
-                    var read = ArtifactAccess.Execute(ctx, "artifact_read", new JsonObject { ["artifactId"] = sharedId, ["cursor"] = 0, ["maxCharacters"] = 4000 });
-                    var artifactDir = Path.Combine(store.DataDirectory, "artifacts", child.Id); Directory.CreateDirectory(artifactDir);
-                    var copy = new ArtifactRecord { Kind = "agent-evidence", Path = Path.Combine(artifactDir, sharedId + ".json"), Truncated = JsonNode.Parse(read.Content)?["hasMore"]?.GetValue<bool>() == true };
-                    var childContext = new ToolExecutionContext(child, new(), store, ctx.Cancellation); ArtifactAccess.Validate(childContext, copy.Path);
-                    File.WriteAllText(copy.Path, read.Content); child.Artifacts.Add(copy);
-                    child.WorkerInstructions += $"\nExplicitly shared parent artifact {sharedId}: read child artifact {copy.Id}; this is a bounded excerpt with source state/cursor, not necessarily the full artifact.";
+                    child.ArtifactGrants.Add(new(ctx.Session.Id, sharedId));
+                    child.WorkerInstructions += $"\nShared parent artifact {sharedId}: use artifact_read/search to inspect retained evidence. Source conversation: {ctx.Session.Id}.";
+                }
+                var images = args["attachmentIds"]?.AsArray().Select(i => i!.ToString()).ToArray() ?? [];
+                if (images.Length > 4) throw new UserFacingException("Share at most four images.");
+                foreach (var imageId in images)
+                {
+                    if (!child.Connection.Capabilities.Vision) throw new UserFacingException("Worker model does not advertise image input.");
+                    var image = store.Attachments(ctx.Session.Id).SingleOrDefault(a => a.Id == imageId) ?? throw new UserFacingException("Image is not owned by the parent.");
+                    var copy = AttachmentFiles.Import(store, child.Id, AttachmentFiles.Read(store, image), image.Width, image.Height, ctx.Session.Id, image.Id);
+                    child.Attachments.Add(copy);
+                    child.WorkerInstructions += $"\nAssigned image {copy.Id} comes from parent attachment {imageId}.";
                 }
                 record = workers.CreateWorker(record, child);
-                var source = CancellationTokenSource.CreateLinkedTokenSource(ctx.Cancellation, lifetime.Token); source.CancelAfter(TimeSpan.FromMinutes(5));
+                var source = CancellationTokenSource.CreateLinkedTokenSource(ctx.Cancellation, lifetime.Token); source.CancelAfter(TimeSpan.FromMinutes(10));
                 var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 var task = Task.Run(async () => { await start.Task; await RunChild(record, child, source.Token, ctx.Emit); });
                 live[record.Id] = (source, task); start.SetResult();
@@ -170,8 +217,24 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
             case "agent_wait":
                 var ids = args["agentIds"]!.AsArray().Select(i => Find(ctx.Session, i!.ToString()).Id).ToArray();
                 var tasks = ids.Where(live.ContainsKey).Select(id => live[id].Task).ToArray();
-                if (tasks.Length > 0) await Task.WhenAny(Task.WhenAny(tasks), Task.Delay(args["waitMilliseconds"]!.GetValue<int>(), ctx.Cancellation));
-                ctx.Cancellation.ThrowIfCancellationRequested(); return new(Json.Serialize(new { agents = workers.Workers(ctx.Session.Id).Where(w => ids.Contains(w.Id)).Select(Summary) }));
+                using (var waitStop = CancellationTokenSource.CreateLinkedTokenSource(ctx.Cancellation))
+                {
+                    try { if (tasks.Length > 0) await SteeringWake.WaitOrSteeringAsync(ctx, Task.WhenAny(Task.WhenAny(tasks), Task.Delay(args["waitMilliseconds"]!.GetValue<int>(), waitStop.Token))); }
+                    finally { waitStop.Cancel(); }
+                }
+                ctx.Cancellation.ThrowIfCancellationRequested(); return new(Json.Serialize(new { agents = workers.Workers(ctx.Session.Id).Where(w => ids.Contains(w.Id)).Select(Summary), interruptedBy = ctx.SteeringPending ? "steering" : null }));
+            case "agent_message":
+                var inbox = (ISteeringStore)store;
+                var receipt = inbox.SteeringReceipt(ctx.Session.Id, ctx.Run.Id, call.Id);
+                if (receipt is null)
+                {
+                    var target = Find(ctx.Session, args["agentId"]!.ToString());
+                    if (!target.Active) throw InactiveWorker(target);
+                    receipt = inbox.SendSteering(ctx.Session.Id, target.ChildId, args["text"]!.ToString(), "parent", ctx.Run.Id, call.Id);
+                }
+                var recipient = workers.Workers(ctx.Session.Id).FirstOrDefault(w => w.ChildId == receipt.ConversationId);
+                ctx.Emit?.Invoke(new("steering.saved", ctx.Session.Id, ctx.Run.Id, SteeringNotice.Create(receipt, "Steering saved", recipient?.Number)));
+                return new(Json.Serialize(new { messageId = receipt.Id, targetId = receipt.ConversationId, state = receipt.State, note = "Saved for delivery, not confirmation of compliance." }));
             case "agent_cancel":
                 var cancelled = Find(ctx.Session, args["agentId"]!.ToString()); await CancelAsync(cancelled.Id); return new(Json.Serialize(Summary(Find(ctx.Session, cancelled.Id))));
             case "agent_result":
@@ -207,14 +270,18 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     private async Task RunChild(WorkerRecord record, Session child, CancellationToken ct, Action<AgentEvent>? emit)
     {
         var timer = Stopwatch.StartNew();
+        record.RequestLimit = 20;
         try
         {
             using var lease = store.Acquire(child.Id);
             record.State = "Running"; workers.SaveWorker(record);
-            await new AgentRunner(store, models(child), this) { MaxSteps = 10, ActiveTimeLimit = TimeSpan.FromMinutes(5) }.RunAsync(child, record.Task, null, e =>
+            var prompt = new UserPrompt { Parts = [new("text", record.Task), .. child.Attachments.Select(a => new PromptPart("image", a.Id))] };
+            await new AgentRunner(store, models(child), this) { MaxSteps = 20, ActiveTimeLimit = TimeSpan.FromMinutes(10) }.RunAsync(child, record.Task, null, e =>
             {
+                if (e.Type.StartsWith("steering.", StringComparison.Ordinal))
+                    emit?.Invoke(e.Payload is SteeringNotice notice ? e with { Payload = notice with { Target = $"Agent #{record.Number}" } } : e);
                 if (e.Type == "model.completed" && JsonNode.Parse(Json.Serialize(e.Payload))?["usage"] is { } usage) record.RequestUsage.Add(usage.ToString());
-            }, ct);
+            }, ct, child.Attachments.Count > 0 ? prompt : null);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException) { record.Reason = "Worker interrupted; inspect saved evidence. No automatic retry."; }
         finally
@@ -228,17 +295,25 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
                 record.Report = persisted.WorkerReport;
                 record.State = persisted.Mutations.Any(m => m.State == "Prepared") || run?.State == RunState.RecoveryRequired ? "RecoveryRequired" : ct.IsCancellationRequested ? "Cancelled" : run?.State == RunState.Completed && record.Report is not null ? (JsonNode.Parse(record.Report)?["status"]?.ToString() == "blocked" ? "Blocked" : "Completed") : "Failed";
                 record.Reason ??= ct.IsCancellationRequested ? "Worker cancelled or its task deadline expired; completed edits were retained." : run?.Reason ?? (record.Report is null ? "Worker did not submit a completed report." : null);
+                record.AppliedCheckpointCount = persisted.Mutations.Count(m => m.State == "Applied");
+                record.RequestsUsed = run?.BatchRequests;
+                if (record.State is "Failed" or "RecoveryRequired") record.Failure = Failures.Worker(record, run?.PauseReason ?? PauseReason.None, run?.BatchRequests ?? 0);
                 record.ReservationsHeld &= record.State == "RecoveryRequired";
+                record.WaitingMilliseconds = child.ModelWaitMilliseconds;
                 record.DurationMilliseconds = timer.Elapsed.TotalMilliseconds; record.Usage = run?.Usage;
                 workers.SaveWorker(record);
             }
             finally { gate.Release(); }
-            emit?.Invoke(new("agent.finished", record.ParentId, record.ParentRunId, new { agentId = record.Id, record.ChildId, record.Number, profile = record.Profile.Name, model = record.Profile.Model, record.State, record.DurationMilliseconds, record.RequestUsage, record.Reason, message = $"Agent #{record.Number} · {record.State} · {record.DurationMilliseconds / 1000:0.0}s · tests not run" }));
+            emit?.Invoke(new("agent.finished", record.ParentId, record.ParentRunId, new { agentId = record.Id, record.ChildId, record.Number, profile = record.Profile.Name, model = record.Profile.Model, record.State, record.DurationMilliseconds, record.RequestUsage, record.Reason, record.Failure, record.AppliedCheckpointCount, record.RequestsUsed, record.RequestLimit, message = $"Agent #{record.Number} · {record.State} · {record.DurationMilliseconds / 1000:0.0}s · tests not run" }));
         }
     }
-    public WorkerRecord Find(Session parent, string id) => workers.Workers(parent.Id).SingleOrDefault(w => w.Id == id || "#" + w.Number == id) ?? throw new UserFacingException("Agent does not belong to this conversation.");
+    public WorkerRecord Find(Session parent, string id) => workers.Workers(parent.Id).SingleOrDefault(w => w.Id == id || "#" + w.Number == id)
+        ?? throw Failures.Reject("worker_not_found", "No worker with this ID exists in the current conversation.", "Use /agents and select an ID or #number from this conversation.", id);
+    public static UserFacingException InactiveWorker(WorkerRecord worker) => Failures.Reject("worker_inactive",
+        $"Agent #{worker.Number} is {worker.State}; it cannot receive new messages. Messages cannot relaunch a worker.",
+        $"Inspect /agent #{worker.Number} and collect its result. Create a new assignment if more work is needed.", $"Agent #{worker.Number}");
     private static string[] SharedIds(string task) => System.Text.RegularExpressions.Regex.Matches(task, @"\[artifact:([^\]\s]+)\]").Select(m => m.Groups[1].Value).Distinct().ToArray();
-    public static object Summary(WorkerRecord w) => new { agentId = w.Id, w.Number, w.ChildId, profile = w.Profile.Name, model = w.Profile.Model, w.State, w.Collected, w.ReservationsHeld, w.WritePaths, w.DurationMilliseconds, w.Reason };
+    public static object Summary(WorkerRecord w) => new { agentId = w.Id, w.Number, w.ChildId, profile = w.Profile.Name, model = w.Profile.Model, provider = w.Profile.Connection.Provider.ToString(), w.State, w.Collected, w.ReservationsHeld, w.WritePaths, w.DurationMilliseconds, w.WaitingMilliseconds, w.Purpose, w.Reason, w.Failure, w.AppliedCheckpointCount, w.RequestsUsed, w.RequestLimit };
     public async Task CancelAsync(string id)
     {
         if (live.TryGetValue(id, out var entry)) { entry.Source.Cancel(); await entry.Task; }
@@ -253,10 +328,10 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     {
         if (ctx.Session.ParentConversationId is not null) throw new UserFacingException("Worker must finish with agent_finish and a report.");
         var pending = workers.Workers(ctx.Session.Id).Where(w => w.ParentRunId == ctx.Run.Id && !w.Collected).ToArray();
-        if (pending.Length == 0) return true;
+        if (pending.Length == 0) return await inner.CanCompleteAsync(ctx);
         if (pending.Any(w => w.State == "RecoveryRequired")) throw new UserFacingException("A worker requires recovery. Inspect /agents and /recover.");
         var active = pending.Where(w => live.ContainsKey(w.Id)).Select(w => live[w.Id].Task).ToArray();
-        if (active.Length > 0) await Task.WhenAll(active).WaitAsync(ctx.Cancellation);
+        if (active.Length > 0) await SteeringWake.WaitOrSteeringAsync(ctx, Task.WhenAll(active));
         return false;
     }
     public async Task RunEndedAsync(ToolExecutionContext ctx)
@@ -272,6 +347,11 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     public Task CancelProcessesAsync(ToolExecutionContext ctx) => inner.CancelProcessesAsync(ctx);
     public ToolOutput? Recover(ToolExecutionContext ctx, ToolCall call)
     {
+        if (call.Name == "agent_message")
+        {
+            var receipt = (store as ISteeringStore)?.SteeringReceipt(ctx.Session.Id, ctx.Run.Id, call.Id);
+            return new(Json.Serialize(receipt is null ? (object)new { error = "No committed steering message exists. This call was not replayed." } : new { messageId = receipt.Id, targetId = receipt.ConversationId, state = receipt.State }));
+        }
         if (call.Name == "agent_spawn")
         {
             var record = workers.Workers(ctx.Session.Id).SingleOrDefault(w => w.ParentRunId == ctx.Run.Id && w.CallId == call.Id);
@@ -304,8 +384,26 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
             var owner = new[] { parent }.Concat(ChildSessions(parent)).SingleOrDefault(s => s.Mutations.Any(m => m.Id == checkpoint)) ?? throw new UserFacingException("Checkpoint does not belong to this conversation tree.");
             var mutation = owner.Mutations.Single(m => m.Id == checkpoint);
             CheckWrites(parent, Paths(parent, mutation.Files.Select(f => f.Path)));
-            if (parent.Workflow == WorkflowMode.Plan || parent.Mode < PermissionMode.Edit) throw new UserFacingException("Undo requires Work and Edit permissions.");
+            WorkflowPolicy.CheckFiles(parent, mutation.Files.Select(f => f.Path));
             return FileOperations.Undo(new(owner, owner.Runs.LastOrDefault() ?? new(), store, CancellationToken.None), checkpoint);
+        }
+        finally { gate.Release(); }
+    }
+    public async Task<ToolOutput> ExportReportAsync(Session parent, string id, string destination)
+    {
+        await gate.WaitAsync();
+        try
+        {
+            var report = parent.Reports.SingleOrDefault(r => r.Id == id) ?? throw new UserFacingException("Report does not belong to this conversation.");
+            if (!destination.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) throw new UserFacingException("Report export requires a new .md file.");
+            var path = Paths(parent, [destination]).Single();
+            if (workers.Workers(parent.Id).Any(w => w.ReservationsHeld && w.WritePaths.Any(p => Overlaps(p, path)))) throw new UserFacingException("Export path is reserved by a worker.");
+            var ctx = new ToolExecutionContext(parent, parent.Runs.LastOrDefault() ?? new(), store, CancellationToken.None);
+            var call = new ToolCall { Id = "export-" + Guid.NewGuid().ToString("N"), Name = "file_create" };
+            var args = new JsonObject { ["path"] = path, ["content"] = WorkflowTools.Markdown(report) };
+            var record = FileOperations.Prepare(ctx, call, args, userExport: true);
+            ctx.Save("report.export.prepared", new { report.Id, checkpointId = record.Id, path });
+            return FileOperations.Apply(ctx, record, userExport: true);
         }
         finally { gate.Release(); }
     }

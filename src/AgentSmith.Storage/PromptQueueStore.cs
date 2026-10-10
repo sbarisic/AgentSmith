@@ -27,13 +27,17 @@ public sealed partial class SessionStore
         return new(items, reason);
     }
     public QueuedPrompt Enqueue(string conversationId, string text)
+        => Enqueue(conversationId, UserPrompt.Text(text));
+    public QueuedPrompt Enqueue(string conversationId, UserPrompt prompt)
     {
-        if (string.IsNullOrWhiteSpace(text) || Encoding.UTF8.GetByteCount(text) > 32768) throw new UserFacingException("Prompt must be nonempty and at most 32 KiB UTF-8.");
+        prompt.Validate();
+        var owned = Attachments(conversationId);
+        if (prompt.Parts.Any(p => p.Kind == "image" && !owned.Any(a => a.Id == p.Value))) throw new UserFacingException("Image is not owned by this conversation.");
         using var db = Open(); using var tx = db.BeginTransaction();
         using var count = Command(db, tx, "SELECT COUNT(*) FROM prompt_queue WHERE conversation_id=$id AND state='Pending'", ("$id", conversationId));
         if (Convert.ToInt32(count.ExecuteScalar()) >= 20) throw new UserFacingException("The queue already contains 20 pending prompts.");
         count.CommandText = "SELECT COALESCE(MAX(sequence),0)+1 FROM prompt_queue WHERE conversation_id=$id";
-        var item = new QueuedPrompt { Text = text, Sequence = Convert.ToInt64(count.ExecuteScalar()) };
+        var item = new QueuedPrompt { Text = prompt.PlainText, Prompt = prompt, Sequence = Convert.ToInt64(count.ExecuteScalar()) };
         using var insert = Command(db, tx, "INSERT INTO prompt_queue VALUES($key,$id,$seq,'Pending',$payload)", ("$key", item.Id), ("$id", conversationId), ("$seq", item.Sequence), ("$payload", Json.Serialize(item)));
         insert.ExecuteNonQuery(); QueueEvent(db, tx, conversationId, "prompt.queued", new { item.Id, item.Sequence }); tx.Commit(); return item;
     }
@@ -65,14 +69,15 @@ public sealed partial class SessionStore
             var item = JsonSerializer.Deserialize<QueuedPrompt>(payload, Json.Options)!;
             var plan = Planning.Active(session); var run = new Run { PlanId = plan?.Id, PlanRevision = plan?.Current.Revision };
             item.State = "Dispatched"; item.RunId = run.Id;
-            var message = new JsonObject { ["role"] = "user", ["content"] = item.Text };
+            var message = item.Prompt?.Parts.Any(p => p.Kind == "image") == true ? item.Prompt.HistoryItem() : new JsonObject { ["role"] = "user", ["content"] = item.Text };
+            session.MessageWorkflows[session.History.Count] = session.Workflow;
             session.History.Add(message); session.Runs.Add(run);
             try
             {
                 using var update = Command(db, tx, "UPDATE prompt_queue SET state='Dispatched',payload=$payload WHERE id=$id", ("$payload", Json.Serialize(item)), ("$id", item.Id)); update.ExecuteNonQuery();
                 SaveInTransaction(session, new("prompt.dispatched", session.Id, run.Id, new { item.Id, item.RunId }), db, tx); tx.Commit(); return run;
             }
-            catch { session.History.Remove(message); session.Runs.Remove(run); throw; }
+            catch { session.MessageWorkflows.Remove(session.History.Count - 1); session.History.Remove(message); session.Runs.Remove(run); throw; }
         }
     }
     public void SettleQueue(string conversationId, Run run)

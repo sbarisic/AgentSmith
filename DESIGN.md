@@ -1,22 +1,114 @@
 # AgentSmith: idea and implementation plan
 
+Steering presentation uses additive `SteeringNotice` metadata: message/run/target identity, recipient label, sender provenance, delivery state and a bounded sanitized preview. The inbox retains the original text. Worker coordinators attach their known agent number to delivery events without querying storage at each inference boundary. Compact rendering groups each message's preview with its recipient, then shows short delivery updates; a bounded 512-ID display cache prevents repeated bodies. `/steering` and verbose output explicitly show previews again. No delivery-state or schema changes are introduced.
+
+## Structured failure presentation — source update pending build
+
+`FailureDetail` adds code, category, operation, target, reason, next action, and observed effect to tool results/events while preserving the legacy `error` field. Preparation rejections are distinguished from read failures and uncertain mutations. Recovery determines mutation effects; presentation does not infer rollback from an exception. Argument summaries use an allowlist of target fields and bounded credential-redacted text, never complete argument JSON or exception bodies.
+
+Worker records persist nullable failure details, request counts/limits, and applied checkpoint counts in their existing JSON storage. Terminal events and `/agent` share these records. Missing metadata in older records remains unknown. Exact-path reservation errors identify the attempted file and bounded assignments without expanding access. SQLite failures use primary result codes, not exception-message parsing, and preserve uncertainty about unsaved effects. No schema migration or live-data backfill is required.
+
+These changes have static review only; compilation, automated execution, visual acceptance, and publishing remain pending while the user's agent runs.
+
+## Durable steering architecture
+
+Implemented and published locally on 2026-10-10. Verification passed 302 core/tool and 99 CLI tests. Live Bonsai acceptance confirmed parent redirection, worker messaging, wait wakeup and explicit restart delivery; the initial restart wording failure and correction are recorded in the implementation document. ChatGPT live acceptance remains unverified.
+
+Schema v9 adds a steering inbox after a SQLite-consistent v8 backup. Each row records root and target conversation/run identity, monotonic submission sequence, text, sender provenance, source call identity, delivery timestamps and history position. Parent and child snapshots remain independent. `ISteeringStore` is additive to the session store; inbox writes never mutate the runner's in-memory session from console callbacks.
+
+Acceptance and ordinary completion acquire SQLite write transactions. If submission wins, completion must reconsider it; if completion wins, submission is rejected. Starting a prepared tool uses the same ordering rule. Incorporation clones the current snapshot and atomically saves skipped results for every unstarted call, the ordered steering history items and inbox transitions. Only after commit does the runner update its live snapshot. A failed commit leaves both history and inbox unchanged. Prepared but unexecuted file journals become NotApplied.
+
+Delivery states are Pending, Incorporated, Sent and Removed. Sent is recorded on the first provider event for an ordinary inference request, not during compaction or request preparation. This is transport progress, not proof that instructions were followed. Model-issued worker messages have a unique originating root/run/call receipt; recovery returns the receipt without another send. Direct user instructions and parent-generated directions have distinct labels. Runtime permissions, workflow, reservations, deadlines and approval gates remain authoritative.
+
+The shared wake service uses per-data-directory/run notifications plus bounded checks of persisted inbox contents. Waits return bounded output/status with `interruptedBy: steering`; only their waiting tasks stop. Process and worker lifetimes keep their existing cancellation rules. Safe-boundary checks surround tool dispatch, settled effects, response persistence, context preparation and normal completion. Started effects and incomplete provider responses retain existing recovery rules. Committed questions, review decisions and explicit finish tools take precedence; held messages remain inspectable.
+
+Active runs retain the original prompt's history position and incorporated steering positions. Context projection preserves those entries verbatim across compaction, and memory retrieval considers the original task together with the newest direction. Pending inbox text stays outside inference until transactionally incorporated. No request/deadline budget is reset by delivery.
+
+CLI commands, parent `agent_message`, worker runners and queue handling share this service. Ordinary busy input remains FIFO queued input; no automatic broadcasting or conversion to steering occurs. Structured `steering.*` events pass through the render coordinator, with escaped bounded previews.
+
+Worker waits now accept 0..180,000 milliseconds (three minutes) in source. Parent guidance prefers the longer wait to reduce model polling requests. The existing task-completion/cancellation race still returns early; intermediate progress does not wake it. Process waits retain their 60-second cap. This wait-limit change is included in the refreshed Windows build; the full Release suite passed 376 tests on 2026-10-10.
+
+## Direct web image extension
+
+`image_read(path)` accepts public HTTP/HTTPS URLs as well as existing workspace files without changing the argument schema or replaying older calls differently. URL validation and downloads use the credential-free public-web transport. Each redirect is validated and each DNS connection is pinned to checked public addresses. The download is bounded to 10 MiB after decompression, five redirects and 30 seconds. MIME checks reject unsupported types; byte decoding still verifies PNG/JPEG/BMP with the shared dimension and normalized-size limits, including when a server omits its MIME type or uses octet-stream.
+
+Attachment records add optional requested/final URL and retrieval timestamp fields, alongside the original-byte hash and source run/call. These fields are saved with the immutable image import, before the tool receipt. Recovery reuses that import without network access. Tool results carry a `web-image` kind and attachment reference; model-facing image projection is unchanged. Compact UI output omits URL queries. Recognized credential-bearing model arguments are removed before persistence. No additional credentials or filesystem permissions are granted, and workers use the same vision and public-network restrictions.
+
+After the user closed the agent and authorized building, the Release suite passed all 376 tests and the self-contained Windows build was refreshed. Published help and Runtime/Tools assembly hash checks passed. Live model inspection of a remote image remains unverified; earlier live results below cover workspace images.
+
+## Image, workspace, and HTTP tool architecture
+
+Delivery verification: 360 Release tests passed; the self-contained Windows build and published help/resume/tool-availability smoke checks succeeded. Live Bonsai parent, worker and HTTP acceptance passed within the limitations in CLI_IMPLEMENTATION_PLAN.md. Live ChatGPT acceptance is incomplete because account/state access failed.
+
+`image_read` imports a decoded PNG snapshot with source path/hash and originating run/call identity. Shared Windows decoding serves file tools and clipboard input. Existing attachment rows and aggregate JSON hold additive provenance fields; no new database schema is needed. Completed calls retain image IDs. The model-facing projection appends labeled image evidence after the complete response/tool-output group, without adding a new user turn to saved history. Responses and Chat Completions receive their existing image content forms. Context accounting includes projected images; compaction retains attachment references as historical evidence. Recovery reuses committed imports even when the source image has been deleted.
+
+`workspace_map` uses managed workspace traversal with depth 1..8, 10,000 entries and 262,144 accumulated path characters as scan bounds. Defaults are depth 3 and 200 preview entries. It parses up to 32 manifests of at most 256 KiB each using XML with DTDs/entities disabled or bounded solution-text matching. Conditional declarations are not evaluated. Full bounded scans become conversation artifacts; compact overviews report omissions. Only exact image reads have the generated-folder exclusion exception.
+
+`http_request` has method-dependent permissions and a persisted prepared effect (`ReadOnly` or `Network`). Writes require an Execute parent in Work/Document, respect approved-plan ceilings, and require settled editing workers. The task-tree lease used for process barriers excludes concurrent editing-worker admission. The runner uses the resolved effect for cancellation/recovery. Intent is saved before sending; observed results have receipts. Missing write receipts never cause automatic replay.
+
+HTTP uses a separate client without cookies, proxies, redirects, or model credentials. DNS results must all match the destination class: loopback for localhost/literal loopback, otherwise public addresses. Socket connections use validated addresses. Requests use HTTP/1.1 and close connections; there is no application retry. Text/JSON responses become bounded artifacts. Unsupported content/encoding, truncation, interrupted bodies, and status codes remain explicit. Recognized credential rejection runs before proposed HTTP calls are persisted; response credential patterns are withheld, without claiming complete detection.
+
+All three tools use the existing registry, workflow policy, worker filtering, terminal renderer and JSON events. Authentication profiles, LAN targets, binary downloads, OCR services, browser rendering and semantic code indexing remain deferred.
+
+## Public web tools
+
+`web_search` and `web_read` are Inspect-capability, read-only registry tools available in every workflow and in worker allowlists. They do not depend on a hosted model's browsing API. Search uses DuckDuckGo's HTML endpoint without an API key; read uses a dedicated credential-free `HttpClient` and AngleSharp 1.5.0 for inert HTML parsing. The model must treat sources as untrusted evidence and cite URLs. It must not transmit private project/memory contents in queries.
+
+The transport accepts public default-port HTTP/HTTPS only, validates each redirect, resolves DNS in the connection callback, rejects non-public addresses, and connects to the vetted address. Cookies, proxies, automatic redirects, default credentials, and script/subresource loading are absent. Requests have 30-second deadlines, five redirects, 2 MiB decompressed input, bounded extraction, and sanitized errors. Search format changes or CAPTCHA produce explicit failures rather than fabricated results. Binary/PDF content and browser interaction are deferred.
+
+Page text is retained in a `web-page` artifact with final URL, retrieval time, title, and truncation metadata. The existing artifact registry and session JSON require no schema migration. Worker reports can import these artifacts through existing collection; arbitrary cross-conversation reads remain forbidden. UI summaries show source titles/URLs and bounded excerpts. Tests were added for transport validation, extraction, artifacts, cancellation, and permissions; build/test execution and live agent acceptance await the user's build authorization.
+
+## Pending source update: mixed GPT/local parallel workers
+
+ChatGPT profiles already route through the provider factory using account references rather than copied credentials. The new persisted `WorkerPolicy` adds total and local admission limits. New CLI chats use six total/one local; missing policy fields default to two total/one local while explicit saved values remain unchanged. Both limits validate to 1..16. Policy lives in the existing session JSON, requiring no schema migration. Settings can change only while idle; a reduction below active counts is rejected.
+
+The coordinator checks limits under the existing spawn/file lease in preparation and execution. Duplicate spawn receipts bypass admission checks and return the existing child. Local capacity is shared across Local and LM Studio workers, inside the total limit; local endpoint semaphores remain independent. ChatGPT inference has no local endpoint gate and can overlap across workers. Account/service limits remain external constraints, with no new transport retry or fallback. The parent is not a worker slot.
+
+Proactive instructions prefer local profiles for routine tasks and enabled GPT profiles for difficult reasoning, implementation, and review. Each profile supports multiple independent children. Exact file reservations, serial tools within each agent, process barriers, permission ceilings, cancellation, recovery, and collection before queue dispatch remain unchanged. Worker summaries include provider identity. `agent_wait` accepts up to sixteen IDs; the sixteen-launch run ceiling and existing time/round limits remain.
+
+This source update was initially held while a CLI agent was running; the authorized baseline build and automated regression suite passed on 2026-10-10. New regression cases cover mixed-provider capacity, race rejection, legacy persistence, duplicate spawning at capacity, cancellation, and CLI controls. GPT profile registration in the current tool environment failed before success was reported; live GPT parallelism remains unverified.
+
 Status: the CLI supports LM Studio, model-specific workers, inspection, checkpointed edits, process execution, recovery, Plan workflow, durable task tracking, artifact access, structured .NET verification, context compaction, readable activity, Escape cancellation, and queued prompts. Live acceptance details are maintained in the CLI implementation plan. The broader architecture below remains a roadmap.
 
 Created: 2026-10-09
 
 Updated: 2026-10-09. LM Studio and bounded model-specific workers extend the locally published continuous-conversation foundation. The previous continuous-conversation release passed 131 tests plus live ChatGPT and native-terminal acceptance. Current worker/provider verification passed 158 automated tests and live ChatGPT/Bonsai acceptance; the self-contained Windows build has been refreshed. Measurements, model limitations, and observed outcomes are recorded in the [current delivery record](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-lm-studio-and-model-specific-subagents). The completed changes and documentation are included in the user-requested local source commit; no remote push or public publication is included.
 
+## Clipboard, budgets, and delegation architecture (2026-10-10)
+
+Schema v7 follows a consistent v6 backup. `UserPrompt` keeps ordered typed text/image parts. `AttachmentFiles` stores immutable PNG bytes in an owned directory with SHA-256, dimensions, size, and optional parent provenance. Attachment registration is independent of the mutable session snapshot, so the busy composer cannot overwrite runner state. Atomic queued-run creation appends the typed message and claims its queue item together. Draft/queued image IDs are excluded from inference and delegation until submitted. Resume initializes the composer callbacks before showing saved-work confirmation. That confirmation rejects attachments and gives visible paste guidance without reading the clipboard; only the subsequent chat composer accepts images. `WindowsClipboard` and image decoding remain in the CLI; `SessionModelClient` checks ownership/capability and materializes image data only for transport.
+
+`ContextPolicy` separates advertised capacity, usable input, and the selected working budget. Local discovery uses loaded context and endpoint slots; the versioned OpenAI catalog is a sourced fallback when account metadata is absent. Balanced caps input at 128,000 tokens after output and safety reserves, triggering at 90% and targeting 60%. Unknown models keep the character fallback unless explicitly configured. Provider counting is optional; local template/tokenization includes tool definitions and labels image estimates separately. Unsupported account-route counting falls back to conservative usage-calibrated estimates. `ToolResultProjection` retains original results and registers artifacts, using bounded excerpts only for inference. Projection version and context policy participate in compaction attempt identity. Summarization stays on the parent provider, with complete protocol groups, eight requests, 32,000-token-or-smaller batches, and the existing validation/atomic activation rules.
+
+`ExecutionPolicy` persists a 150-request/60-minute default per explicit batch. Summarization counts toward it. Structured pause reasons separate limits, failed compaction, context, and repeated non-progress. Status reports remaining requests/time; waiting tools are excluded from repetition detection. Explicit decisions and queue holds are unchanged.
+
+Delegation is a persisted proactive/manual policy over already-enabled profiles. Workers carry purpose metadata and up to sixteen read-only grants to registered parent artifacts; granted reads do not save the parent's aggregate. Images require explicit ownership-checked sharing and child-owned provenance references. Worker admission uses the saved total/local policy (six/one in new CLI chats), with sixteen launches per root run and twenty rounds/ten minutes per worker. Endpoint-scoped capacity gates serialize local inference when only one slot is reported. Waiting is visible and measured. Sixty-second process/worker waits avoid repeated short inference polls. File reservations, permission intersections and parent verification remain authoritative. Usage separates completed local work, cached input where reported, and coordination overhead; no exact savings claim is inferred.
+
+Release verification passed 231 tests; 39 targeted cases were rerun after the final prompt/pause adjustments. Live image sharing, reopened image queue dispatch, a 34-request task, model-aware context/compaction, delegated coding with parent-run tests, unrelated-file preservation and undo passed. Forced delegation of a tiny fixture increased cloud input; efficient task choice remains important. The Windows publish folder was refreshed. Physical Alt+V/Escape coverage and full account-route context capacity remain unverified.
+
+See [the current delivery record](CLI_IMPLEMENTATION_PLAN.md#clipboard-input-larger-tasks-and-local-delegation) for measured acceptance and limitations. Earlier dated release records below describe their original limits.
+
 ## Current architecture: model providers and bounded workers
+
+Compaction recovery and subfolder workspace changes, locally published 2026-10-09: summaries target 4,000 characters with the existing 8,000-character hard cap. An oversized response gets one retry from the same source evidence with a 2,000-character target; retries share the eight-request budget and reserve instruction space within the 48,000-character input cap. Incomplete responses and transport failures are not retried. No truncated summary is activated. The CLI checks failed boundaries before resuming a paused run, so `continue` cannot repeatedly emit empty run attempts; `/compact` remains the explicit retry. Interrupted oversized streams expose unavailable usage through retry events. Git commands use literal workspace pathspecs, disable rename detection in diffs, and retain helper/index-write restrictions when the repository root is an ancestor. Validation covered 194 passing automated tests across the two suites, followed by self-contained Windows publishing and published help/usage checks. Live compaction in the user's reported session remains unverified.
+
+Token accounting is a read projection of persisted events through `SessionStore.Usage`. It reads the root and its registered child conversations in one SQLite read transaction, using each session's saved provider identity. Normal completions and successful compaction reports are counted once; the latest `Run.Usage`, worker `RequestUsage` copies, cached-token subsets and nested attribution are not added again. The CLI exposes `/usage` and `smith usage <conversation-id>`, separating local-parent usage from local-worker offload and reporting missing usage. This needs no schema migration or inference call. Local token counts do not establish counterfactual ChatGPT savings or monetary savings.
+
+The `Local` provider adds an explicit Chat Completions transport for Bonsai 2/llama.cpp. `LocalChatModelClient` uses `/v1/models` and `/v1/chat/completions`, while the existing `LmStudio` provider retains its native discovery and Responses protocol. The provider enum appends a value without changing persisted ChatGPT/LM Studio identities; existing schema v5 records need no migration. Profile replacements affect new conversations only.
+
+The local adapter projects stored response items into system/user/assistant/tool messages, grouping each assistant's calls before their correlated results. It buffers fragmented function names, arguments and IDs, validates the complete call set, normalizes usage, and keeps reasoning in local continuation items rather than visible answers. A successful finish reason and `[DONE]` are both required; interrupted, malformed, reasoning-only and output-limited responses cannot dispatch tools. Empty tool collections omit schemas for compaction. Account credentials never enter local requests, and unknown providers fail closed.
+
+The Bonsai 2 endpoint update passed 176 Release tests and was published locally. The live local-only tool round trip completed in 9.3 seconds. A three-round Bonsai 2 worker applied a checkpointed file fix, which its ChatGPT parent independently verified; a read-only worker also completed. Loaded server capacity was 32,768 tokens with one inference slot; the current budget uses loaded capacity and serializes this endpoint without changing the two-worker admission ceiling. See the [endpoint acceptance record](CLI_IMPLEMENTATION_PLAN.md#bonsai-2-chat-completions-endpoint) for observed worker results and fixture limitations.
 
 `ModelConnection` identifies ChatGPT or LM Studio, the local endpoint, output budget and loaded context metadata. The CLI model factory serves normal inference, resume, queued runs and compaction. Local inference uses flat Responses function tools and locally assembled history; provider continuation items do not cross session/provider boundaries. Reasoning is not answer text. Incomplete streams, output exhaustion and reasoning-only completion execute no proposed calls.
 
 `WorkerProfile` snapshots describe explicitly enabled model/capability choices. `WorkerCoordinator` wraps the tool registry and creates independent child sessions through an atomic `IWorkerStore.CreateWorker` operation keyed by parent/run/call. One coordinator owns scheduling, exact file reservations, a mutation semaphore and cancellation for the tree. Worker database rows remain separate from mutable root session snapshots. SQLite v5 preserves v4 identities and state after a consistent backup.
 
-The parent exposes `agent_spawn`, `agent_wait`, `agent_result` and `agent_cancel`; the child exposes `agent_finish`. Only listed profiles are eligible. Two workers may be active and eight may be launched in one parent run. A worker gets ten inference rounds and five minutes, bounded by the root deadline. Tools remain serial within each agent; requests may overlap between agents. No child process execution, nested delegation, direct questions, or plan approval is available. Curated Git inspection retains its existing constrained process implementation.
+The parent exposes `agent_spawn`, `agent_wait`, `agent_result` and `agent_cancel`; the child exposes `agent_finish`. Only listed profiles are eligible. The saved total/local concurrency policy governs active workers; sixteen may be launched in one parent run. A worker gets twenty inference rounds and ten minutes, bounded by the root deadline. Tools remain serial within each agent; requests may overlap between agents. No child process execution, nested delegation, direct questions, or plan approval is available. Curated Git inspection retains its existing constrained process implementation.
 
 Write ownership is an exact path allowlist, with move endpoints and ancestor collisions checked. File preparation, journal persistence and effects share a critical section. No parent mutation/undo may touch reserved files, and no parent process may start while editing workers hold reservations. Editing delegation requires confirmed termination of existing conversation processes. Reservations do not isolate against external applications; stale hashes remain authoritative. Workflow/permission changes settle affected children first.
 
-Child completion reports are evidence, never permission or automatic proof of verification. The parent collects each result before completing or dispatching queued prompts. Reports and transcripts are copied into registered parent artifacts; explicit `[artifact:ID]` references in a delegated task copy bounded registered parent evidence into child-owned artifacts. Full source history remains in the originating session. Context accounting includes worker assignments, approved scope, profile choices and current worker states.
+Child completion reports are evidence, never permission or automatic proof of verification. The parent collects each result before completing or dispatching queued prompts. Reports and transcripts are copied into registered parent artifacts; explicit `[artifact:ID]` references in a delegated task grant read-only paging/search access to those registered parent artifacts. Full source history remains in the originating session. Context accounting includes worker assignments, approved scope, profile choices and current worker states.
 
 Cancellation settles children and retains completed edits. Restart reconciles journals, marks old children interrupted and never relaunches them. Ambiguous file effects keep reservations until explicit recovery/abandonment. Root-scoped `/changes` and conflict-safe `/undo` can inspect and undo child checkpoints. Agent state events are durable; UI events carry child identity, profile/model, time and separate usage without interleaving child text into the composer.
 
@@ -27,6 +119,8 @@ Live evidence includes two Bonsai file fixes, structured build/test verification
 The implementation supports ChatGPT account OAuth and a separate loopback LM Studio adapter. It includes streamed text, a serial C# model/tool loop, a capability registry, Inspect/Edit/Execute modes, checkpointed file tools, curated Git inspection, owned process sessions, durable questions, SQLite conversations, resume, cancellation, and protected Windows credentials. New conversations default to Execute; legacy conversations migrate to Inspect. See [README](README.md) for usage and verification and [CLI implementation plan](CLI_IMPLEMENTATION_PLAN.md) for delivery status.
 
 Plan is a workflow, not a fourth permission level. It permits investigation and internal task updates but blocks workspace/process effects. A persisted Implement/Revise/Keep planning decision waits for explicit input; implementation additionally requires Edit or Execute selection. Routine progress preserves approved scope, while scope changes return to review. Schema v3 adds plans, revisions, receipts, artifacts, and verification results without changing existing permissions. .NET builds use an MSBuild logger and VSTest runs use retained TRX reports.
+
+Plan preconditions are checked during tool preparation, before recording execution intent or stopping owned work. Execution revalidates before a plan update can change state. Submission and its receipt commit together in SQLite: recovery of a legacy started `plan_submit` uses the receipt if present, or records a noncommitted submission without replay when absent. This receipt rule does not apply to arbitrary process/file effects or to `plan_update`, which can stop processes on a scope change.
 
 API-key access, desktop UI, extensions, and automatic publishing remain deferred; LM Studio and bounded worker delegation are implemented. Automatic compaction, readable activity, Escape cancellation, and queued follow-ups are implemented in the continuous-conversation milestone. The provider-neutral `IModelClient` remains the extension point. File-tool undo checks recorded result hashes and preserves newer work. Execute runs as the Windows user, not in an OS sandbox; its process trees die with the CLI. Checkpoints do not cover process side effects. There is no public publication or automatic commit step.
 
@@ -156,7 +250,7 @@ Keep these boundaries practical. A small implementation may initially combine pr
 | Tool invocation | One requested action, its arguments, policy decision, and outcome |
 | Question | Pending request for user input with a stable identifier |
 | Artifact | File, diff, or output produced or referenced by a run |
-| Memory entry | Durable knowledge with scope, source, and review state |
+| Memory entry | Shared durable knowledge with origin workspace, validated source, revision and user-authored protection |
 | Event | Ordered observation used for persistence and UI updates |
 | Context snapshot | Bounded summary and retained-history projection with source provenance; never a replacement for source history |
 | Queued prompt | Durable user request awaiting one serial run, separate from answers and approval decisions |
@@ -238,7 +332,7 @@ Start with application instructions, the user's current request, applicable proj
 
 Each request gets a context manifest containing source references, inclusion reasons, hashes or versions where useful, and estimated size. Preserve the actual replayable protocol history locally, with credential filtering and explicit retention controls.
 
-The implementation retains a conservative 120,000-character context guard and compacts before the next request where possible. Defaults trigger at 80% and target at most 60% of that guard; these are character estimates, not an advertised model token capacity.
+The current context policy uses model capacities, output reserves and token measurements/estimates as described above. Unknown capacities retain the 120,000-character fallback with its 80% trigger and 60% target; character estimates are not model token capacity.
 
 When compacting context:
 
@@ -255,9 +349,15 @@ Use ordinary model requests with tools disabled behind `IModelClient`; do not de
 
 Activate a snapshot only after durable validation and commit. Failure or cancellation retains the previous projection and all source records. If mandatory context cannot fit, pause with a recoverable explanation. Limit retries per unchanged source boundary and include compaction in active time/cancellation accounting. Do not reset step/time budgets. `/context` exposes summary provenance; `/compact` allows an idle or context-paused request without automatically resuming unfinished work. This is conversation compaction, separate from durable memory extraction.
 
-Memory is separate from conversation history. Begin with explicit project notes. Later entries can record preferences, decisions, and stable facts with their source, scope, timestamp, and review status. Model-generated suggestions should not silently become authoritative memory. Users can inspect, edit, and delete entries.
+Shared memory is separate from conversation history and is implemented through `IMemoryStore`. Schema v6 adds a library, revisions, operation receipts, FTS5 index, settings and audit events after a consistent v5 backup. The library is independent of mutable session snapshots. Writes, revisions, search-index updates and receipts share a transaction; restart recovery returns a committed receipt or records that no write committed, without replaying the operation. Revision checks serialize competing updates. User-authored changes cannot be overwritten by the model.
 
-Embeddings and automatic memory extraction are later optimizations, justified by retrieval quality rather than added by default.
+The parent may automatically save durable findings through normal tool calls in Work or Plan, including Inspect permission mode. `ToolEffect.MemoryState` distinguishes these writes from workspace/process effects. Workers only read/search and suggest learnings to the parent. Sources must identify user messages or completed non-memory tool calls in the same conversation; collected worker reports carry agent-conclusion attribution. The request context supplies exact recent evidence references rather than requiring the model to guess provider call identifiers.
+
+One shared library per data directory is available across projects and providers. Retrieval uses literal FTS5 tokens from the active request or delegated task, never queued prompts. It ranks relevance before workspace/recency tie breakers. At most five full entries and 6,000 estimated characters, including provenance, enter context. Selected revisions remain fixed during compaction; the next request sees newer entries. Memory cannot approve decisions, expand permissions, authorize cross-workspace file access or replace fresh verification. Read failures warn and omit retrieval.
+
+The user can list/search/read, add/edit, forget, or enable/disable memory through slash and standalone commands. User edits also refresh the derived title. Forgetting removes active entries and the search index; original history, revision records, receipts and backups remain. Known secret patterns and terminal controls are rejected, without claiming perfect detection. No existing conversations are bulk-processed. Embeddings, end-of-task extraction requests and background learning remain deferred; automatic saving uses the parent's existing inference and tool rounds.
+
+Memory delivery on 2026-10-09 passed 219 automated tests and isolated live ChatGPT acceptance for saving, cross-project retrieval, worker read-only access, correction, forgetting, restart and disabling. The local Windows build was refreshed and its memory commands smoke-tested. The live worker used ChatGPT; local-provider memory inference was not separately exercised. Detailed evidence and the initial call-ID visibility fix are recorded in the CLI implementation plan.
 
 ## 10. Tool execution and workspace boundaries
 
@@ -347,11 +447,13 @@ Possible commands, subject to revision:
 
 ```text
 smith chat --workspace <folder>
-smith resume <conversation-id>
+smith resume [conversation-id]
 smith sessions
 smith models
 smith inspect <run-id>
 ```
+
+The CLI's optional resume ID defaults to the most recently updated parent session in the selected data directory, regardless of the shell's current workspace. Selection reuses the existing ownership, recovery and explicit continuation flow. It does not independently resume child sessions or skip a locked latest session.
 
 ### Desktop later
 
@@ -411,7 +513,7 @@ The first live acceptance exercise uses a disposable C# project with a known def
 | Arbitrary shell access | Treat it as broader trust than workspace file tools | Before enabling process execution |
 | Ambiguous effects after crashes | Record uncertainty and reconcile before retrying | Before editing and commands ship |
 | Context loss during long work | Preserve source history and test compaction behavior | Phase 4 |
-| Memory quality and privacy | Start with explicit notes and inspectable provenance | Before automatic memory features |
+| Memory quality and privacy | Validated provenance, protected user corrections and bounded retrieval | Shared memory release |
 | Desktop framework | Undecided; CLI proves the engine first | Phase 5 |
 | Open-source/public distribution and license | Not decided | Before public distribution or relying on eligibility assumptions |
 
@@ -430,3 +532,18 @@ OpenAI integration details were checked during the 2026-10-09 implementation. Th
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [ChatGPT plan usage preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Official SDKs](https://developers.openai.com/api/docs/libraries)
+
+
+## Document and Review workflow architecture
+
+`WorkflowMode` preserves Work=0 and Plan=1, adding Document and Review. `WorkflowPolicy` centralizes capability filtering, approved permission ceilings, and documentation file eligibility. Checks run at tool availability/preparation/execution, file preparation/application, undo, worker assignment, and CLI transition boundaries. Document exposes normal process tools only with Execute; their effects are not constrained by documentation extensions. Review allows curated Git inspection but no general process tools.
+
+`WorkflowReport` is independent of plans and memory. It stores task/target, revisions, progress, finding IDs, source run/call references, evidence, limitations, baseline state, and a final artifact reference. Parent-only workflow tools use expected revisions and atomic session receipts. Collected child evidence can be referenced; workers cannot finalize reports. Pending decisions, uncertain mutations, active workers, and uncollected results block finalization.
+
+The runner commits completion receipts and tool results before suppressing trailing calls and returning the parent to Work. Recovery uses the receipt to finish without re-executing effects. Plain model text cannot finish Document/Review. Context assembly includes a bounded report summary and evidence artifact IDs in ordinary budget accounting.
+
+Review capture resolves refs through fixed Git argument arrays with helper execution disabled, retains pageable diff/status/index artifacts, and hashes readable workspace files. Evidence is bounded to 2000 files, 5000 path inventory entries, and 8 MiB characters per Git stream; bounds and read exclusions produce explicit limitations. Finalization compares a fresh capture and marks drift rather than claiming snapshot isolation. Historical comparisons remain separate from current workspace reads.
+
+Explicit report export is a user-only operation under the task-tree mutation lock. It validates a new workspace Markdown destination and existing reservations, then uses the normal mutation journal and checkpoint path. It does not enable model writes in Review/Inspect. Schema v8 stores report records and revision rows transactionally with session state and receipts, preceded by a consistent v7 backup.
+
+Observed delivery: 250 Release tests passed, with targeted checks repeated after final refinements. Live ChatGPT/Bonsai acceptance exercised read-only review, checkpointed documentation editing, report export, committed-progress recovery into a fresh CLI/store, compilation, and worker checkpoint undo. Source and unrelated edits were preserved. The first documentation worker exhausted its output budget without executing incomplete calls; a smaller assignment succeeded. The local Windows build includes these workflows and the green, compact terminal display. Full evidence and restart-test limits are recorded in CLI_IMPLEMENTATION_PLAN.md.

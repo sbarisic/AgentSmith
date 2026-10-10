@@ -54,6 +54,61 @@ public sealed class CliTests : IDisposable
         var status = await Invoke(["--json", "auth", "accounts"]); Assert.DoesNotContain("sensitive-", status.Output + status.Error);
     }
     [Fact]
+    public async Task MemoryCommandsPersistCorrectionsSettingsAndForgetAcrossProcesses()
+    {
+        var added = await Invoke(["--json", "memory", "add", "Nebula builds require Release configuration."]);
+        Assert.Equal(0, added.Code);
+        using var json = JsonDocument.Parse(added.Output.Trim()); var id = json.RootElement.GetProperty("payload").GetProperty("id").GetString()!;
+        var read = await Invoke(["--json", "memory", "show", id]); Assert.Equal(0, read.Code); Assert.Contains("userAuthored\":true", read.Output);
+        Assert.Equal(0, (await Invoke(["memory", "edit", id, "Nebula builds require Debug configuration."])).Code);
+        var search = await Invoke(["--json", "memory", "search", "Nebula"]); Assert.Contains("Debug", search.Output); Assert.DoesNotContain("Release configuration", search.Output);
+        Assert.Equal(0, (await Invoke(["memory", "off"])).Code); Assert.False(new SessionStore(root).MemoryEnabled);
+        var session = new Session { Workspace = root, Connection = new() { Provider = ModelProvider.Local } }; var store = new SessionStore(root); store.Save(session, new("created", session.Id, null, new { }));
+        var slash = await Invoke(["--json", "resume", session.Id], "/memory on\n/memory show " + id + "\n/memory forget " + id + "\n/memory list\n/memory invalid\n/exit\n");
+        Assert.Equal(0, slash.Code); Assert.Contains("Debug configuration", slash.Output); Assert.Contains("No entries", slash.Output); Assert.Contains("Usage: /memory", slash.Output);
+        Assert.True(store.MemoryEnabled); Assert.Null(store.ReadMemory(id)); Assert.Empty(store.Get(session.Id)!.History);
+        var secret = await Invoke(["--json", "memory", "add", "password=hunter22"]); Assert.Equal(2, secret.Code); Assert.DoesNotContain("hunter22", secret.Output + secret.Error);
+    }
+    [Fact]
+    public async Task ResumeWithoutIdSelectsLatestUpdatedParentAndExplicitIdStillWorks()
+    {
+        var store = new SessionStore(root);
+        Session Local(string? parent = null) => new() { Workspace = root, ParentConversationId = parent, Connection = new() { Provider = ModelProvider.Local } };
+        var first = Local(); var second = Local(); var child = Local(first.Id);
+        store.Save(first, new("created", first.Id, null, new { }));
+        store.Save(second, new("created", second.Id, null, new { }));
+        store.Save(first, new("updated", first.Id, null, new { }));
+        store.Save(child, new("created", child.Id, null, new { }));
+        var latest = await Invoke(["--json", "resume"], "/exit\n");
+        Assert.Equal(0, latest.Code);
+        using (var ev = JsonDocument.Parse(latest.Output.Split('\n').First(l => l.Contains("\"conversation.resumed\""))))
+            Assert.Equal(first.Id, ev.RootElement.GetProperty("payload").GetProperty("id").GetString());
+        Assert.DoesNotContain("run.started", latest.Output); Assert.Empty(store.Get(first.Id)!.Runs);
+        var explicitSession = await Invoke(["--json", "resume", second.Id], "/exit\n");
+        Assert.Equal(0, explicitSession.Code);
+        using var selected = JsonDocument.Parse(explicitSession.Output.Split('\n').First(l => l.Contains("\"conversation.resumed\"")));
+        Assert.Equal(second.Id, selected.RootElement.GetProperty("payload").GetProperty("id").GetString());
+    }
+    [Fact]
+    public async Task ResumeWithoutSavedParentsExplainsHowToStart()
+    {
+        var result = await Invoke(["--json", "resume"]);
+        Assert.Equal(2, result.Code); Assert.Contains("No saved sessions", result.Output); Assert.Contains("smith chat", result.Output);
+        var store = new SessionStore(root); var child = new Session { Workspace = root, ParentConversationId = "parent" };
+        store.Save(child, new("created", child.Id, null, new { }));
+        result = await Invoke(["--json", "resume"]);
+        Assert.Equal(2, result.Code); Assert.Contains("No saved sessions", result.Output);
+    }
+    [Fact]
+    public async Task ResumeWithoutIdDoesNotSkipLockedLatestSession()
+    {
+        var store = new SessionStore(root); var first = new Session { Workspace = root }; var latest = new Session { Workspace = root };
+        store.Save(first, new("created", first.Id, null, new { })); store.Save(latest, new("created", latest.Id, null, new { }));
+        using var lease = store.Acquire(latest.Id);
+        var result = await Invoke(["--json", "resume"]);
+        Assert.NotEqual(0, result.Code); Assert.Contains("another active", result.Output); Assert.DoesNotContain("conversation.resumed", result.Output);
+    }
+    [Fact]
     public async Task AnotherProcessCannotOwnConversation()
     {
         var store = new SessionStore(root); using var lease = store.Acquire("blocked");
@@ -85,7 +140,7 @@ public sealed class CliTests : IDisposable
             "  /missing argument\n/help unexpected\n/markdown sideways\n/markdown off\n/markdown on\n/status\n/help\n/tools\n/mode edit\n/mode inspect\n/mode nonsense\n/changes\n/processes\n/recover\n/exit\n");
         Assert.Equal(0, result.Code);
         Assert.Contains("Unknown command", result.Output);
-        Assert.Contains("does not accept arguments", result.Output);
+        Assert.Contains("Unknown help topic", result.Output);
         Assert.Contains("Usage: /markdown", result.Output);
         Assert.Contains("Markdown display disabled", result.Output);
         Assert.Contains("Markdown display enabled", result.Output);

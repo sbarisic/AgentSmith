@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using AgentSmith.Cli;
 using AgentSmith.Core;
+using AgentSmith.Runtime;
 using Xunit;
 
 namespace AgentSmith.IntegrationTests;
@@ -24,6 +25,89 @@ public sealed class ContinuousChatTests
     private static JsonObject Message(string text) => new() { ["role"] = "assistant", ["content"] = text };
     private static async Task Until(Func<bool> predicate)
     { using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)); while (!predicate()) await Task.Delay(25, timeout.Token); }
+    [Fact]
+    public async Task SteeringRedirectsCurrentRunWhileNormalBusyTextStaysQueued()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-steering-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var input = new Input(); var model = new Model(); using var app = new CliApp(root, true, true, input) { ModelOverride = model };
+            var s = new Session { Workspace = root }; app.Store.Save(s, new("created", s.Id, null, new { }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)); var chat = app.Chat(s, "first", true, timeout.Token);
+            await model.Requests.Reader.ReadAsync(timeout.Token);
+            input.Lines.Writer.TryWrite("queued follow-up"); input.Lines.Writer.TryWrite("/steer Correct the active task");
+            await Until(() => app.Store.Steering(s.Id).Count == 1);
+            Assert.Single(app.Store.Queue(s.Id).Items); Assert.Single(app.Store.Get(s.Id)!.Runs);
+            model.Replies.Writer.TryWrite([Message("old completion")]);
+            var steered = await model.Requests.Reader.ReadAsync(timeout.Token);
+            Assert.Contains("Correct the active task", Json.Serialize(steered.Input));
+            Assert.DoesNotContain("queued follow-up", Json.Serialize(steered.Input));
+            model.Replies.Writer.TryWrite([Message("revised completion")]);
+            var queued = await model.Requests.Reader.ReadAsync(timeout.Token);
+            Assert.Contains("queued follow-up", Json.Serialize(queued.Input));
+            Assert.Equal(2, app.Store.Get(s.Id)!.Runs.Count);
+            input.Lines.Writer.TryWrite("/cancel"); await Until(() => app.Store.Get(s.Id)!.Runs.Last().State == RunState.Cancelled);
+            input.Lines.Writer.TryWrite("/exit"); await chat.WaitAsync(timeout.Token);
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+    [Fact]
+    public async Task UnifiedModeStatusIsSafeWhileBusyAndChangesStayBlocked()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-busy-mode-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var input = new Input(); var model = new Model(); using var app = new CliApp(root, true, true, input) { ModelOverride = model };
+            var s = new Session { Workspace = root }; app.Store.Save(s, new("created", s.Id, null, new { }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)); var chat = app.Chat(s, "first", true, timeout.Token);
+            await model.Requests.Reader.ReadAsync(timeout.Token);
+            foreach (var command in new[] { "/mode", "/help all", "/worker-limits", "/worker-limits 8 2", "/mode plan", "/mode document", "/mode edit", "/mode plan Another task", "/plan Another task" }) input.Lines.Writer.TryWrite(command);
+            input.Lines.Writer.TryWrite("queue barrier"); await Until(() => app.Store.Queue(s.Id).Items.Count == 1);
+            var saved = app.Store.Get(s.Id)!;
+            Assert.Equal(WorkflowMode.Work, saved.Workflow); Assert.Equal(PermissionMode.Execute, saved.Mode);
+            Assert.Equal(2, saved.WorkerPolicy.MaxConcurrent);
+            Assert.Single(saved.Runs); Assert.Empty(saved.Reports); Assert.Empty(saved.Plans);
+            input.Lines.Writer.TryWrite("/exit"); await chat;
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+    [Fact]
+    public async Task MemoryReadsWorkWhileBusyButUserWritesAreRejected()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-busy-memory-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var input = new Input(); var model = new Model(); using var app = new CliApp(root, true, true, input) { ModelOverride = model };
+            var s = new Session { Workspace = root }; app.Store.Save(s, new("created", s.Id, null, new { }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)); var chat = app.Chat(s, "first", true, timeout.Token);
+            await model.Requests.Reader.ReadAsync(timeout.Token);
+            input.Lines.Writer.TryWrite("/memory add Should not be saved while busy"); input.Lines.Writer.TryWrite("/memory off"); input.Lines.Writer.TryWrite("/memory list");
+            input.Lines.Writer.TryWrite("queued barrier"); await Until(() => app.Store.Queue(s.Id).Items.Count == 1);
+            Assert.Empty(app.Store.ListMemories()); Assert.True(app.Store.MemoryEnabled);
+            input.Lines.Writer.TryWrite("/exit"); await chat;
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+    [Fact]
+    public async Task ContinueAfterFailedCompactionDoesNotRestartRunOrReleaseQueue()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-paused-context-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var model = new Model(); using var app = new CliApp(root, true, true, new StringReader("")) { ModelOverride = model };
+            var s = new Session { Workspace = root };
+            s.History.Add(new() { ["role"] = "user", ["content"] = new string('x', 120000) });
+            var run = new Run { State = RunState.Paused, Reason = "Compaction summary exceeded 8000 characters." }; s.Runs.Add(run);
+            s.CompactionAttempts.Add(new() { BoundaryHash = ContextBuilder.Hash(s.History), State = "Failed" });
+            app.Store.Save(s, new("created", s.Id, run.Id, new { }));
+            app.Store.Enqueue(s.Id, "follow-up"); app.Store.HoldQueue(s.Id, "Paused");
+            for (var n = 0; n < 2; n++) Assert.Same(run, await app.Run(s, null, null, default));
+            Assert.False(model.Requests.Reader.TryRead(out _));
+            Assert.Single(app.Store.Get(s.Id)!.Runs); Assert.Equal(RunState.Paused, app.Store.Get(s.Id)!.Runs[0].State);
+            Assert.Equal("Paused", app.Store.Queue(s.Id).HoldReason); Assert.Equal("Pending", app.Store.Queue(s.Id).Items.Single().State);
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
     [Fact]
     public async Task FifoRunsStartOnCompletionAndInputDoesNotSteerActiveRequest()
     {
@@ -57,11 +141,20 @@ public sealed class ContinuousChatTests
             var input = new Input(); var model = new Model(); using var app = new CliApp(root, true, true, input) { ModelOverride = model };
             var s = new Session { Workspace = root }; app.Store.Save(s, new("created", s.Id, null, new { }));
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)); var chat = app.Chat(s, "first", true, timeout.Token);
+            try
+            {
             await model.Requests.Reader.ReadAsync(timeout.Token); input.Lines.Writer.TryWrite("second"); input.Lines.Writer.TryWrite("/cancel");
             await Until(() => app.Store.Get(s.Id)!.Runs.Last().State == RunState.Cancelled);
             Assert.NotNull(app.Store.Queue(s.Id).HoldReason); Assert.False(model.Requests.Reader.TryRead(out _)); Assert.Equal("Pending", app.Store.Queue(s.Id).Items.Single().State);
             input.Lines.Writer.TryWrite("/queue continue"); await model.Requests.Reader.ReadAsync(timeout.Token); model.Replies.Writer.TryWrite([Message("done")]);
             await Until(() => app.Store.Queue(s.Id).Items.Single().State == "Completed"); input.Lines.Writer.TryWrite("/exit"); await chat;
+            }
+            finally
+            {
+                // An assertion failure must not leave the input pump accessing the database during cleanup.
+                timeout.Cancel();
+                try { await chat; } catch (OperationCanceledException) { }
+            }
         }
         finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
     }

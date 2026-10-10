@@ -47,6 +47,7 @@ public sealed class ProcessManager : IDisposable
             args["processId"] = AgentSmith.Core.Activity.ProcessId(ctx.Session, args["processId"]!.GetValue<string>());
             Find(ctx, args["processId"]!.GetValue<string>());
             if (call.Name == "process_poll" && (args["cursor"]!.GetValue<long>() < 0 || args["waitMilliseconds"]!.GetValue<int>() is < 0 or > 10000)) throw new UserFacingException("Invalid output cursor or poll wait.");
+            if (call.Name == "process_wait" && (args["cursor"]!.GetValue<long>() < 0 || args["waitMilliseconds"]!.GetValue<int>() is < 0 or > 60000 || args["until"]!.ToString() is not ("output" or "exit"))) throw new UserFacingException("Wait needs a valid cursor, until output|exit, and 0..60000 milliseconds.");
             if (call.Name == "process_input" && args["text"]!.GetValue<string>().Length > 32768) throw new UserFacingException("Input exceeds 32 KiB.");
             return new(args.ToJsonString());
         }
@@ -106,8 +107,20 @@ public sealed class ProcessManager : IDisposable
         var wait = args["waitMilliseconds"]!.GetValue<int>();
         if (cursor > process.Sequence) throw new UserFacingException("Output cursor is beyond retained output.");
         var timer = Stopwatch.StartNew();
-        while (!process.Monitor.IsCompleted && cursor >= process.Sequence && timer.ElapsedMilliseconds < wait) await Task.Delay(25, ctx.Cancellation);
-        return Snapshot(ctx, process, cursor);
+        using var waitStop = CancellationTokenSource.CreateLinkedTokenSource(ctx.Cancellation);
+        async Task WaitForOutput()
+        {
+            while (!process.Monitor.IsCompleted && (cursor >= process.Sequence || call.Name == "process_wait" && args["until"]!.ToString() == "exit") && timer.ElapsedMilliseconds < wait)
+                await Task.Delay(25, waitStop.Token);
+        }
+        var waiting = WaitForOutput();
+        try { await SteeringWake.WaitOrSteeringAsync(ctx, waiting); }
+        finally { waitStop.Cancel(); try { await waiting; } catch (OperationCanceledException) { } }
+        ctx.Cancellation.ThrowIfCancellationRequested();
+        var snapshot = Snapshot(ctx, process, cursor);
+        if (!ctx.SteeringPending) return snapshot;
+        var data = JsonNode.Parse(snapshot.Content)!; data["interruptedBy"] = "steering";
+        return snapshot with { Content = data.ToJsonString() };
     }
     private static void Drain(Owned owned, StreamReader reader, string stream)
     {

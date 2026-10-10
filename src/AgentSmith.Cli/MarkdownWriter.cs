@@ -5,11 +5,12 @@ using System.Text.RegularExpressions;
 namespace AgentSmith.Cli;
 
 /// <summary>A bounded, line-streaming Markdown subset for terminals. Never emits model-supplied escapes.</summary>
-public sealed class MarkdownWriter(TextWriter output, bool color, int width, bool enabled = true)
+public sealed class MarkdownWriter(TextWriter output, bool color, int width, bool enabled = true, string guideStyle = "dim")
 {
     private readonly StringBuilder pending = new();
     private char fence;
     private int fenceLength;
+    private bool diffFence;
     private bool longLine;
     private static readonly Regex Inline = new(@"`([^`]+)`|\*\*(.+?)\*\*|__(.+?)__|\*([^*]+)\*|\[([^\]]+)\]\(([^)]+)\)", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private static readonly Regex Heading = new(@"^ {0,3}#{1,6}\s+(.+)$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
@@ -37,7 +38,7 @@ public sealed class MarkdownWriter(TextWriter output, bool color, int width, boo
         if (pending.Length > 0) RenderLine(pending.ToString(), longLine);
         pending.Clear(); longLine = false;
         if (fence != '\0') WriteLine([new("└─", "dim", 2)], "  │ ", "  │ ", false);
-        fence = '\0'; fenceLength = 0;
+        fence = '\0'; fenceLength = 0; diffFence = false;
         output.Flush();
     }
 
@@ -53,12 +54,13 @@ public sealed class MarkdownWriter(TextWriter output, bool color, int width, boo
             if (fence == '\0')
             {
                 fence = marker; fenceLength = count;
+                diffFence = trim[count..].Trim().Equals("diff", StringComparison.OrdinalIgnoreCase) || trim[count..].Trim().Equals("patch", StringComparison.OrdinalIgnoreCase);
                 WriteLine(Cells("┌─ " + (trim[count..].Trim() is { Length: > 0 } language ? language : "code"), "dim"), "  │ ", "  │ ", false);
             }
-            else { fence = '\0'; fenceLength = 0; WriteLine(Cells("└─", "dim"), "  │ ", "  │ ", false); }
+            else { fence = '\0'; fenceLength = 0; diffFence = false; WriteLine(Cells("└─", "dim"), "  │ ", "  │ ", false); }
             return;
         }
-        if (fence != '\0') { WriteLine(Cells(line, "code"), "  │   ", "  │   ", false); return; }
+        if (fence != '\0') { WriteLine(Cells(line, diffFence ? TerminalTheme.DiffStyle(line) : "code"), "  │   ", "  │   ", false); return; }
         if (literal) { WriteLine(Cells(line, ""), "  │ ", "  │ ", false); return; }
         var heading = Heading.Match(line);
         if (heading.Success) { WriteLine(InlineCells(heading.Groups[1].Value, "heading"), "  │ ", "  │ ", true); return; }
@@ -124,7 +126,7 @@ public sealed class MarkdownWriter(TextWriter output, bool color, int width, boo
             while (end < cells.Count && used + cells[end].Width <= available)
             { if (cells[end].Text == " ") space = end; used += cells[end].Width; end++; }
             if (wordWrap && end < cells.Count && space > offset) end = space;
-            Paint(prefix, "dim");
+            Paint(prefix, guideStyle);
             for (var i = offset; i < end;)
             {
                 var style = cells[i].Style;
@@ -141,9 +143,8 @@ public sealed class MarkdownWriter(TextWriter output, bool color, int width, boo
 
     private void Paint(string text, string style)
     {
-        var code = style switch { "heading" => "1;96", "bold" => "1", "italic" => "3", "code" => "93", "link" => "4;96", "dim" => "90", _ => "" };
-        if (color && code.Length > 0) output.Write("\u001b[" + code + "m");
+        if (color) output.Write(TerminalTheme.Style(style));
         output.Write(text);
-        if (color && code.Length > 0) output.Write("\u001b[0m");
+        if (color) output.Write(TerminalTheme.Reset);
     }
 }

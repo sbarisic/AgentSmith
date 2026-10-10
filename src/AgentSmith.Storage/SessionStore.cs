@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace AgentSmith.Storage;
 
-public sealed partial class SessionStore : ISessionStore, IWorkerStore
+public sealed partial class SessionStore : ISessionStore, IWorkerStore, IMemoryStore, ISteeringStore
 {
     private readonly string root;
     public string DataDirectory => root;
@@ -77,7 +77,48 @@ public sealed partial class SessionStore : ISessionStore, IWorkerStore
             command.CommandText = "CREATE TABLE worker_profiles(name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL); CREATE TABLE workers(id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, run_id TEXT NOT NULL, call_id TEXT NOT NULL, child_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, UNIQUE(parent_id,run_id,call_id)); UPDATE schema_version SET version=5;";
             command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 5;
         }
-        if (version != 5) throw new UserFacingException("Unsupported session database version.");
+        if (version == 5)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v5-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = """
+                CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, title_key TEXT NOT NULL, origin TEXT NOT NULL, updated TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(title_key,origin));
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED,title,content,tags);
+                CREATE TABLE IF NOT EXISTS memory_revisions(id TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,revision));
+                CREATE TABLE IF NOT EXISTS memory_receipts(operation_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS memory_settings(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL);
+                INSERT OR IGNORE INTO memory_settings VALUES(1,1);
+                CREATE TABLE IF NOT EXISTS memory_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,type TEXT NOT NULL,timestamp TEXT NOT NULL,payload TEXT NOT NULL);
+                UPDATE schema_version SET version=6;
+                """;
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 6;
+        }
+        if (version == 6)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v6-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, payload TEXT NOT NULL); UPDATE schema_version SET version=7;";
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 7;
+        }
+        if (version == 7)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v7-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE workflow_reports(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE workflow_revisions(report_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(report_id,revision)); UPDATE schema_version SET version=8;";
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 8;
+        }
+        if (version == 8)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v8-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE steering(id TEXT PRIMARY KEY, root_id TEXT NOT NULL, conversation_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, state TEXT NOT NULL, operation_key TEXT UNIQUE, payload TEXT NOT NULL); CREATE INDEX steering_target ON steering(conversation_id,run_id,state); UPDATE schema_version SET version=9;";
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 9;
+        }
+        if (version != 9) throw new UserFacingException("Unsupported session database version.");
     }
     private SqliteConnection Open()
     {
@@ -165,6 +206,12 @@ public sealed partial class SessionStore : ISessionStore, IWorkerStore
             Execute("INSERT OR REPLACE INTO mutations VALUES($id,$conversation,$payload)", ("$id", mutation.Id), ("$conversation", session.Id), ("$payload", Json.Serialize(mutation)));
         foreach (var process in session.Processes)
             Execute("INSERT OR REPLACE INTO processes VALUES($id,$conversation,$payload)", ("$id", process.Id), ("$conversation", session.Id), ("$payload", Json.Serialize(process)));
+        foreach (var report in session.Reports)
+        {
+            Execute("INSERT OR REPLACE INTO workflow_reports VALUES($id,$conversation,$payload)", ("$id", report.Id), ("$conversation", session.Id), ("$payload", Json.Serialize(report)));
+            foreach (var revision in report.Revisions)
+                Execute("INSERT OR IGNORE INTO workflow_revisions VALUES($id,$revision,$payload)", ("$id", report.Id), ("$revision", revision.Revision), ("$payload", Json.Serialize(revision)));
+        }
         foreach (var plan in session.Plans)
             Execute("INSERT OR REPLACE INTO plans VALUES($id,$conversation,$payload)", ("$id", plan.Id), ("$conversation", session.Id), ("$payload", Json.Serialize(plan)));
         foreach (var artifact in session.Artifacts)

@@ -13,6 +13,61 @@ public sealed class PlanningTests
 {
     public static PlanRevision Revision(string goal = "Fix the bug") => new() { Goal = goal, Deliverables = ["Working code"], Constraints = ["Preserve unrelated edits"], Steps = [new() { Id = "inspect", Description = "Inspect", Verification = "Read evidence" }] };
     private static string Arguments(PlanRevision r, int expected) => Json.Serialize(new { expectedRevision = expected, r.Goal, r.Deliverables, r.Constraints, r.Questions, r.Steps, r.Note });
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task InvalidSubmissionIsRejectedBeforeStartedAndDoesNotRequireRecovery(bool planMode, bool openQuestions)
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); using var registry = new ToolRegistry();
+        var session = new Session { Workspace = dir.Path, Workflow = planMode ? WorkflowMode.Plan : WorkflowMode.Work };
+        var revision = Revision(); if (openQuestions) revision.Questions = ["Which behavior?"];
+        var calls = !planMode || openQuestions
+            ? new[] { RuntimeTests.Call("update", "plan_update", Arguments(revision, 0)), RuntimeTests.Call("submit", "plan_submit", "{}") }
+            : new[] { RuntimeTests.Call("submit", "plan_submit", "{}") };
+        var model = new ScriptedModel([RuntimeTests.Done(calls)], [RuntimeTests.Done(RuntimeTests.Message())]); var events = new List<AgentEvent>();
+        var run = await new AgentRunner(store, model, registry).RunAsync(session, "task", null, events.Add, default);
+        Assert.Equal(RunState.Completed, run.State); Assert.Contains("error", run.Calls.Single(c => c.Id == "submit").Result!);
+        Assert.DoesNotContain(events, e => e.Type == "tool.started" && Json.Serialize(e.Payload).Contains("submit"));
+        Assert.Null(Planning.Active(session)?.PendingReview); Assert.False(session.Receipts.ContainsKey("submit"));
+    }
+    [Fact]
+    public async Task StalePlanUpdateIsRejectedWithoutChangingThePlanOrStoppingTheRun()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); using var registry = new ToolRegistry();
+        var session = new Session { Workspace = dir.Path };
+        var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Call("create", "plan_update", Arguments(Revision(), 0)), RuntimeTests.Call("stale", "plan_update", Arguments(Revision("Changed"), 0)))], [RuntimeTests.Done(RuntimeTests.Message())]);
+        var run = await new AgentRunner(store, model, registry).RunAsync(session, "task", null, _ => { }, default);
+        Assert.Equal(RunState.Completed, run.State); Assert.Single(Planning.Active(session)!.Revisions); Assert.Contains("revision changed", run.Calls.Last().Result!);
+    }
+    [Fact]
+    public async Task LegacyRejectedSubmissionCanResumeWithoutAbandoningOrApprovingDraft()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); using var registry = new ToolRegistry();
+        var session = new Session { Workspace = dir.Path }; var run = new Run { State = RunState.RecoveryRequired }; session.Runs.Add(run);
+        Planning.Update(new(session, run, store, default), 0, Revision());
+        run.Calls.Add(new() { Id = "submit", Name = "plan_submit", Arguments = "{}", Prepared = new("{}"), State = CallState.Started });
+        session.History.Add(RuntimeTests.Call("submit", "plan_submit", "{}")); store.Save(session, new("run.outcome", session.Id, run.Id, new { }));
+        var saved = store.Get(session.Id)!; registry.RecoverSession(new(saved, saved.Runs.Last(), store, default));
+        registry.RecoverSession(new(saved, saved.Runs.Last(), store, default));
+        Assert.Single(saved.History, i => i["type"]?.ToString() == "function_call_output"); Assert.Equal(CallState.Completed, saved.Runs.Last().Calls.Single().State);
+        Assert.Null(Planning.Active(saved)!.PendingReview); Assert.Empty(Planning.Active(saved)!.Approvals); Assert.Single(Planning.Active(saved)!.Revisions);
+        var result = await new AgentRunner(store, new ScriptedModel([RuntimeTests.Done(RuntimeTests.Message())]), registry).RunAsync(saved, null, null, _ => { }, default);
+        Assert.Equal(RunState.Completed, result.State);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SubmissionRecoveryUsesOnlyAtomicReceiptAndNeverInventsReview(bool afterCommit)
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); using var registry = new ToolRegistry();
+        var session = new Session { Workspace = dir.Path, Workflow = WorkflowMode.Plan };
+        var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Call("update", "plan_update", Arguments(Revision(), 0)), RuntimeTests.Call("submit", "plan_submit", "{}"))]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new AgentRunner(new FaultStore(store, afterCommit, "plan.submitted"), model, registry).RunAsync(session, "plan", null, _ => { }, default));
+        var saved = store.Get(session.Id)!; registry.RecoverSession(new(saved, saved.Runs.Last(), store, default));
+        Assert.Equal(CallState.Completed, saved.Runs.Last().Calls.Last().State); Assert.Equal(afterCommit, Planning.Active(saved)!.PendingReview is not null);
+        Assert.Empty(Planning.Active(saved)!.Approvals); Assert.Single(Planning.Active(saved)!.Revisions);
+    }
     [Fact]
     public async Task PlanDispatchBlocksEffectsAndPausesQueuedCallsUntilReview()
     {
@@ -56,7 +111,7 @@ public sealed class PlanningTests
         if (afterCommit) { Assert.Single(Planning.Active(saved)!.Revisions); Assert.Equal(CallState.Completed, saved.Runs.Last().Calls.Single().State); }
         else { Assert.Null(Planning.Active(saved)); Assert.Equal(CallState.Started, saved.Runs.Last().Calls.Single().State); }
     }
-    private sealed class FaultStore(SessionStore store, bool after) : ISessionStore
+    private sealed class FaultStore(SessionStore store, bool after, string eventType = "plan.updated") : ISessionStore
     {
         public string DataDirectory => store.DataDirectory;
         public IDisposable Acquire(string id) => store.Acquire(id);
@@ -65,9 +120,9 @@ public sealed class PlanningTests
         public void SaveProcess(string id, ProcessRecord process) => store.SaveProcess(id, process);
         public void Save(Session session, AgentEvent ev)
         {
-            if (ev.Type == "plan.updated" && !after) throw new InvalidOperationException("before commit");
+            if (ev.Type == eventType && !after) throw new InvalidOperationException("before commit");
             store.Save(session, ev);
-            if (ev.Type == "plan.updated") throw new InvalidOperationException("after commit");
+            if (ev.Type == eventType) throw new InvalidOperationException("after commit");
         }
     }
     [Fact]
@@ -101,7 +156,7 @@ public sealed class PlanningTests
         var session = new Session { Mode = PermissionMode.Edit, Runs = [new Run { Calls = [new ToolCall { Id = "old-call" }] }] };
         store.Save(session, new("created", session.Id, null, new { }));
         using (var db = new SqliteConnection("Data Source=" + Path.Combine(dir.Path, "sessions.db")))
-        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE worker_profiles; DROP TABLE workers; DROP TABLE context_snapshots; DROP TABLE prompt_queue; DROP TABLE queue_holds; DROP TABLE plans; DROP TABLE artifacts; DROP TABLE verifications; DROP TABLE receipts; UPDATE schema_version SET version=2; UPDATE conversations SET snapshot=json_remove(snapshot,'$.workflow');"; cmd.ExecuteNonQuery(); }
+        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE worker_profiles; DROP TABLE workers; DROP TABLE context_snapshots; DROP TABLE prompt_queue; DROP TABLE queue_holds; DROP TABLE plans; DROP TABLE artifacts; DROP TABLE verifications; DROP TABLE receipts; DROP TABLE workflow_reports; DROP TABLE workflow_revisions; DROP TABLE steering; UPDATE schema_version SET version=2; UPDATE conversations SET snapshot=json_remove(snapshot,'$.workflow');"; cmd.ExecuteNonQuery(); }
         var upgraded = new SessionStore(dir.Path).Get(session.Id)!;
         Assert.Equal(WorkflowMode.Work, upgraded.Workflow); Assert.Equal(PermissionMode.Edit, upgraded.Mode); Assert.Equal("old-call", upgraded.Runs.Single().Calls.Single().Id);
         Assert.NotEmpty(Directory.GetFiles(dir.Path, "sessions-v2-*.backup.db"));

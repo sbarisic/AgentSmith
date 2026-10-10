@@ -12,6 +12,8 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     private long? startedAt;
     private bool streaming;
     private MarkdownWriter? markdownStream;
+    private string workflow = "Work";
+    private string guideStyle = TerminalTheme.Guide("Work");
     public void Resize(int columns) => width = Math.Clamp(columns, 32, 160);
     public bool Verbose { get; set; }
     public bool MarkdownEnabled { get; set; } = true;
@@ -24,7 +26,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     {
         var data = JsonSerializer.SerializeToElement(payload, Json.Options);
         if (type == "text.delta") { Stream(Text(data, "text")); return; }
-        if (type is "model.requested" or "question.answered") return;
+        if (type is "model.requested" or "question.answered") { runningStatus = "Thinking"; return; }
         if (type == "model.completed")
         {
             if (TryJson(Text(data, "usage"), out var usage))
@@ -35,22 +37,63 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             return;
         }
         EndStream();
+        if (type is "conversation" or "conversation.resumed" or "run.started" or "workflow.started" or "workflow.status" or "mode" or "user.submitted" && Text(data, "workflow").Length > 0)
+        { workflow = Text(data, "workflow"); guideStyle = TerminalTheme.Guide(workflow); }
         switch (type)
         {
-            case "agent.started":
-                MessageText("› " + Text(data, "message"));
-                if (data.TryGetProperty("writePaths", out var assigned) && assigned.GetArrayLength() > 0) MessageText("Assigned: " + string.Join(", ", assigned.EnumerateArray().Select(p => p.GetString())), "dim");
+            case "steering.saved": case "steering.incorporated": case "steering.sent":
+                SteeringActivity(data); break;
+            case "steering.status":
+                if (data.TryGetProperty("items", out var steeringItems) && steeringItems.ValueKind == JsonValueKind.Array)
+                    foreach (var item in steeringItems.EnumerateArray()) SteeringActivity(item, listing: true);
+                MessageText(Text(data, "message"), "dim"); break;
+            case "steering.removed": case "steering.held":
+                MessageText(Text(data, "message"), type == "steering.held" ? "status-warning" : "accent"); break;
+            case "workflow.report":
+                var reportWriter = new MarkdownWriter(output, color, width, MarkdownEnabled, TerminalTheme.Guide(Text(data, "workflow")));
+                reportWriter.Append(Text(data, "markdown")); reportWriter.Finish(); break;
+            case "workflow.reports":
+                Title("Saved workflow reports");
+                foreach (var report in data.GetProperty("reports").EnumerateArray()) Wrapped("  " + Text(report, "id") + " · " + Text(report, "workflow") + " · " + Text(report, "state") + " · " + Text(report, "task"), "accent");
                 break;
-            case "agent.finished": MessageText(Text(data, "message"), Text(data, "state") == "Completed" ? "accent" : "warning"); break;
+            case "workflow.started": MessageText("Workflow " + Text(data, "workflow") + " · report " + Text(data, "id"), "accent"); break;
+            case "workflow.updated": MessageText("Report " + Text(data, "id") + " · revision " + Text(data, "revision"), "accent"); break;
+            case "workflow.finished":
+                MessageText("Report saved · " + Text(data, "id") + " · artifact " + Text(data, "artifactId"), "accent");
+                Preview(Text(data, "summary"));
+                if (data.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
+                    foreach (var finding in findings.EnumerateArray()) MessageText(Text(finding, "id") + " · " + Text(finding, "category") + " / " + Text(finding, "severity") + " · " + Text(finding, "title") + " · " + Text(finding, "path") + ":" + Text(finding, "line"), Text(finding, "category") == "defect" ? "warning" : "accent");
+                if (data.TryGetProperty("limitations", out var limitations) && limitations.ValueKind == JsonValueKind.Array)
+                    foreach (var limitation in limitations.EnumerateArray().Take(5)) MessageText("Limit: " + limitation.GetString(), "warning");
+                MessageText("Use /report " + Text(data, "id") + " for the complete saved report.", "dim"); break;
+            case "usage":
+                Title("Token usage · conversation and workers");
+                Wrapped($"  ChatGPT:       {Number(data, "cloudInputTokens"):N0} in / {Number(data, "cloudOutputTokens"):N0} out");
+                Wrapped($"  Local models:  {Number(data, "localInputTokens"):N0} in / {Number(data, "localOutputTokens"):N0} out");
+                Wrapped($"  Local workers: {Number(data, "localWorkerTokens"):N0} tokens handled locally ({Number(data, "localWorkerInputTokens"):N0} in / {Number(data, "localWorkerOutputTokens"):N0} out)");
+                foreach (var row in data.GetProperty("rows").EnumerateArray())
+                {
+                    Wrapped("  " + Text(row, "role") + (Text(row, "profile").Length > 0 ? " · " + Text(row, "profile") : "") + " · " + Text(row, "provider") + " · " + Text(row, "model"), "accent");
+                    Wrapped($"    {Number(row, "inputTokens"):N0} in / {Number(row, "outputTokens"):N0} out · {Number(row, "reportedRequests")} requests with usage");
+                    if (Number(row, "requestsWithCacheDetails") > 0) Wrapped($"    Reported cache: {Number(row, "cachedInputTokens"):N0} cached / {Number(row, "knownUncachedInputTokens"):N0} uncached input · {Number(row, "requestsWithCacheDetails")} requests", "dim");
+                    if (Text(row, "purpose").Length > 0) Wrapped($"    {Text(row, "purpose")} · {Text(row, "outcome")} · local-slot wait {TerminalDuration.Format(TimeSpan.FromMilliseconds(Number(row, "waitingMilliseconds")))}", "dim");
+                    if (Number(row, "compactionInputTokens") + Number(row, "compactionOutputTokens") > 0)
+                        Wrapped($"    Includes compaction: {Number(row, "compactionInputTokens"):N0} in / {Number(row, "compactionOutputTokens"):N0} out", "dim");
+                }
+                Wrapped($"  Usage unavailable: {Number(data, "requestsWithoutUsage")} completed records; {Number(data, "unfinishedRequests")} requests unfinished/failed; {Number(data, "failedCompactions")} failed compactions.", "dim");
+                Wrapped("  " + Text(data, "interpretation"), "dim");
+                break;
+            case "agent.started":
+                WorkerStarted(data); break;
+            case "agent.finished":
+                WorkerStatus(data); break;
             case "plan.display":
                 Plan(data.GetProperty("plan")); break;
             case "plan.review": Plan(data); break;
             case "plan.review.pending": MessageText(Text(data, "text"), "accent"); MessageText(Text(data, "responses"), "dim"); break;
             case "plan.decision": MessageText("Plan decision: " + Text(data, "decision") + " " + Text(data, "mode"), "accent"); break;
             case "plan.updated":
-                MessageText("Plan revision " + Text(data, "revision"), "accent");
-                if (data.TryGetProperty("steps", out var progress)) foreach (var step in progress.EnumerateArray()) Progress(step);
-                break;
+                PlanProgress(data); break;
             case "artifact.result": if (TryJson(Text(data, "content"), out var artifact)) Artifact(artifact); break;
             case "tools":
                 Title("Registered tools · serial execution");
@@ -61,7 +104,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 Title("File-tool checkpoints · process side effects are not checkpointed");
                 if (data.GetArrayLength() == 0) Line("  No file-tool changes.", "dim");
                 foreach (var change in data.EnumerateArray())
-                { Wrapped("  " + Text(change, "id") + " · " + Text(change, "kind") + " · " + Text(change, "state"), "accent"); MessageText(Text(change, "diff")); }
+                { Wrapped("  " + Text(change, "id") + " · " + Text(change, "kind") + " · " + Text(change, "state"), "accent"); DiffPreview(Text(change, "diff")); }
                 break;
             case "processes":
                 Title("Processes owned by this conversation");
@@ -75,51 +118,61 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             case "conversation.resumed":
                 Header(data);
                 if (type == "conversation.resumed" && data.TryGetProperty("history", out var history)) History(history);
+                if (type == "conversation.resumed" && data.TryGetProperty("resume", out var resume) && resume.ValueKind == JsonValueKind.Object) ResumeSummary(resume);
                 break;
             case "run.started":
                 startedAt = clock.GetTimestamp(); inputTokens = outputTokens = 0; tools = 0; lastQuestion = null;
+                activeActivities.Clear(); runningStatus = "Thinking";
                 MessageTitle("AgentSmith");
-                Line("  │ Thinking…", "dim");
+                Line("  │ Thinking…", "status-running");
                 break;
             case "tool.started":
                 tools++;
-                if (Verbose || Text(data, "name") != "process_poll")
-                {
-                    if (data.TryGetProperty("activity", out var activity)) MessageText("› " + Text(activity, "action") + " " + Text(activity, "target") + (Text(activity, "options").Length > 0 ? " · " + Text(activity, "options") : ""));
-                    else Line("  │ › " + ToolLabel(Text(data, "name")), "dim");
-                }
-                break;
+                StartActivity(data); break;
             case "tool.completed":
+                runningStatus = "Thinking";
                 if (TryJson(Text(data, "content"), out var result))
                 {
                     if (result.ValueKind != JsonValueKind.Object) break;
-                    if (result.TryGetProperty("current", out _)) Plan(result);
+                    if (ToolFailure(result, data)) { }
+                    else if (RoutineResult(data, result)) { }
+                    else if (Text(data, "name") is "agent_spawn" or "agent_wait" or "agent_result" or "agent_cancel" or "agent_message") WorkerResult(Text(data, "name"), result);
+                    else if (Text(result, "kind") is "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
+                    else if (Text(result, "kind") is "web-search" or "web-page") WebResult(result);
+                    else if (Text(data, "name") is "workflow_read" or "workflow_update" or "workflow_finish"
+                        || result.TryGetProperty("targetKind", out _) && result.TryGetProperty("current", out _)) WorkflowResult(result);
+                    else if (result.TryGetProperty("current", out _))
+                    { if (Text(data, "name") != "plan_update" || Verbose) Plan(result); }
                     else if (result.TryGetProperty("verificationId", out _) && result.TryGetProperty("kind", out _)) Verification(result);
                     else if (result.TryGetProperty("artifactId", out _) || result.TryGetProperty("artifacts", out _)) Artifact(result);
-                    else if (result.TryGetProperty("checkpointId", out _) || result.TryGetProperty("processId", out _) || result.TryGetProperty("exitCode", out _)) Operation(result);
-                    else if (result.TryGetProperty("error", out var error)) MessageText("  " + error.GetString(), "warning");
+                    else if (result.TryGetProperty("checkpointId", out _) || result.TryGetProperty("processId", out _) || result.TryGetProperty("exitCode", out _)) Operation(result, Text(data, "name") == "git_diff");
+                    else if (result.TryGetProperty("error", out var error)) MessageText("  " + error.GetString(), "status-error");
                     else if (result.TryGetProperty("path", out var path))
                         MessageText("  " + path.GetString() + (result.TryGetProperty("totalLines", out var lines) ? $"  ·  {lines} lines" : ""), "dim");
                     else if (result.TryGetProperty("files", out var files)) MessageText($"  {files.GetArrayLength()} files" + (Flag(result, "truncated") ? " · more available" : ""), "dim");
                     else if (result.TryGetProperty("matches", out var matches)) MessageText($"  {matches.GetArrayLength()} matches" + (Flag(result, "limitReached") ? " · limit reached" : ""), "dim");
                 }
-                if (Text(data, "name") != "process_poll" && data.TryGetProperty("durationMilliseconds", out var callDuration)) MessageText($"Call completed · {callDuration.GetDouble() / 1000:0.000}s", "dim");
+                activeActivities.Remove(Text(data, "id"));
+                if (Verbose && CallTiming(data).Length > 0) MessageText("Call completed · " + CallTiming(data), "dim");
                 break;
             case "tool.rejected":
-                if (TryJson(Text(data, "result"), out var rejection)) MessageText(Text(rejection, "error"), "warning");
+                runningStatus = "Thinking"; activeActivities.Remove(Text(data, "id"));
+                if (TryJson(Text(data, "result"), out var rejection) && !FailureBlock(rejection, Text(data, "id"))) MessageText(Text(rejection, "error"), "status-warning");
                 break;
             case "run.outcome":
+                runningStatus = "Running"; activeActivities.Clear();
                 var elapsed = startedAt is { } start ? clock.GetElapsedTime(start) : (TimeSpan?)null;
                 startedAt = null;
                 var state = Text(data, "state");
                 var detail = new List<string>();
-                if (elapsed is { } duration) detail.Add($"Executed in {duration.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)}s");
+                if (elapsed is { } duration) detail.Add($"Executed in {TerminalDuration.Format(duration)}");
                 if (tools > 0) detail.Add($"{tools} tool call{(tools == 1 ? "" : "s")}");
                 if (inputTokens + outputTokens > 0) detail.Add($"{inputTokens.ToString("N0", CultureInfo.InvariantCulture)} in / {outputTokens.ToString("N0", CultureInfo.InvariantCulture)} out tokens");
-                Line("  │", "border");
-                Wrapped("  ╰─ " + (state switch { "Completed" => "✓ Done", "AwaitingUser" => "Question ready", _ => state }) + (detail.Count > 0 ? "  ·  " + string.Join("  ·  ", detail) : ""), state is "Completed" or "AwaitingUser" ? "dim" : "warning");
-                if (!string.IsNullOrEmpty(Text(data, "reason"))) Wrapped("  " + Text(data, "reason"), "warning");
-                output.WriteLine();
+                Wrapped("  └─ " + (state switch { "Completed" => "✓ Done", "AwaitingUser" => "Question ready", _ => state }) + (detail.Count > 0 ? "  ·  " + string.Join("  ·  ", detail) : ""), state is "Completed" or "AwaitingUser" ? "dim" : "warning");
+                if (!FailureBlock(data) && !string.IsNullOrEmpty(Text(data, "reason"))) Wrapped("  " + Text(data, "reason"), "warning");
+                if (Text(data, "workflow").Length > 0) workflow = Text(data, "workflow");
+                guideStyle = TerminalTheme.Guide(workflow);
+
                 break;
             case "models":
                 Title("Available models");
@@ -177,7 +230,12 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 }
                 break;
             case "status":
+                if (data.TryGetProperty("pendingSteering", out var pendingSteering)) Field("Steering pending", pendingSteering.ToString());
+                if (data.TryGetProperty("workerPolicy", out var workerPolicy)) Field("Worker limits", Text(workerPolicy, "maxConcurrent") + " total / " + Text(workerPolicy, "maxLocalConcurrent") + " local · parent excluded");
+                if (data.TryGetProperty("execution", out var limits)) Field("Batch limits", Text(limits, "maxRequests") + " requests / " + Text(limits, "maxMinutes") + " minutes · " + Text(data, "remainingRequests") + " requests left · " + Text(data, "remainingMinutes") + " minutes left");
+                if (Text(data, "delegation").Length > 0) Field("Delegation", Text(data, "delegation"));
                 Field("Workflow", Text(data, "workflow") + " / " + Text(data, "mode"));
+                if (data.TryGetProperty("report", out var activeReport) && activeReport.ValueKind == JsonValueKind.Object) Field("Report", Text(activeReport, "id") + " · " + Text(activeReport, "targetKind") + " " + Text(activeReport, "target"));
                 if (Text(data, "provider").Length > 0) Field("Provider", Text(data, "provider") + " · " + Text(data, "model"));
                 if (data.TryGetProperty("workers", out var workerStates)) Field("Workers", workerStates.GetArrayLength().ToString());
                 Title("Conversation details"); Field("Session", Text(data, "id")); Field("State", Text(data, "state"));
@@ -195,21 +253,32 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             case "resume.confirmation":
                 Title("Continue saved work", "warning"); Field("State", Text(data, "state")); Field("Reason", Text(data, "reason")); Wrapped("  " + Text(data, "message")); break;
             case "help":
-                Wrapped("  /agents · /agent <id|#number> [cancel]", "accent");
-                Wrapped("  /plan new <task> · /plan show · /plan revise <note> · /plan implement · /plan leave", "accent");
-                Wrapped("  /tasks · /artifacts · /artifact <id> [search <text>]", "accent");
-                Wrapped("  /display compact|verbose · /details <call-id|#process> · /compact", "accent");
-                Wrapped("  /queue [remove <id>|clear|continue] · /cancel · Escape stop", "accent");
                 Title("Chat commands");
-                foreach (var (command, description) in new[] { ("/help", "Show these commands"), ("/status", "Session and context details"), ("/context", "Inspect the context budget"), ("/markdown on|off", "Format Markdown or show its source"), ("/paste", "Multiline input; finish with /end"), ("/exit", "Leave this conversation"), ("Ctrl+C", "Stop the current run") })
-                    Line("  " + command.PadRight(20) + description);
-                foreach (var (command, description) in new[] { ("/tools", "List registry tools and enabled capabilities"), ("/mode <mode>", "Inspect, Edit, or Execute"), ("/changes", "Review file-tool checkpoints"), ("/undo <id>", "Undo a checkpoint if files still match"), ("/processes", "List process states and logs"), ("/stop <id>", "Stop an owned process tree"), ("/recover [abandon]", "Inspect or acknowledge uncertain operations") })
-                    Wrapped("  " + command.PadRight(20) + description);
-                output.WriteLine(); break;
-            case "context.compaction.started": MessageText("Compacting older context…", "dim"); break;
-            case "context.compaction.completed": MessageText("Context compacted · " + Text(data, "before") + " → " + Text(data, "after") + " estimated characters", "dim"); break;
-            case "context.compaction.failed": MessageText("Compaction paused: " + Text(data, "reason"), "warning"); break;
-            case "error": Title("Error", "warning"); Wrapped("  " + Text(data, "message")); output.WriteLine(); break;
+                Wrapped("  Example: " + Text(data, "example"), "accent", maxWidth: 100);
+                if (data.TryGetProperty("groups", out var groups)) foreach (var group in groups.EnumerateArray())
+                {
+                    Title(Text(group, "title"));
+                    foreach (var command in group.GetProperty("commands").EnumerateArray())
+                    {
+                        Wrapped("  " + Text(command, "command"), "accent", maxWidth: 100);
+                        Wrapped("    " + Text(command, "description"), "normal", maxWidth: 100);
+                    }
+                }
+                output.WriteLine(); Wrapped("  " + Text(data, "note"), "dim", maxWidth: 100);
+                Wrapped("  " + Text(data, "topics"), "accent", maxWidth: 100); output.WriteLine(); break;
+            case "context.compaction.started": runningStatus = "Compacting context"; MessageText("Compacting older context…", "status-running"); break;
+            case "memory.saved": MessageText(Text(data, "message"), "accent"); break;
+            case "memory.warning": MessageText(Text(data, "message"), "warning"); break;
+            case "context.compaction.retry": MessageText(Text(data, "reason"), "status-warning"); break;
+            case "context.compaction.completed": MessageText("Context compacted · " + Text(data, "before") + " → " + Text(data, "after") + " " + (Text(data, "unit").Length > 0 ? Text(data, "unit") : "estimated characters"), "status-success"); break;
+            case "context.compaction.failed": MessageText("Compaction paused: " + Text(data, "reason"), "status-warning"); break;
+            case "model.waiting": MessageText(Text(data, "message"), "status-running"); break;
+            case "run.cancelling":
+            case "queue.held": MessageText(Text(data, "message"), "status-warning"); break;
+            case "error":
+                if (!FailureBlock(data)) { Title("Error", "status-error"); Wrapped("  " + Text(data, "message")); output.WriteLine(); }
+                break;
+            case "agent.detail": WorkerResult("agent_result", data); break;
             default:
                 if (!string.IsNullOrEmpty(Text(data, "message"))) Wrapped("  " + Text(data, "message"));
                 break;
@@ -224,29 +293,36 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         output.Flush();
     }
 
-    public void EndPrompt() => Line("  ╰─", "border");
+    public void EndPrompt() => Line("  └─", "border");
 
     private void MessageTitle(string title)
-    { output.WriteLine(); Line("  ╭─ " + title, "accent"); Line("  │", "border"); }
+    { Line("  ┌─ " + title, guideStyle); }
 
-    private void MessageText(string text, string style = "normal") => Wrapped(text, style, "  │ ");
+    private void MessageText(string text, string style = "normal")
+    {
+        if (style.StartsWith("status-", StringComparison.Ordinal))
+            StatusLine(style switch { "status-running" => "Active", "status-success" => "Done", "status-error" => "Error", "status-warning" => "Notice", _ => "Info" }, text, style);
+        else Wrapped(text, style, "  │ ");
+    }
 
     private void Message(string title, string text)
-    { MessageTitle(title); MessageText(text); EndPrompt(); output.WriteLine(); }
+    { MessageTitle(title); MessageText(text); EndPrompt(); }
 
     private void Header(JsonElement data)
     {
         var inner = width - 4;
         output.WriteLine();
-        Line("  ╭" + new string('─', inner) + "╮", "border");
+        Line("  ┌" + new string('─', inner) + "┐", "border");
         Box("AgentSmith", "bright", inner);
         var mode = Text(data, "mode");
-        var local = Text(data, "provider") == "LmStudio";
-        Box(Text(data, "model") + (local ? "  ·  LM Studio  ·  " : "  ·  ChatGPT plan  ·  ") + (Text(data, "workflow").Length == 0 ? "Work" : Text(data, "workflow")) + " / " + (mode.Length == 0 ? "Inspect" : mode), "accent", inner);
+        var provider = Text(data, "provider"); var local = provider is "LmStudio" or "Local";
+        var label = provider == "Local" ? "Local Chat Completions" : local ? "LM Studio" : "ChatGPT plan";
+        Box(Text(data, "model") + "  ·  " + label + "  ·  " + (Text(data, "workflow").Length == 0 ? "Work" : Text(data, "workflow")) + " / " + (mode.Length == 0 ? "Inspect" : mode), "accent", inner);
         Box(Text(data, "workspace"), "dim", inner);
-        Line("  ╰" + new string('─', inner) + "╯", "border");
-        if (mode == "Execute") Wrapped("  Processes run as your Windows account; the workspace is not a sandbox.", "dim");
-        if (local) Wrapped("  " + Text(data, "endpoint") + " · Loaded context: " + Text(data, "loadedContextTokens") + " tokens", "dim");
+        if (data.TryGetProperty("report", out var active) && active.ValueKind == JsonValueKind.Object) Box("Report " + Text(active, "id") + " · " + Text(active, "state") + " · " + Text(active, "targetKind") + " " + Text(active, "target"), "dim", inner);
+        Line("  └" + new string('─', inner) + "┘", "border");
+        if (mode == "Execute" && Text(data, "workflow") is not ("Review" or "Plan")) Wrapped(Text(data, "workflow") == "Document" ? "  Execute runs project code; process effects are not restricted to documentation files." : "  Processes run as your Windows account; the workspace is not a sandbox.", "dim");
+        if (local) Wrapped("  " + Text(data, "endpoint") + " · Loaded context: " + (Text(data, "loadedContextTokens").Length > 0 ? Text(data, "loadedContextTokens") + " tokens" : "not reported"), "dim");
         else { Wrapped("  Remaining usage unavailable", "dim"); Wrapped("  Manage usage: https://chatgpt.com/settings/usage", "dim"); }
         Line("  /help commands   /exit leave   Ctrl+C stop", "dim");
         output.WriteLine();
@@ -262,42 +338,77 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     {
         var messages = history.EnumerateArray().Where(i => Text(i, "role") is "user" or "assistant").TakeLast(6).ToArray();
         if (messages.Length == 0) return;
-        Line("  Recent conversation", "dim");
+        Line("  Recent messages · saved history", "dim");
         foreach (var message in messages)
         {
             if (!message.TryGetProperty("content", out var content)) continue;
+            guideStyle = TerminalTheme.Guide(Text(message, "_workflow"));
             MessageTitle(Text(message, "role") == "user" ? "You" : "AgentSmith");
-            var historyWriter = Text(message, "role") == "assistant" ? new MarkdownWriter(output, color, width, MarkdownEnabled) : null;
+            var historyWriter = Text(message, "role") == "assistant" ? new MarkdownWriter(output, color, width, MarkdownEnabled, guideStyle) : null;
             void HistoryText(string value) { if (historyWriter is null) MessageText(value); else historyWriter.Append(value); }
             if (content.ValueKind == JsonValueKind.String) HistoryText(content.GetString() ?? "");
             else if (content.ValueKind == JsonValueKind.Array)
-                foreach (var block in content.EnumerateArray()) if (!string.IsNullOrEmpty(Text(block, "text"))) HistoryText(Text(block, "text"));
+                foreach (var block in content.EnumerateArray()) { if (!string.IsNullOrEmpty(Text(block, "text"))) HistoryText(Text(block, "text")); else if (Text(block, "type") == "input_image") HistoryText("[Image " + Text(block, "attachment_id") + "]"); }
             historyWriter?.Finish();
             EndPrompt();
         }
+        guideStyle = TerminalTheme.Guide(workflow);
         output.WriteLine(); Line("  ── Resumed ──", "dim"); output.WriteLine();
     }
     private void Context(JsonElement data)
     {
-        Field("Context", $"{Number(data, "characters"):N0} / {Number(data, "limit"):N0} characters");
+        if (Text(data, "unit") == "tokens" && data.TryGetProperty("measurement", out var measure))
+        { Field("Context", $"{Number(measure, "tokens"):N0} / {Number(data, "limit"):N0} tokens · {Text(measure, "method")}"); Field("Output reserve", Text(data, "outputReserve")); }
+        else Field("Context", $"{Number(data, "characters"):N0} / {Number(data, "limit"):N0} estimated characters");
+        if (data.TryGetProperty("capacity", out var capacity)) Field("Capacity", Text(capacity, "contextTokens") + " · " + Text(capacity, "source"));
+        if (data.TryGetProperty("categories", out var categories)) Field("Breakdown", categories.ToString());
+        if (data.TryGetProperty("trigger", out _)) Field("Compaction", "trigger " + Text(data, "trigger") + " · target " + Text(data, "target"));
         Field("History", $"{Number(data, "historyItems")} items");
         Field("Guidance", Text(data, "instructionSource"));
+        if (data.TryGetProperty("memory", out var memory))
+        {
+            Field("Memory", Text(memory, "enabled") + " · " + Text(memory, "characters") + " estimated characters");
+            Field("Memory warning", Text(memory, "warning"));
+            if (memory.TryGetProperty("entries", out var entries)) foreach (var entry in entries.EnumerateArray())
+                Wrapped("  " + Text(entry, "id") + " · revision " + Text(entry, "revision") + " · " + Text(entry, "reason") + " · " + Text(entry, "characters") + " characters", "dim");
+        }
         if (Text(data, "snapshotId").Length > 0) Field("Summary", Text(data, "snapshotId") + " · through item " + Text(data, "through"));
     }
-    private void Operation(JsonElement data)
+    private void Operation(JsonElement data, bool diff = false)
     {
         if (data.TryGetProperty("checkpointId", out _))
-        { MessageText("Checkpoint " + Text(data, "checkpointId") + " · " + Text(data, "state"), "accent"); Preview(Text(data, "diff")); }
+        { MessageText("Checkpoint " + Text(data, "checkpointId") + " · " + Text(data, "state"), "accent"); DiffPreview(Text(data, "diff")); }
         if (data.TryGetProperty("processId", out _))
         {
             ProcessOutput(data);
         }
-        else if (data.TryGetProperty("content", out _)) Preview(Text(data, "content"));
+        else if (data.TryGetProperty("content", out _))
+        { if (diff) DiffPreview(Text(data, "content")); else Preview(Text(data, "content")); }
+    }
+    private void WorkflowResult(JsonElement data)
+    {
+        MessageText("Report " + Text(data, "id") + " · revision " + Text(data, "revision") + " · " + Text(data, "state"), "accent");
+        if (Text(data, "task").Length > 0) Preview(Text(data, "task"));
+        if (Text(data, "targetKind").Length > 0) MessageText("Target: " + Text(data, "targetKind") + " " + Text(data, "target"), "dim");
+        if (data.TryGetProperty("current", out var current))
+        {
+            if (current.ValueKind == JsonValueKind.Object)
+            {
+                Preview(Text(current, "summary"));
+                if (Text(current, "coverage").Length > 0) Preview("Coverage: " + Text(current, "coverage"));
+                if (current.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
+                    MessageText(findings.GetArrayLength() + " saved findings · /report " + Text(data, "id") + " for details", "dim");
+            }
+            else MessageText("No saved report revision yet.", "dim");
+        }
+        else if (Text(data, "summary").Length > 0) Preview(Text(data, "summary"));
+        if (Text(data, "artifactId").Length > 0) MessageText("Report artifact: " + Text(data, "artifactId"), "dim");
     }
     private void Plan(JsonElement data)
     {
         if (data.ValueKind != JsonValueKind.Object) { MessageText("No saved plan.", "dim"); return; }
-        var current = data.GetProperty("current");
+        if (!data.TryGetProperty("current", out var current) || current.ValueKind != JsonValueKind.Object)
+        { MessageText("No saved plan revision.", "dim"); return; }
         MessageText("Plan " + Text(data, "id") + " · revision " + Text(current, "revision") + " · " + Text(data, "state"), "accent");
         MessageText(Text(current, "goal"));
         foreach (var key in new[] { "deliverables", "constraints", "questions" })
@@ -317,7 +428,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             MessageText("Artifact " + Text(data, "artifactId") + " · " + Text(data, "state"), "accent");
             if (data.TryGetProperty("text", out var text)) MessageText(text.GetString() ?? "");
             if (data.TryGetProperty("matches", out var matches)) foreach (var match in matches.EnumerateArray()) MessageText("[" + Text(match, "stream") + "] " + Text(match, "excerpt"));
-            if (Flag(data, "hasMore")) MessageText("More content at cursor " + Text(data, "cursor") + ". Ask the agent to read the next section.", "dim");
+            if (Flag(data, "hasMore")) MessageText("Next page: /artifact " + Text(data, "artifactId") + " read " + Text(data, "cursor"), "dim");
         }
     }
     private void Verification(JsonElement data)
@@ -332,9 +443,9 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     {
         if (!streaming)
         {
-            if (startedAt is null) MessageTitle("AgentSmith"); else Line("  │", "border");
+            if (startedAt is null) MessageTitle("AgentSmith");
             streaming = true;
-            markdownStream = new(output, color, width, MarkdownEnabled);
+            markdownStream = new(output, color, width, MarkdownEnabled, guideStyle);
         }
         markdownStream!.Append(text);
     }
@@ -347,13 +458,14 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     private void Field(string label, string value)
     { if (value.Length > 0) Wrapped("  " + label.PadRight(10) + value); }
     private void Title(string text, string style = "accent") { output.WriteLine(); Line("  " + text, style); output.WriteLine(); }
-    private void Wrapped(string text, string style = "normal", string prefix = "")
+    private void Wrapped(string text, string style = "normal", string prefix = "", int? maxWidth = null)
     {
+        var wrapWidth = Math.Min(width, maxWidth ?? width);
         foreach (var line in Safe(text).Split('\n'))
         {
-            var indent = new string(' ', Math.Min(line.TakeWhile(char.IsWhiteSpace).Count(), width / 2));
+            var indent = new string(' ', Math.Min(line.TakeWhile(char.IsWhiteSpace).Count(), wrapWidth / 2));
             var remaining = line.TrimStart();
-            var available = width - 2 - indent.Length - prefix.Length;
+            var available = wrapWidth - 2 - indent.Length - prefix.Length;
             while (remaining.Length > available)
             {
                 var split = remaining.LastIndexOf(' ', available, available + 1);
@@ -375,15 +487,24 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             yield return value.Substring(i, count); i += count;
         }
     }
-    private void Line(string value, string style = "normal") { Paint(value, style); output.WriteLine(); }
+    private void Line(string value, string style = "normal")
+    {
+        if (value.StartsWith("  │", StringComparison.Ordinal) || value.StartsWith("  ┌─", StringComparison.Ordinal) || value.StartsWith("  └─", StringComparison.Ordinal) || value.StartsWith("  ├─", StringComparison.Ordinal))
+        {
+            var length = value[2] == '│' ? 3 : 4;
+            Paint(value[..length], guideStyle); Paint(value[length..], style);
+        }
+        else Paint(value, style);
+        output.WriteLine();
+    }
     private void Paint(string value, string style)
     {
-        var escape = style switch { "accent" => "\u001b[96m", "bright" => "\u001b[1m", "dim" => "\u001b[90m", "border" => "\u001b[36m", "warning" => "\u001b[33m", "success" => "\u001b[32m", _ => "" };
+        var escape = TerminalTheme.Style(style == "border" ? guideStyle : style);
         if (color && escape.Length > 0) output.Write(escape);
         output.Write(Safe(value));
         if (color && escape.Length > 0) output.Write("\u001b[0m");
     }
-    public static string Safe(string value) => new(value.Where(c => (!char.IsControl(c) || c is '\n' or '\t') && c is not (>= '\u202A' and <= '\u202E') and not (>= '\u2066' and <= '\u2069')).ToArray());
+    public static string Safe(string value) => TerminalControlFilter.Strip(value).Replace("\r", "");
     private static string Text(JsonElement data, string name) => data.ValueKind == JsonValueKind.Object && data.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? (v.ValueKind == JsonValueKind.String ? v.GetString()! : v.ToString()) : "";
     private static long Number(JsonElement data, string name) => data.TryGetProperty(name, out var v) && v.TryGetInt64(out var result) ? result : 0;
     private static bool Flag(JsonElement data, string name) => data.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
@@ -392,5 +513,9 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         try { using var doc = JsonDocument.Parse(text); result = doc.RootElement.Clone(); return result.ValueKind == JsonValueKind.Object; }
         catch (JsonException) { result = default; return false; }
     }
-    private static string ToolLabel(string name) => name switch { "workspace_list" => "Listing files", "file_read" => "Reading file", "text_search" => "Searching workspace", "user_ask" => "Waiting for your input", _ => name };
+    private static string ToolLabel(string name) => name switch
+    {
+        "workspace_list" => "Listing files", "file_read" => "Reading file", "text_search" => "Searching workspace", "user_ask" => "Waiting for your input",
+        "agent_spawn" => "Spawn worker", "agent_wait" => "Wait for workers", "agent_message" => "Message worker", "agent_result" => "Collect worker result", "agent_cancel" => "Cancel worker", _ => name
+    };
 }

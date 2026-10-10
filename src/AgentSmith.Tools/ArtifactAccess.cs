@@ -21,7 +21,7 @@ public static class ArtifactAccess
     }
     public static ArtifactRecord Register(ToolExecutionContext ctx, string path, string kind, string? processId = null)
     {
-        if (kind is not ("process-log" or "build-diagnostics" or "test-report" or "verification" or "agent-report" or "agent-transcript")) throw new UserFacingException("Unsupported artifact kind.");
+        if (kind is not ("workspace-map" or "http-response" or "web-page" or "workflow-report" or "review-evidence" or "tool-result" or "process-log" or "build-diagnostics" or "test-report" or "verification" or "agent-report" or "agent-transcript")) throw new UserFacingException("Unsupported artifact kind.");
         var full = Validate(ctx, path);
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Path.Equals(full, StringComparison.OrdinalIgnoreCase));
         if (artifact is not null) return artifact;
@@ -74,8 +74,21 @@ public static class ArtifactAccess
     public static ToolOutput Execute(ToolExecutionContext ctx, string name, JsonNode args)
     {
         Backfill(ctx);
-        if (name == "artifact_list") return new(Json.Serialize(new { artifacts = ctx.Session.Artifacts.Take(200).Select(a => new { a.Id, a.Kind, a.ProcessId, a.Truncated }), more = ctx.Session.Artifacts.Count > 200 }));
+        if (name == "artifact_list") return new(Json.Serialize(new { artifacts = ctx.Session.Artifacts.Take(200).Select(a => new { a.Id, a.Kind, a.ProcessId, a.Truncated }), grants = ctx.Session.ArtifactGrants, more = ctx.Session.Artifacts.Count > 200 }));
         var id = args["artifactId"]!.GetValue<string>();
+        if (!ctx.Session.Artifacts.Any(a => a.Id == id) && ctx.Session.ArtifactGrants.SingleOrDefault(g => g.ArtifactId == id) is { } grant)
+        {
+            if (ctx.Session.ParentConversationId != grant.SourceConversationId) throw new UserFacingException("Invalid artifact grant.");
+            var parent = ctx.Store.Get(grant.SourceConversationId) ?? throw new UserFacingException("Shared artifact source unavailable.");
+            var parentContext = ctx with { Session = parent, Emit = null };
+            if (!parent.Artifacts.Any(a => a.Id == id)) throw new UserFacingException("Shared artifact no longer registered.");
+            // Do not backfill or save the parent's aggregate from a child.
+            return ReadRegistered(parentContext, name, args, id);
+        }
+        return ReadRegistered(ctx, name, args, id);
+    }
+    private static ToolOutput ReadRegistered(ToolExecutionContext ctx, string name, JsonNode args, string id)
+    {
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Id == id) ?? throw new UserFacingException("Artifact is not registered to this conversation.");
         var loaded = Load(ctx, artifact);
         if (name == "artifact_read")

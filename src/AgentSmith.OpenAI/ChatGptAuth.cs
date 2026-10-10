@@ -218,7 +218,9 @@ public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, Identity
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         if (!doc.RootElement.TryGetProperty("models", out var models)) throw new UserFacingException("Unexpected ChatGPT model catalog format.");
         return models.EnumerateArray().Where(m => m.TryGetProperty("visibility", out var v) && v.GetString() == "list")
-            .Select(m => new ModelChoice(m.GetProperty("slug").GetString()!, m.GetProperty("display_name").GetString()!)).ToArray();
+            .Select(m => new ModelChoice(m.GetProperty("slug").GetString()!, m.GetProperty("display_name").GetString()!,
+                m.TryGetProperty("context_window", out var c) && c.TryGetInt32(out var n) ? n : null,
+                m.TryGetProperty("input_modalities", out var modalities) && modalities.ValueKind == JsonValueKind.Array ? modalities.EnumerateArray().Any(v => v.GetString() == "image") : null)).ToArray();
     }
 }
-public sealed record ModelChoice(string Id, string Name);
+public sealed record ModelChoice(string Id, string Name, int? ContextTokens = null, bool? Vision = null);

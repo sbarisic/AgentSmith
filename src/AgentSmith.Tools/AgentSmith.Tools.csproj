@@ -1,1 +1,1 @@
-<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../AgentSmith.Core/AgentSmith.Core.csproj" /><ProjectReference Include="../AgentSmith.BuildLogger/AgentSmith.BuildLogger.csproj" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../AgentSmith.Core/AgentSmith.Core.csproj" /><ProjectReference Include="../AgentSmith.BuildLogger/AgentSmith.BuildLogger.csproj" /><PackageReference Include="AngleSharp" /><PackageReference Include="System.Drawing.Common" /></ItemGroup></Project>

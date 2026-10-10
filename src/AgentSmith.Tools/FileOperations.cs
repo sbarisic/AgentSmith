@@ -34,19 +34,20 @@ public static class FileOperations
         if (bytes.Length > MaxBytes) throw new UserFacingException("Result exceeds the 256 KiB file limit.");
         Decode(bytes); return bytes;
     }
-    public static MutationRecord Prepare(ToolExecutionContext ctx, ToolCall call, JsonObject args)
+    public static MutationRecord Prepare(ToolExecutionContext ctx, ToolCall call, JsonObject args, bool userExport = false)
     {
         string S(string key) => args[key]!.GetValue<string>();
+        if (!userExport) WorkflowPolicy.CheckFiles(ctx.Session, call.Name == "file_move" ? [S("source"), S("destination")] : [S("path")]);
         var record = new MutationRecord { RunId = ctx.Run.Id, CallId = call.Id, Kind = call.Name };
         var relative = call.Name == "file_move" ? S("source") : S("path");
         var path = WorkspaceTools.Resolve(ctx.Workspace, relative, true);
         if (path == ctx.Workspace || Directory.Exists(path)) throw new UserFacingException("A file path is required.");
         byte[]? before = null;
-        if (call.Name == "file_create") { if (File.Exists(path)) throw new UserFacingException("Destination already exists."); }
+        if (call.Name == "file_create") { if (File.Exists(path)) throw Failures.Reject("destination_exists", "Destination already exists; it will not be overwritten.", "Choose a new path, or read the existing file and prepare an explicit edit.", relative); }
         else
         {
             before = ReadBytes(path);
-            if (!Hash(before).Equals(S("expectedHash"), StringComparison.OrdinalIgnoreCase)) throw new UserFacingException("File changed since it was read. Read it again before editing.");
+            if (!Hash(before).Equals(S("expectedHash"), StringComparison.OrdinalIgnoreCase)) throw Failures.Reject("stale_file_hash", "File changed since it was read.", "Read it again and prepare the edit using its current content and hash.", relative);
         }
         var file = new FileTransition { Path = relative, Before = before, Attributes = before is null ? FileAttributes.Normal : File.GetAttributes(path), LastWriteUtc = before is null ? DateTime.UtcNow : File.GetLastWriteTimeUtc(path) };
         file.After = call.Name switch
@@ -70,7 +71,7 @@ public static class FileOperations
         if (call.Name == "file_move")
         {
             var destination = WorkspaceTools.Resolve(ctx.Workspace, S("destination"), true);
-            if (File.Exists(destination) || Directory.Exists(destination)) throw new UserFacingException("Destination already exists.");
+            if (File.Exists(destination) || Directory.Exists(destination)) throw Failures.Reject("destination_exists", "Destination already exists; it will not be overwritten.", "Choose a new destination path.", S("destination"));
             record.Files.Add(new() { Path = S("destination"), After = before, Attributes = file.Attributes, LastWriteUtc = file.LastWriteUtc });
         }
         ctx.Session.Mutations.Add(record); return record;
@@ -110,7 +111,7 @@ public static class FileOperations
                 if (line.Length == 0 || line[0] is not (' ' or '-' or '+')) throw new UserFacingException("Invalid unified patch line.");
                 last = line[0]; var value = line[1..];
                 if (last is ' ' or '-')
-                { if (position >= source.Count || source[position++] != value) throw new UserFacingException("Patch context does not match the current file."); oldSeen++; }
+                { if (position >= source.Count || source[position++] != value) throw Failures.Reject("patch_context_mismatch", "Patch context does not match the current file.", "Read the file again and use complete, exact lines including whitespace in the patch."); oldSeen++; }
                 if (last is ' ' or '+') { output.Add(value); endings.Add(last == '+' || position < source.Count || finalNewline); newSeen++; }
             }
             if (oldSeen != oldCount || newSeen != newCount) throw new UserFacingException("Patch hunk counts do not match.");
@@ -127,9 +128,10 @@ public static class FileOperations
         if (expected is null) return !File.Exists(path) && !Directory.Exists(path);
         return File.Exists(path) && Hash(ReadBytes(path)) == Hash(expected);
     }
-    public static ToolOutput Apply(ToolExecutionContext ctx, MutationRecord record)
+    public static ToolOutput Apply(ToolExecutionContext ctx, MutationRecord record, bool userExport = false)
     {
         ctx.Cancellation.ThrowIfCancellationRequested();
+        if (!userExport) WorkflowPolicy.CheckFiles(ctx.Session, record.Files.Select(f => f.Path));
         if (!record.Files.All(f => Matches(ctx, f, f.Before))) throw new UserFacingException("Checkpoint conflict: a file changed before execution.");
         var timer = Stopwatch.StartNew();
         foreach (var file in record.Files.Where(f => f.After is not null))
@@ -153,6 +155,7 @@ public static class FileOperations
         if (record.Kind is "file_move" or "undo_move")
         {
             var from = record.Files.Single(f => f.After is null); var to = record.Files.Single(f => f.Before is null);
+            if (!userExport) WorkflowPolicy.CheckFiles(ctx.Session, record.Files.Select(f => f.Path));
             if (!record.Files.All(f => Matches(ctx, f, f.Before))) throw new UserFacingException("Move conflict.");
             File.Move(WorkspaceTools.Resolve(ctx.Workspace, from.Path), WorkspaceTools.Resolve(ctx.Workspace, to.Path, true));
         }
@@ -202,6 +205,7 @@ public static class FileOperations
     {
         if (ctx.Session.Mode < PermissionMode.Edit) throw new UserFacingException("Undo requires Edit or Execute mode.");
         var original = ctx.Session.Mutations.SingleOrDefault(m => m.Id == id && m.State == "Applied") ?? throw new UserFacingException("Applied checkpoint not found.");
+        WorkflowPolicy.CheckFiles(ctx.Session, original.Files.Select(f => f.Path));
         if (ctx.Session.Mutations.Any(m => m.UndoOf == id && m.State is "Applied" or "Prepared")) throw new UserFacingException("Checkpoint already has an undo operation.");
         if (!original.Files.All(f => Matches(ctx, f, f.After))) throw new UserFacingException("Undo conflict: newer file changes are preserved.");
         var reverse = new MutationRecord { RunId = ctx.Run.Id, CallId = "undo-" + Guid.NewGuid().ToString("N"), Kind = original.Kind is "file_move" or "undo_move" ? "undo_move" : "undo", UndoOf = id,

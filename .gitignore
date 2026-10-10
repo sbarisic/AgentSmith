@@ -10,3 +10,30 @@ TestResults/
 *.db-wal
 *.dpapi
 .agentsmith/
+
+# Local model installation and disposable working projects.
+/bonsai/
+/sandbox/
+
+# Source-only distribution: no compiled output, model weights, or packages.
+*.exe
+*.dll
+*.pdb
+*.nupkg
+*.snupkg
+*.gguf
+*.safetensors
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Local secrets and machine-specific state.
+.env
+.env.*
+*.pfx
+*.p12
+*.key
+
+# This repository intentionally has no CI/CD workflows.
+/.github/workflows/

@@ -56,6 +56,9 @@ public class RuntimeTests
         var continuation = new ScriptedModel([Done(Message())]);
         var next = await new AgentRunner(store, continuation, tools).RunAsync(saved, null, null, _ => { }, default);
         Assert.Equal(RunState.Completed, next.State); Assert.Equal(2, tools.Calls.Count);
+        Assert.Equal(WorkflowMode.Work, saved.MessageWorkflows[0]);
+        Assert.Equal(WorkflowMode.Work, store.Get(session.Id)!.MessageWorkflows[saved.History.Count - 1]);
+        Assert.All(saved.History, item => Assert.False(item.ContainsKey("_workflow")));
         Assert.Equal(new[] { "a", "b" }, continuation.Requests[0].Input.Where(i => i["type"]?.ToString() == "function_call_output").Select(i => i["call_id"]!.ToString()));
     }
     [Fact]

@@ -61,7 +61,7 @@ public sealed class LmStudioTests
     {
         using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = new Session { Model = "existing", AccountId = "account", Mode = PermissionMode.Edit }; store.Save(s, new("created", s.Id, null, new { }));
         using (var db = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(dir.Path, "sessions.db")))
-        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE workers; DROP TABLE worker_profiles; UPDATE schema_version SET version=4; UPDATE conversations SET snapshot=json_remove(snapshot,'$.connection','$.enabledWorkers');"; cmd.ExecuteNonQuery(); }
+        { db.Open(); using var cmd = db.CreateCommand(); cmd.CommandText = "DROP TABLE workers; DROP TABLE worker_profiles; DROP TABLE workflow_reports; DROP TABLE workflow_revisions; DROP TABLE steering; UPDATE schema_version SET version=4; UPDATE conversations SET snapshot=json_remove(snapshot,'$.connection','$.enabledWorkers');"; cmd.ExecuteNonQuery(); }
         var migrated = new SessionStore(dir.Path); var saved = migrated.Get(s.Id)!;
         Assert.Equal(ModelProvider.ChatGpt, saved.Connection.Provider); Assert.Equal("account", saved.AccountId); Assert.Equal(PermissionMode.Edit, saved.Mode); Assert.Empty(saved.EnabledWorkers); Assert.Empty(migrated.Workers(s.Id)); Assert.NotEmpty(Directory.GetFiles(dir.Path, "sessions-v4-*.backup.db"));
     }

@@ -30,6 +30,19 @@ public sealed class ProcessTests
         }
     }
     [Fact]
+    public async Task LongWaitReturnsExitAndCancellationDoesNotWaitSixtySeconds()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var dir = new TestDirectory(); using var registry = new ToolRegistry(); var ctx = Context(dir.Path);
+        var start = await Invoke(registry, ctx, "process_start", new { executable = "pwsh", arguments = new[] { "-NoProfile", "-Command", "Start-Sleep 2; [Console]::WriteLine('wait-done'); exit 3" }, workingDirectory = ".", environment = Array.Empty<object>(), timeoutSeconds = 20 });
+        var result = await Invoke(registry, ctx, "process_wait", new { processId = start["processId"]!.ToString(), cursor = 0, waitMilliseconds = 60000, until = "exit" });
+        Assert.Equal(3, result["exitCode"]!.GetValue<int>()); Assert.Contains("wait-done", result.ToJsonString());
+        start = await Invoke(registry, ctx, "process_start", new { executable = "pwsh", arguments = new[] { "-NoProfile", "-Command", "Start-Sleep 30" }, workingDirectory = ".", environment = Array.Empty<object>(), timeoutSeconds = 60 });
+        using var cancellation = new CancellationTokenSource(100);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Invoke(registry, ctx with { Cancellation = cancellation.Token }, "process_wait", new { processId = start["processId"]!.ToString(), cursor = 0, waitMilliseconds = 60000, until = "exit" }));
+        await Invoke(registry, ctx, "process_stop", new { processId = start["processId"]!.ToString() });
+    }
+    [Fact]
     public async Task StreamsStdinEofAndExitCodeAreObserved()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -137,6 +150,50 @@ public sealed class ProcessTests
         Assert.True(stopped["terminationConfirmed"]!.GetValue<bool>());
         using var connection = new System.Net.Sockets.TcpClient();
         await Assert.ThrowsAsync<System.Net.Sockets.SocketException>(async () => await connection.ConnectAsync("127.0.0.1", port));
+    }
+    [Fact]
+    public async Task GitInspectionFromSubfolderExcludesSiblingChanges()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var dir = new TestDirectory(); using var registry = new ToolRegistry(); var setup = Context(dir.Path);
+        async Task Git(params string[] arguments)
+        {
+            var start = await Invoke(registry, setup, "process_start", new { executable = "git", arguments, workingDirectory = ".", environment = Array.Empty<object>(), timeoutSeconds = 10 });
+            var (result, text) = await Finish(registry, setup, start); Assert.True(result["exitCode"]!.GetValue<int>() == 0, text);
+        }
+        var workspace = Path.Combine(dir.Path, "nested [workspace]"); Directory.CreateDirectory(workspace);
+        File.WriteAllText(Path.Combine(workspace, "inside.txt"), "inside before\n");
+        File.WriteAllText(Path.Combine(dir.Path, "outside.txt"), "SIBLING_CONTENT\n");
+        await Git("init"); await Git("add", "--", "nested [workspace]/inside.txt", "outside.txt");
+        await Git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "workspace baseline");
+        File.WriteAllText(Path.Combine(dir.Path, "outside.txt"), "SIBLING_CHANGED\n");
+        await Git("add", "outside.txt");
+        await Git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "SIBLING_ONLY_COMMIT");
+        File.WriteAllText(Path.Combine(workspace, "inside.txt"), "inside staged\n");
+        File.WriteAllText(Path.Combine(dir.Path, "outside.txt"), "SIBLING_STAGED\n");
+        await Git("add", "--", "nested [workspace]/inside.txt", "outside.txt");
+        File.AppendAllText(Path.Combine(workspace, "inside.txt"), "inside unstaged\n");
+        File.AppendAllText(Path.Combine(dir.Path, "outside.txt"), "SIBLING_UNSTAGED\n");
+        File.WriteAllText(Path.Combine(workspace, "new.txt"), "new\n");
+        File.WriteAllText(Path.Combine(dir.Path, "outside-new.txt"), "SIBLING_UNTRACKED\n");
+        var index = File.ReadAllBytes(Path.Combine(dir.Path, ".git", "index"));
+        await Git("config", "diff.external", "missing-external-command"); await Git("config", "core.fsmonitor", "missing-fsmonitor-command");
+        var ctx = Context(workspace); ctx.Session.Mode = PermissionMode.Inspect;
+        var status = await Invoke(registry, ctx, "git_status", new { });
+        var diff = await Invoke(registry, ctx, "git_diff", new { staged = false });
+        var staged = await Invoke(registry, ctx, "git_diff", new { staged = true });
+        var log = await Invoke(registry, ctx, "git_log", new { limit = 10 });
+        var revision = log["content"]!.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+        var show = await Invoke(registry, ctx, "git_show", new { revision });
+        Assert.Contains("new.txt", status["content"]!.ToString()); Assert.Contains("inside unstaged", diff["content"]!.ToString());
+        Assert.Contains("inside staged", staged["content"]!.ToString()); Assert.Contains("workspace baseline", log["content"]!.ToString());
+        Assert.Contains("inside before", show["content"]!.ToString());
+        foreach (var result in new[] { status, diff, staged, log, show })
+        {
+            Assert.Equal(0, result["exitCode"]!.GetValue<int>());
+            Assert.DoesNotContain("outside", result["content"]!.ToString()); Assert.DoesNotContain("SIBLING_", result["content"]!.ToString());
+        }
+        Assert.Equal(index, File.ReadAllBytes(Path.Combine(dir.Path, ".git", "index")));
     }
     [Fact]
     public async Task GitInspectionPreservesIndexAndDisablesExternalHelpers()

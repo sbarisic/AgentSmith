@@ -12,12 +12,22 @@ public static class Json
 public enum RunState { Running, AwaitingUser, Paused, Completed, Failed, Cancelled, RecoveryRequired, AwaitingPlan }
 public enum CallState { Pending, Started, Completed }
 public enum PermissionMode { Inspect, Edit, Execute }
-public enum WorkflowMode { Work, Plan }
-public enum ToolEffect { ReadOnly, SessionState, Workspace, Process }
+public enum WorkflowMode { Work, Plan, Document, Review }
+public enum ToolEffect { ReadOnly, SessionState, Workspace, Process, MemoryState, Network }
 public sealed class Session
 {
+    public Dictionary<int, WorkflowMode> MessageWorkflows { get; set; } = [];
+    public List<WorkflowReport> Reports { get; set; } = [];
+    public string? ActiveReportId { get; set; }
+    public ExecutionPolicy Execution { get; set; } = new();
+    public ContextPolicy ContextPolicy { get; set; } = new();
+    public string Delegation { get; set; } = "proactive";
+    public double ModelWaitMilliseconds { get; set; }
+    public List<AttachmentRecord> Attachments { get; set; } = [];
+    public List<ArtifactGrant> ArtifactGrants { get; set; } = [];
     public ModelConnection Connection { get; set; } = new();
     public List<WorkerProfile> EnabledWorkers { get; set; } = [];
+    public WorkerPolicy WorkerPolicy { get; set; } = new();
     public string? ParentConversationId { get; set; }
     public string? WorkerId { get; set; }
     public string WorkerInstructions { get; set; } = "";
@@ -45,6 +55,13 @@ public sealed class Session
 }
 public sealed class Run
 {
+    public int? PromptHistoryIndex { get; set; }
+    public List<int> SteeringHistoryIndices { get; set; } = [];
+    public PauseReason PauseReason { get; set; }
+    public int BatchRequests { get; set; }
+    public double BatchExecutionMilliseconds { get; set; }
+    public int SummaryRequests { get; set; }
+    public DateTimeOffset? BatchStartedAt { get; set; }
     public string? PlanId { get; set; }
     public int? PlanRevision { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -64,6 +81,8 @@ public sealed class ToolCall
     public string Arguments { get; set; } = "";
     public CallState State { get; set; }
     public string? Result { get; set; }
+    public List<string> ImageAttachmentIds { get; set; } = [];
+    public string? ModelResult { get; set; }
     public ActivitySummary? Activity { get; set; }
     public double DurationMilliseconds { get; set; }
     public PreparedOperation? Prepared { get; set; }
@@ -79,11 +98,12 @@ public sealed class Question
 public sealed record AgentEvent(string Type, string ConversationId, string? RunId, object Payload);
 public sealed record ToolDefinition(string Name, string Description, JsonObject Parameters, PermissionMode Capability = PermissionMode.Inspect, bool HasEffects = false, ToolEffect Effect = ToolEffect.ReadOnly)
 {
-    public bool Enabled(Session session) => Capability <= session.Mode && (session.Workflow != WorkflowMode.Plan || (Effect is ToolEffect.ReadOnly or ToolEffect.SessionState) && Capability == PermissionMode.Inspect);
+    public bool Enabled(Session session) => WorkflowPolicy.Enabled(session, this);
 }
-public sealed record PreparedOperation(string Arguments, string? OperationId = null);
+public sealed record PreparedOperation(string Arguments, string? OperationId = null, ToolEffect? Effect = null);
 public sealed record ToolExecutionContext(Session Session, Run Run, ISessionStore Store, CancellationToken Cancellation, Action<AgentEvent>? Emit = null)
 {
+    public bool SteeringPending => Store is ISteeringStore inbox && inbox.HasPendingSteering(Session.Id, Run.Id);
     public string Workspace => Session.Workspace;
     public string ArtifactDirectory => Path.Combine(Store.DataDirectory, "artifacts", Session.Id);
     public void Save(string type, object payload)
@@ -128,17 +148,19 @@ public sealed class ProcessRecord
     public string LogPath { get; set; } = "";
     public bool Truncated { get; set; }
 }
-public sealed record ToolOutput(string Content, Question? Question = null, bool PlanReview = false, bool FinishRun = false);
-public sealed record ModelRequest(string Model, string Instructions, IReadOnlyList<JsonObject> Input, IReadOnlyList<ToolDefinition> Tools);
+public sealed record ToolOutput(string Content, Question? Question = null, bool PlanReview = false, bool FinishRun = false, IReadOnlyList<string>? ImageAttachmentIds = null);
+public sealed record ModelRequest(string Model, string Instructions, IReadOnlyList<JsonObject> Input, IReadOnlyList<ToolDefinition> Tools, int? MaxOutputTokens = null);
 public sealed record ModelEvent(string Type, string? Text = null, IReadOnlyList<JsonObject>? Output = null, string? Usage = null);
 public sealed record ContextResult(ModelRequest Request, string Manifest);
 
 public interface IModelClient
 {
+    Task<TokenMeasurement?> CountTokensAsync(ModelRequest request, CancellationToken cancellationToken) => Task.FromResult<TokenMeasurement?>(null);
     IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken);
 }
 public interface IToolDispatcher
 {
+    Task StartWorkflowAsync(ToolExecutionContext context) => Task.CompletedTask;
     Task<IDisposable> AcquireToolLeaseAsync(ToolExecutionContext context, ToolCall call) => Task.FromResult<IDisposable>(NoopLease.Instance);
     string SessionInstructions(Session session) => session.WorkerInstructions;
     Task<bool> CanCompleteAsync(ToolExecutionContext context) => Task.FromResult(true);
@@ -156,6 +178,8 @@ public interface IToolDispatcher
 public interface IWorkspaceTools : IToolDispatcher { }
 public interface ISessionStore
 {
+    IReadOnlyList<AttachmentRecord> Attachments(string conversationId) => Get(conversationId)?.Attachments ?? [];
+    void SaveAttachment(AttachmentRecord attachment) => throw new NotSupportedException("Attachment storage unavailable.");
     string DataDirectory { get; }
     IDisposable Acquire(string conversationId);
     Session? Get(string conversationId);
@@ -163,4 +187,7 @@ public interface ISessionStore
     void Save(Session session, AgentEvent agentEvent);
     void SaveProcess(string conversationId, ProcessRecord process);
 }
-public sealed class UserFacingException(string message) : Exception(message);
+public sealed class UserFacingException(string message, FailureDetail? detail = null) : Exception(message)
+{
+    public FailureDetail? Detail { get; } = detail;
+}

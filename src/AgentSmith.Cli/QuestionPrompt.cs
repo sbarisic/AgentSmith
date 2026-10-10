@@ -13,6 +13,12 @@ public sealed class QuestionInput(string[] choices)
     public bool Closed { get; private set; }
     public string Hint { get; private set; } = "";
     public int OptionCount => choices.Length + 1;
+    public void Paste(string? text)
+    {
+        if (Focus != 1 || text is null) { Hint = "Paste text in the note field; images belong in the composer."; return; }
+        if (Note.Length + text.Length > 8000) { Hint = "Note exceeds 8000 characters; unchanged."; return; }
+        Note += text; Hint = "Pasted. Enter explicitly submits.";
+    }
 
     public void Handle(ConsoleKeyInfo key)
     {
@@ -92,7 +98,7 @@ public static class QuestionPrompt
         return text[..end] + "…";
     }
 
-    public static async Task<string?> ReadAsync(Question question, bool color, CancellationToken ct, Func<CancellationToken, Task<ConsoleKeyInfo>>? readKey = null)
+    public static async Task<string?> ReadAsync(Question question, bool color, CancellationToken ct, Func<CancellationToken, Task<ConsoleKeyInfo>>? readKey = null, Func<string?>? paste = null)
     {
         var state = new QuestionInput(question.Choices);
         var previousLines = 0;
@@ -116,13 +122,16 @@ public static class QuestionPrompt
                 Console.Write("\r\u001b[J");
                 for (var i = 0; i < lines.Length; i++)
                 {
-                    if (color) Console.Write(i == 0 || lines[i].StartsWith("  >", StringComparison.Ordinal) ? "\u001b[96m" : "\u001b[0m");
+                    if (color) Console.Write(i == 0 || lines[i].StartsWith("  >", StringComparison.Ordinal) ? TerminalTheme.Style("accent") : TerminalTheme.Style("normal"));
                     Console.WriteLine(lines[i]);
                 }
                 if (color) Console.Write("\u001b[0m");
                 previousLines = lines.Length;
-                if (readKey is not null) state.Handle(await readKey(ct));
-                else { while (!Console.KeyAvailable) { ct.ThrowIfCancellationRequested(); await Task.Delay(25, ct); } state.Handle(Console.ReadKey(intercept: true)); }
+                ConsoleKeyInfo key;
+                if (readKey is not null) key = await readKey(ct);
+                else { while (!Console.KeyAvailable) { ct.ThrowIfCancellationRequested(); await Task.Delay(25, ct); } key = Console.ReadKey(intercept: true); }
+                if (key.Key == ConsoleKey.V && key.Modifiers.HasFlag(ConsoleModifiers.Alt)) state.Paste(paste?.Invoke());
+                else state.Handle(key);
             }
             Console.Write($"\u001b[{previousLines}A\r\u001b[J");
             if (state.Answer is null) Console.WriteLine("  Question saved. Resume this conversation to answer.");
