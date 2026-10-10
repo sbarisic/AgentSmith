@@ -97,14 +97,14 @@ internal sealed partial class CliApp
         var child = new Session { Model = profile.Model, AccountId = profile.AccountId, Connection = profile.Connection };
         await ConfigureModel(child, ct);
     }
-    public async Task ShowModels(ModelProvider provider, string endpoint, CancellationToken ct)
+    public async Task ShowModels(ModelProvider provider, string endpoint, CancellationToken ct, string? accountId = null)
     {
         if (provider == ModelProvider.LmStudio) Write("models", (await new LmStudioModelClient(http, new() { Provider = provider, Endpoint = endpoint }).ModelsAsync(ct)).Select(m => new { m.Id, name = m.Name + (m.Loaded ? " · loaded" : " · not loaded"), m.ContextTokens, m.ToolUse }));
         else if (provider == ModelProvider.Local) Write("models", (await new LocalChatModelClient(http, new() { Provider = provider, Endpoint = endpoint }).ModelsAsync(ct)).Select(m => new { m.Id, name = m.Id, m.ContextTokens }));
-        else if (provider == ModelProvider.ChatGpt) Write("models", await Auth.ModelsAsync(Vault.Active().Id, ct));
+        else if (provider == ModelProvider.ChatGpt) Write("models", await Auth.ModelsAsync(Vault.Active(accountId).Id, ct));
         else throw new UserFacingException("Unknown provider.");
     }
-    public object Header(Session s, bool resumed = false) => new { s.Id, s.Workspace, s.Model, s.AccountId, provider = s.Connection.Provider.ToString(), endpoint = s.Connection.Provider != ModelProvider.ChatGpt ? s.Connection.Endpoint : null, s.Connection.LoadedContextTokens, mode = s.Mode.ToString(), workflow = s.Workflow.ToString(), report = WorkflowPolicy.Active(s) is { } report ? new { report.Id, report.TargetKind, report.Target, report.State } : null, history = resumed ? s.History.Select((item, index) => { var display = item.DeepClone().AsObject(); display["_workflow"] = s.MessageWorkflows.TryGetValue(index, out var workflow) ? workflow.ToString() : null; return display; }).ToArray() : null, resume = resumed ? ResumePresentation.Build(s, Store.Queue(s.Id)) : null };
+    public object Header(Session s, bool resumed = false) => new { s.Id, s.Workspace, s.Model, s.AccountId, provider = s.Connection.Provider.ToString(), endpoint = s.Connection.Provider != ModelProvider.ChatGpt ? s.Connection.Endpoint : null, s.Connection.LoadedContextTokens, mode = s.Mode.ToString(), workflow = s.Workflow.ToString(), report = WorkflowPolicy.Active(s) is { } report ? new { report.Id, report.TargetKind, report.Target, report.State } : null, history = resumed ? DisplayHistory(s) : null, resume = resumed ? ResumePresentation.Build(s, Store.Queue(s.Id)) : null };
     private async Task<bool> AgentCommand(string name, string args, Session session)
     {
         if (name == "/agents")

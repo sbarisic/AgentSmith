@@ -16,7 +16,7 @@ public sealed partial class SessionStore
         if (parent is string root && root.Length > 0) throw new UserFacingException("View usage for the parent conversation: " + root);
         command.CommandText = """
             SELECT c.id, COALESCE(json_extract(c.snapshot,'$.connection.provider'),0),
-                   json_extract(c.snapshot,'$.model'), json_extract(w.payload,'$.profile.name'),
+                   COALESCE((SELECT json_extract(e.payload,'$.oldModel') FROM events e WHERE e.conversation_id=c.id AND e.type='model.changed' ORDER BY e.sequence LIMIT 1),json_extract(c.snapshot,'$.model')), json_extract(w.payload,'$.profile.name'),
                    json_extract(w.payload,'$.purpose'), json_extract(w.payload,'$.state'), json_extract(w.payload,'$.waitingMilliseconds')
             FROM conversations c LEFT JOIN workers w ON w.child_id=c.id AND w.parent_id=$id
             WHERE c.id=$id OR w.parent_id=$id ORDER BY CASE WHEN c.id=$id THEN 0 ELSE 1 END,w.rowid
@@ -30,15 +30,27 @@ public sealed partial class SessionStore
                     Provider = Enum.IsDefined(typeof(ModelProvider), provider) ? ((ModelProvider)provider).ToString() : "Unknown",
                     Model = reader.IsDBNull(2) ? "Unknown" : reader.GetString(2), Profile = reader.IsDBNull(3) ? null : reader.GetString(3), Purpose = reader.IsDBNull(4) ? null : reader.GetString(4), Outcome = reader.IsDBNull(5) ? null : reader.GetString(5), WaitingMilliseconds = reader.IsDBNull(6) ? 0 : reader.GetDouble(6) });
             }
-        foreach (var row in rows)
+        foreach (var originalRow in rows.ToArray())
         {
+            var row = originalRow;
             using var events = db.CreateCommand(); events.Transaction = tx;
-            events.CommandText = "SELECT type,json_extract(payload,'$.usage'),json_extract(payload,'$.usageUnavailable') FROM events WHERE conversation_id=$id AND type IN ('model.requested','model.completed','context.compaction.completed','context.compaction.failed','context.compaction.retry') ORDER BY sequence";
+            events.CommandText = "SELECT type,json_extract(payload,'$.usage'),json_extract(payload,'$.usageUnavailable'),json_extract(payload,'$.model') FROM events WHERE conversation_id=$id AND type IN ('model.changed','model.requested','model.completed','context.compaction.completed','context.compaction.failed','context.compaction.retry') ORDER BY sequence";
             events.Parameters.AddWithValue("$id", row.ConversationId);
             using var reader = events.ExecuteReader(); var requested = 0; var completed = 0;
             while (reader.Read())
             {
                 var type = reader.GetString(0); var usage = reader.IsDBNull(1) ? null : reader.GetString(1);
+                if (type == "model.changed")
+                {
+                    var nextModel = reader.GetString(3);
+                    if (nextModel == row.Model) continue;
+                    row.UnfinishedRequests += Math.Max(0, requested - completed); requested = 0; completed = 0;
+                    row = rows.FirstOrDefault(r => r.ConversationId == originalRow.ConversationId && r.Model == nextModel)
+                        ?? new UsageRow { ConversationId = originalRow.ConversationId, Role = originalRow.Role, Provider = originalRow.Provider,
+                            Model = nextModel, Profile = originalRow.Profile, Purpose = originalRow.Purpose, Outcome = originalRow.Outcome };
+                    if (!rows.Contains(row)) rows.Add(row);
+                    continue;
+                }
                 if (type == "model.requested") { requested++; continue; }
                 if (type == "context.compaction.failed") { row.FailedCompactions++; continue; }
                 if (type == "context.compaction.retry") { if (!reader.IsDBNull(2) && reader.GetInt64(2) == 1) row.RequestsWithoutUsage++; continue; }
@@ -51,7 +63,7 @@ public sealed partial class SessionStore
                 }
                 catch (JsonException) { row.RequestsWithoutUsage++; }
             }
-            row.UnfinishedRequests = Math.Max(0, requested - completed);
+            row.UnfinishedRequests += Math.Max(0, requested - completed);
         }
         tx.Commit(); return new(conversationId, rows);
     }

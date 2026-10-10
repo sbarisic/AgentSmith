@@ -67,9 +67,10 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
         if (run.Calls.Any(c => c.State == CallState.Completed && session.Receipts.TryGetValue(c.Id, out var savedReceipt) && savedReceipt.FinishRun))
         {
             foreach (var tail in run.Calls.Where(c => c.State == CallState.Pending)) CompleteCall(session, tail, Json.Serialize(new { error = "Workflow already finished; later calls were not executed." }));
-            session.Workflow = WorkflowMode.Work; run.State = RunState.Completed; run.Reason = null;
+            session.Workflow = WorkflowMode.Work; run.State = RunState.Completed; run.Reason = null; run.CompletionRequirement = null;
             Save("run.outcome", new { state = "Completed", workflow = "Work" }); return run;
         }
+        if (run.PauseReason == PauseReason.NoProgress) run.CompletionRequirement = tools.GetCompletionRequirement(context);
         run.State = RunState.Running;
         run.Reason = null;
         run.PauseReason = PauseReason.None;
@@ -90,12 +91,13 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
             return messages.Count > 0;
         }
         string? previousRound = null; var repeated = 0; var roundStart = run.Calls.Count;
+        var blockedCompletions = 0;
         try
         {
             await tools.StartWorkflowAsync(context);
             while (true)
             {
-                if (IncorporateSteering()) { repeated = 0; previousRound = null; }
+                if (IncorporateSteering()) { repeated = 0; previousRound = null; blockedCompletions = 0; }
                 foreach (var call in run.Calls.Where(c => c.State == CallState.Pending))
                 {
                     linked.Token.ThrowIfCancellationRequested();
@@ -172,6 +174,7 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                     Save("tool.completed", new { call.Id, call.Name, output.Content, call.DurationMilliseconds });
                     if (output.FinishRun)
                     {
+                        run.CompletionRequirement = null;
                         foreach (var tail in run.Calls.Where(c => c.State == CallState.Pending)) CompleteCall(session, tail, Json.Serialize(new { error = "Task finished; later calls were not executed." }));
                         if (session.ParentConversationId is null && WorkflowPolicy.Active(session) is { State: "Completed" }) session.Workflow = WorkflowMode.Work;
                         run.State = RunState.Completed; run.BatchExecutionMilliseconds = timer.Elapsed.TotalMilliseconds; run.ExecutionMilliseconds += run.BatchExecutionMilliseconds;
@@ -197,6 +200,7 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                 else { repeated = 0; previousRound = null; }
                 if (run.BatchRequests >= maxRequests) throw new RequestLimitException();
                 linked.Token.ThrowIfCancellationRequested();
+                if (run.CompletionRequirement is not null) run.CompletionRequirement = tools.GetCompletionRequirement(context);
                 if (ToolResultProjection.Prepare(session, store)) Save("context.projection", new { version = ToolResultProjection.Version });
                 var builder = new ContextBuilder(store, model, tools) { Limit = MaxContextCharacters, RequestBudget = maxRequests };
                 run.ContextManifest = builder.Build(session).Manifest;
@@ -209,6 +213,7 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                 Save("model.requested", new { step = run.Steps, context = run.ContextManifest });
                 IReadOnlyList<JsonObject>? completed = null;
                 var steeringReported = false;
+                var repetition = new ResponseRepetitionGuard();
                 await foreach (var ev in model.StreamAsync(preparedContext.Request, linked.Token))
                 {
                     if (!steeringReported)
@@ -216,10 +221,17 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                         foreach (var message in steering?.MarkSteeringSent(session, run) ?? []) emit(new("steering.sent", session.Id, run.Id, Notice(message, "Sent to model")));
                         steeringReported = true;
                     }
-                    if (ev.Type == "text") emit(new("text.delta", session.Id, run.Id, new { text = ev.Text }));
+                    if (ev.Type == "text")
+                    {
+                        if (repetition.Append(ev.Text)) throw new ResponseRepetitionException();
+                        emit(new("text.delta", session.Id, run.Id, new { text = ev.Text }));
+                    }
                     if (ev.Type == "completed") { completed = ev.Output; run.Usage = ev.Usage; }
                 }
                 if (completed is null) throw new UserFacingException("The response stream ended before completion. No tools from it were executed.");
+                var finalText = string.Concat(completed.Where(i => i["role"]?.ToString() == "assistant")
+                    .SelectMany(i => i["content"] is JsonArray a ? a.Select(p => p?["text"]?.ToString() ?? "") : [i["content"]?.ToString() ?? ""]));
+                if (new ResponseRepetitionGuard().Append(finalText, final: true)) throw new ResponseRepetitionException();
                 session.ContextPolicy.Observe(preparedContext.Request, run.Usage);
                 completed = completed.Select(i => (JsonObject)i.DeepClone()).ToArray();
                 foreach (var item in completed.Where(i => i["type"]?.ToString() == "function_call" && i["name"]?.ToString().StartsWith("memory_", StringComparison.Ordinal) == true))
@@ -245,11 +257,34 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                 session.History.AddRange(completed.Select(i => (JsonObject)i.DeepClone()));
                 run.Calls.AddRange(calls);
                 Save("model.completed", new { step = run.Steps, calls = calls.Count, usage = run.Usage });
-                if (IncorporateSteering()) continue;
+                if (IncorporateSteering()) { blockedCompletions = 0; continue; }
+                var collectedBefore = run.WorkerResults.Count;
                 if (calls.Count == 0 && await tools.CanCompleteAsync(context))
                 {
                     if (steering is not null && !steering.TryCompleteSteeredRun(session, run)) continue;
+                    run.CompletionRequirement = null;
                     run.State = RunState.Completed; break;
+                }
+                if (calls.Count > 0) blockedCompletions = 0;
+                else
+                {
+                    if (run.WorkerResults.Count > collectedBefore)
+                    {
+                        blockedCompletions = 0;
+                        run.CompletionRequirement = tools.GetCompletionRequirement(context);
+                        Save("run.completion.collected", new { message = "Saved worker results collected. The parent will inspect the evidence before finishing." });
+                        continue;
+                    }
+                    run.CompletionRequirement = tools.GetCompletionRequirement(context) ?? new("completion_pending",
+                        "Required work remains unsettled.", "Inspect the authoritative workflow and worker state, and use the available tools to settle outstanding work before another final answer.");
+                    Save("run.completion.pending", run.CompletionRequirement);
+                    if (++blockedCompletions >= 3)
+                    {
+                        run.State = RunState.Paused; run.PauseReason = PauseReason.NoProgress;
+                        run.Reason = "Completion paused: " + run.CompletionRequirement.Reason + " " + run.CompletionRequirement.Next +
+                            " Inspect /status, then explicitly continue. Saved edits remain intact.";
+                        break;
+                    }
                 }
             }
         }
@@ -257,6 +292,12 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
         { run.State = ct.IsCancellationRequested ? RunState.Cancelled : RunState.Paused; run.PauseReason = ct.IsCancellationRequested ? PauseReason.None : PauseReason.TimeLimit; run.Reason = ct.IsCancellationRequested ? "Cancelled by user." : "Active time limit reached."; }
         catch (RequestLimitException)
         { run.State = RunState.Paused; run.PauseReason = PauseReason.RequestLimit; run.Reason = "Model request budget reached. Explicit continuation grants another bounded batch."; }
+        catch (ResponseRepetitionException)
+        {
+            run.State = RunState.Paused; run.PauseReason = PauseReason.NoProgress;
+            run.Reason = "Stopped repetitive model output. This response was not added to model history and none of its tool calls ran. Saved edits remain intact. Use /steer to clarify the next step, then explicitly continue.";
+            Save("model.interrupted", new { reason = "repetitive_output", message = run.Reason });
+        }
         catch (ContextBudgetException ex)
         { run.State = RunState.Paused; run.PauseReason = ex.Reason; run.Reason = ex.Message; }
         catch (UserFacingException ex) { run.State = RunState.Failed; run.Reason = ex.Message; }

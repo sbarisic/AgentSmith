@@ -27,8 +27,10 @@ internal sealed partial class CliApp
     {
         var source = activeRun;
         if (source is null || source.IsCancellationRequested) return;
-        source.Cancel();
-        if (currentConversation is not null) Store.HoldQueue(currentConversation, "Cancelled");
+        // Persist the hold before cancellation can expose a terminal run to observers.
+        // Cancellation must still reach the runner if storing the hold fails.
+        try { if (currentConversation is not null) Store.HoldQueue(currentConversation, "Cancelled"); }
+        finally { source.Cancel(); }
         Write("run.cancelling", new { message = "Cancelling… Waiting for cleanup and saved outcomes." });
     }
     private void QueueMessage(Session session, string text, UserPrompt? rich = null)
@@ -37,7 +39,10 @@ internal sealed partial class CliApp
         {
             var item = rich is null ? Store.Enqueue(session.Id, text) : Store.Enqueue(session.Id, rich);
             var position = Store.Queue(session.Id).Items.Count(i => i.State == "Pending");
-            Write("prompt.queued", new { item.Id, position, message = $"Queued #{position} · {item.Id} · {Activity.Clean(text, 100)}" });
+            var images = rich?.Parts.Count(p => p.Kind == "image") ?? 0;
+            Write("prompt.queued", new { item.Id, position, imageCount = images,
+                content = images > 0 ? PromptPresentation.Content(rich!.HistoryItem()["content"], Store.Attachments(session.Id)) : null,
+                message = $"Queued #{position} · {item.Id}" + (images > 0 ? $" · {images} image(s) attached" : "") + $" · {Activity.Clean(text, 100)}" });
         }
         catch (UserFacingException ex) { if (rich is null) input.Restore(text); else input.RestorePrompt(rich); Write("error", new { message = ex.Message, failure = ex.Detail?.Sanitized() }); }
     }
@@ -65,7 +70,7 @@ internal sealed partial class CliApp
 
         if (name == "/cancel") { CancelActive(); return; }
         if (name == "/exit") { exitRequested = true; CancelActive(); Store.HoldQueue(session.Id, "CLI exit"); return; }
-        if (name is "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/tasks" or "/processes" or "/changes")
+        if (name is "/model" or "/models" or "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/tasks" or "/processes" or "/changes")
         {
             // Queue storage is independent; other busy reads use a committed snapshot, never the runner's mutable session.
             await HandleCommand(line, Store.Get(session.Id) ?? throw new UserFacingException("Conversation is unavailable.")); return;

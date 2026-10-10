@@ -44,6 +44,8 @@ internal static class CommandHelp
             new("/attach <image-path>", "Attach an image to the draft"),
             new("Alt+V · Tab · Enter · Delete", "Paste; focus draft blocks; preview a block; remove it")]),
         new("settings", "Display, context, and memory", [
+            new("/model [id]", "Show selection or change the next prompt's model while idle; also saves the new-chat default"),
+            new("/models", "List models available from this conversation's provider"),
             new("/display compact|verbose", "Choose tool-output detail"), new("/details <call-id|#process>", "Inspect bounded activity details"),
             new("/markdown on|off", "Toggle formatted Markdown"), new("/context", "Inspect context usage and compaction provenance"),
             new("/context budget balanced|max|<tokens>", "Set the context budget while idle"), new("/compact", "Compact saved context without resuming work"),
@@ -60,7 +62,7 @@ internal static class CommandHelp
             throw new UserFacingException("Unknown help topic. Use /help workflows|session|tools|queue|settings|all.");
         var groups = topic.Length == 0
             ? new[] { new Group("start", "Start a task", [new("/plan <task>", "Investigate and prepare a plan"), new("/document <task>", "Write or improve documentation"), new("/review", "Audit current changes without editing"), new("/mode <name>", "Work, Plan, Document, Review; or Inspect, Edit, Execute permissions")]),
-                new Group("daily", "Everyday commands", [new("/status · /usage", "Inspect session state and token usage"), new("/tasks · /reports · /report <id>", "Read saved plans and reports"), new("/cancel · /queue", "Stop work or manage queued follow-ups"), new("/work · /exit", "Return to Work or exit the CLI")]) }
+                new Group("daily", "Everyday commands", [new("/status · /usage", "Inspect session state and token usage"), new("/model [id] · /models", "Select the next model and save the new-chat default, or list models"), new("/tasks · /reports · /report <id>", "Read saved plans and reports"), new("/cancel · /queue", "Stop work or manage queued follow-ups"), new("/work · /exit", "Return to Work or exit the CLI")]) }
             : Groups.Where(g => topic == "all" || g.Topic == topic).ToArray();
         return new { topic, groups, example = "/plan Make a plan to implement player movement", note = "Workflow controls the task; permissions control allowed effects. Selecting a workflow never increases permissions or approves a plan.", topics = "More: /help workflows · /help session · /help tools · /help queue · /help settings · /help all" };
     }

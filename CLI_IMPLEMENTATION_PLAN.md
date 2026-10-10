@@ -1,6 +1,53 @@
 # AgentSmith CLI implementation plan
 
-## Steering previews and worker action labels — source update pending build
+## Model commands and image display — local delivery, 2026-10-10
+
+After the user confirmed Smith was closed, built the pending changes and ran the full Release suite. The first run exposed a cancellation ordering race: a cancelled run could be observed before its queue hold was saved. Changed cancellation to persist the hold before signalling the runner, using `finally` to preserve cancellation if persistence fails. The full rerun passed **452 tests** (326 core/tool, 126 integration), zero failures or skips.
+
+Published the self-contained Windows x64 build to `artifacts/publish/win-x64`. Published checks using an isolated loopback mock catalog confirmed `smith model` persistence, `smith chat` without `--model`, `/models`, `/model` selection and the selected model in a subsequent new chat. Core/Storage/Tools/Runtime/CLI assembly hashes match the build. Evidence: `artifacts/model-image-delivery-20261010/published-smoke.json`. No live provider inference, production-state changes or physical clipboard/terminal checks were performed. No commit or public push.
+
+## Model commands and persistent defaults — implementation
+
+Added `/model [id]`, `/models` and `smith model [id]`. Idle model selection validates a detached candidate and saves the session model plus the new-chat default transactionally. `smith chat` no longer requires `--model`: explicit options override the saved default; existing installations without one fall back to their latest parent session. New successful chats remember the resolved selection. `smith run` reads defaults without replacing them. Workers, workflow and permissions remain unchanged; active/unfinished work and pending review prevent model switches. Existing conversations cannot switch provider/account through this command.
+
+Schema v10 adds the defaults row after a v9 backup. Added model-specific usage attribution, token calibration reset and model-aware compaction attempt identity. Regression coverage includes migration with held queues, atomic rollback, persistence/reopening, explicit override precedence, parent-only fallback, model validation failure, unfinished-run rejection and usage across model switches. Updated help and documentation. Included in the verified local delivery above; no production settings were changed during validation.
+
+## Submitted image visibility — implementation
+
+The reported live message omitted attachment labels because `user.submitted` carried only the text, while replay read image references from rich history. Added an allowlisted content projection and shared image-label rendering for live submissions, queued dispatch and replay, plus image counts/metadata in queue acknowledgements. Labels retain part order and show dimensions/size when registered metadata is available. Image-only prompts remain visible; legacy text events still render. No provider transport or saved prompt changes are required.
+
+Regression coverage for Enter submission, image-only prompts, ordered multiple images, queue/replay visibility, metadata-only events and legacy text events passed in the full suite above. Included in the local publish. Physical clipboard/terminal acceptance remains unverified; live conversations were not changed during testing.
+
+## Automatic worker collection follow-up — 2026-10-10
+
+Live user evidence showed that explicit completion feedback alone was insufficient: the parent repeated its answer while three cancelled/blocked workers remained uncollected. Moved this bookkeeping into the runtime completion check. Settled results are imported and saved, their original outcomes and checkpoint/artifact references enter the next request, and the parent gets another inference to inspect the evidence. No worker is relaunched or marked successful by collection. Uncertain effects and held reservations still block collection.
+
+Parent run receipts are saved before worker collection markers. Recovery after a marker-write failure reuses the saved receipt; parent-save failures leave the worker uncollected. Manual `agent_result` uses the same idempotent path. A collection notice identifies the worker outcome and retained report. Source history and user workspace contents are unchanged by these checks.
+
+Verification: **438 Release tests passed** (323 core/tool, 115 integration), no failures or skips. Tests include a parent that never calls `agent_result`, cancelled work without a report, failed receipt persistence, restart between receipt and marker commits, recovery-required effects and terminal notices. Live provider acceptance remains unverified; the user's paused task was not resumed for testing. Refreshed the self-contained Windows x64 publish folder after checking that Smith was closed. Published help, isolated JSON authentication status and Core/Tools/Runtime/CLI assembly hash checks passed; evidence is at `artifacts/automatic-collection-20261010/published-smoke.json`. No commit or public push.
+
+## Completion feedback follow-up — 2026-10-10
+
+The next screenshot showed the non-progress guard working, but the parent still repeated its final answer before pausing. Completion barriers previously returned only a boolean; the next request relied on general workflow/worker instructions rather than feedback about the refused completion.
+
+Added a persisted completion requirement with a code, concrete reason and next action. Uncollected workers are identified by number, state and tool ID, including cancelled/failed workers. Document/Review directs the model to read/update/finalize its saved report. Worker prose receives an agent_finish instruction instead of an immediate failure. Feedback is refreshed before inference, counted in context and cleared after the requirement is settled. Terminal notices and /status show the reason and next action. Existing permission, report-validation, recovery and explicit-continuation gates remain in place.
+
+Automated cases exercise parent result collection followed by completion, worker report submission after a premature prose answer, workflow finalization, feedback persistence across a paused restart and terminal/status rendering. Live ChatGPT/Bonsai compliance with this correction has not been verified; scripted tests establish runtime delivery and state transitions only.
+
+Delivery: **434 Release tests passed** (320 core/tool, 114 integration), with no failures or skips. Refreshed `artifacts/publish/win-x64` after confirming no Smith process was running. Published help, isolated JSON authentication status and Core/Tools/Runtime/CLI hash checks passed; evidence is at `artifacts/completion-feedback-20261010/published-smoke.json`. No saved user work was resumed or changed; no commit or public push. For the reported non-progress pause, use `smith resume` and explicitly `continue`; the runtime refreshes the outstanding completion requirement before inference.
+
+## Repetition and oversized compaction recovery — delivered locally, 2026-10-10
+
+- Fixed the deterministic oversized-group compaction rejection. Summary requests now consume bounded quoted evidence slices with source hashes and character ranges, including slices of large historical groups. Original history and ordinary inference protocol groups remain intact. Snapshot activation requires every slice, a validated summary, protected-context budget checks and an unchanged source boundary. Measured token overruns shrink the slice before inference. Failed/interrupted attempts keep the previous snapshot; the eight-request ceiling remains.
+- Added a bounded generated-text repetition guard and a three-response completion-barrier guard. Both pause with NoProgress and explicit continuation guidance. Incomplete generated calls never execute. Model-response boundaries now flush Markdown so consecutive answers do not concatenate. These guards do not establish why the provider generated the reported repetition.
+- Added regression coverage for a 90,000-character tool-result group, complete recent protocol groups, saved slice provenance, interrupted slices, exact-count overruns, streamed/authoritative repetitive text, explicit resume, completion barriers and adjacent rendered responses.
+- Final Release suite: **430 passed** (317 core/tool, 113 integration), zero failed/skipped. Command: `dotnet test AgentSmith.slnx -c Release --no-restore -- RunConfiguration.MaxCpuCount=1 xUnit.MaxParallelThreads=1`.
+- Published the self-contained Windows x64 build to `artifacts/publish/win-x64` after the user confirmed exit. Published help and isolated JSON authentication-status checks passed; Core, Runtime and CLI assembly hashes match the build. Smoke evidence is local at `artifacts/repetition-compaction-20261010/published-smoke.json`.
+- This delivery includes the staged content blocks, process-output cleanup, worker aliases, steering previews and actionable errors documented below. It supersedes their earlier build/test deferrals. No live ChatGPT/Bonsai repetition or compaction acceptance was run for this fix, and physical terminal visual acceptance remains unverified. The user's saved sessions and sandbox were not modified or resumed. No commit or public publication in this delivery.
+
+To recover the reported paused task, start `smith resume`, run `/compact`, and type `continue` after it succeeds. Compaction can still pause if protected current context cannot fit or the bounded attempt is exhausted; it never activates a partial summary.
+
+## Steering previews and worker action labels — source checkpoint before the delivery above
 
 Added readable `› Spawn`, `› Wait for`, `› Message`, `› Collect`, and `› Cancel` worker activity with conversation-local aliases. Compact worker starts avoid the duplicated tool/start task text. Steering notices show a bounded quoted message, recipient and sender, with separate Saved / Added to next request / Sent to model stages. Later stages do not repeat the full preview in compact output. `/steering` exposes expanded bounded previews and full IDs; older events retain their original notice when no preview was saved. `/details` refreshes worker action summaries from the saved arguments.
 

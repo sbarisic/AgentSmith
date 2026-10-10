@@ -118,7 +118,15 @@ public sealed partial class SessionStore : ISessionStore, IWorkerStore, IMemoryS
             command.CommandText = "CREATE TABLE steering(id TEXT PRIMARY KEY, root_id TEXT NOT NULL, conversation_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, state TEXT NOT NULL, operation_key TEXT UNIQUE, payload TEXT NOT NULL); CREATE INDEX steering_target ON steering(conversation_id,run_id,state); UPDATE schema_version SET version=9;";
             command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 9;
         }
-        if (version != 9) throw new UserFacingException("Unsupported session database version.");
+        if (version == 9)
+        {
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "sessions-v9-" + Guid.NewGuid().ToString("N") + ".backup.db") }.ToString()))
+            { backup.Open(); db.BackupDatabase(backup); }
+            using var migration = db.BeginTransaction(); command.Transaction = migration;
+            command.CommandText = "CREATE TABLE IF NOT EXISTS chat_defaults(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL); UPDATE schema_version SET version=10;";
+            command.ExecuteNonQuery(); migration.Commit(); command.Transaction = null; version = 10;
+        }
+        if (version != 10) throw new UserFacingException("Unsupported session database version.");
     }
     private SqliteConnection Open()
     {

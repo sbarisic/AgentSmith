@@ -47,11 +47,29 @@ public sealed class WorkflowTests
         var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Message())], [RuntimeTests.Done(RuntimeTests.Call("update", "workflow_update", Update()), RuntimeTests.Call("finish", "workflow_finish", "{\"expectedRevision\":1}"), RuntimeTests.Call("tail", "file_create", "{\"path\":\"bad.md\",\"content\":\"no\"}"))]);
         var run = await new AgentRunner(store, model, tools).RunAsync(s, "Draft documentation", null, _ => { }, default);
         Assert.Equal(2, model.Requests.Count); Assert.Equal(RunState.Completed, run.State); Assert.Equal(WorkflowMode.Work, s.Workflow); Assert.Equal(PermissionMode.Inspect, s.Mode);
+        Assert.Contains("Authoritative completion feedback", model.Requests[1].Instructions);
+        Assert.Contains("workflow_report_pending", model.Requests[1].Instructions);
+        Assert.Null(store.Get(s.Id)!.Runs.Last().CompletionRequirement);
         Assert.False(File.Exists(Path.Combine(dir.Path, "bad.md"))); Assert.Contains("not executed", run.Calls.Last().Result!);
         store.Enqueue(s.Id, "follow up"); var queued = store.ClaimQueued(s); Assert.NotNull(queued); Assert.Equal(WorkflowMode.Work, store.Get(s.Id)!.Workflow);
         var saved = store.Get(s.Id)!; Assert.Equal("Completed", saved.Reports.Single().State); Assert.True(saved.Receipts["finish"].FinishRun);
         Assert.Contains(saved.Artifacts, a => a.Kind == "workflow-report" && File.Exists(a.Path)); Assert.Contains("external links", WorkflowTools.Markdown(saved.Reports.Single()), StringComparison.OrdinalIgnoreCase);
     }
+    [Fact]
+    public async Task CompletionFeedbackSurvivesPauseAndRefreshesOnResume()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); using var tools = new ToolRegistry();
+        var s = new Session { Workspace = dir.Path, Workflow = WorkflowMode.Document, Mode = PermissionMode.Inspect };
+        var paused = await new AgentRunner(store, new ScriptedModel([RuntimeTests.Done(RuntimeTests.Message("Draft done"))]), tools) { MaxSteps = 1 }
+            .RunAsync(s, "Draft documentation", null, _ => { }, default);
+        Assert.Equal(RunState.Paused, paused.State);
+        var saved = store.Get(s.Id)!; Assert.Equal("workflow_report_pending", saved.Runs.Last().CompletionRequirement!.Code);
+        var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Call("update", "workflow_update", Update()), RuntimeTests.Call("finish", "workflow_finish", "{\"expectedRevision\":1}"))]);
+        var finished = await new AgentRunner(store, model, tools).RunAsync(saved, null, null, _ => { }, default);
+        Assert.Contains("workflow_report_pending", model.Requests[0].Instructions); Assert.Equal(RunState.Completed, finished.State);
+        Assert.Null(store.Get(s.Id)!.Runs.Last().CompletionRequirement);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

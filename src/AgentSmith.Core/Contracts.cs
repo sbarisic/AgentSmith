@@ -55,6 +55,8 @@ public sealed class Session
 }
 public sealed class Run
 {
+    public Dictionary<string, string> WorkerResults { get; set; } = [];
+    public CompletionRequirement? CompletionRequirement { get; set; }
     public int? PromptHistoryIndex { get; set; }
     public List<int> SteeringHistoryIndices { get; set; } = [];
     public PauseReason PauseReason { get; set; }
@@ -160,6 +162,7 @@ public interface IModelClient
 }
 public interface IToolDispatcher
 {
+    CompletionRequirement? GetCompletionRequirement(ToolExecutionContext context) => null;
     Task StartWorkflowAsync(ToolExecutionContext context) => Task.CompletedTask;
     Task<IDisposable> AcquireToolLeaseAsync(ToolExecutionContext context, ToolCall call) => Task.FromResult<IDisposable>(NoopLease.Instance);
     string SessionInstructions(Session session) => session.WorkerInstructions;
@@ -175,6 +178,7 @@ public interface IToolDispatcher
     ToolOutput? Recover(ToolExecutionContext context, ToolCall call) => null;
     Task CancelProcessesAsync(ToolExecutionContext context) => Task.CompletedTask;
 }
+public sealed record CompletionRequirement(string Code, string Reason, string Next);
 public interface IWorkspaceTools : IToolDispatcher { }
 public interface ISessionStore
 {

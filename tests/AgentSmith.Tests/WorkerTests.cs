@@ -279,15 +279,93 @@ public sealed class WorkerTests
         await Assert.ThrowsAsync<UserFacingException>(() => f.Spawn(["a.txt"])); await f.Spawn([]);
     }
     [Fact]
-    public async Task FinishPersistsReportSkipsTailAndParentMustCollect()
+    public async Task FinishPersistsReportSkipsTailAndCompletionCollectsIt()
     {
         using var f = new Fixture(_ => new ScriptedModel([RuntimeTests.Done(Finish("blocked"), RuntimeTests.Call("tail", "file_create", Json.Serialize(new { path = "a.txt", content = "never" })))]));
         await f.Spawn(["a.txt"]); Assert.False(await f.Agents.CanCompleteAsync(f.Context()));
         var worker = Assert.Single(f.Store.Workers(f.Parent.Id)); Assert.Equal("Blocked", worker.State); Assert.False(File.Exists(Path.Combine(f.Dir.Path, "a.txt")));
+        Assert.True(worker.Collected); Assert.Single(f.Run.WorkerResults);
         var result = await f.Invoke("agent_result", new { agentId = worker.Id }); Assert.Contains("Which target?", result.Content);
         Assert.True(await f.Agents.CanCompleteAsync(f.Context())); Assert.Equal(2, f.Parent.Artifacts.Count);
+        Assert.Null(f.Agents.GetCompletionRequirement(f.Context()));
         Assert.Throws<UserFacingException>(() => f.Agents.Find(new Session(), worker.Id));
     }
+    [Fact]
+    public async Task ParentFinishesAfterAutomaticCollectionEvenIfItNeverCallsAgentResult()
+    {
+        using var f = new Fixture(_ => new ScriptedModel([RuntimeTests.Done(Finish())]));
+        f.Parent.History.Add(new() { ["role"] = "user", ["content"] = "Inspect the worker result" });
+        await f.Spawn([]);
+        var worker = Assert.Single(f.Store.Workers(f.Parent.Id));
+        var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Message("Done too soon"))],
+            [RuntimeTests.Done(RuntimeTests.Message("Collected and inspected the worker report."))]);
+        var events = new List<AgentEvent>();
+        var run = await new AgentRunner(f.Store, model, f.Agents).RunAsync(f.Parent, null, null, events.Add, default);
+        Assert.Equal(RunState.Completed, run.State);
+        Assert.Contains("Runtime-collected worker results", model.Requests[1].Instructions); Assert.Contains(worker.Id, model.Requests[1].Instructions);
+        Assert.DoesNotContain("Authoritative completion feedback", model.Requests[1].Instructions);
+        Assert.Single(events, e => e.Type == "agent.collected"); Assert.Empty(run.Calls); Assert.Equal(2, model.Requests.Count);
+        Assert.True(f.Store.Workers(f.Parent.Id).Single().Collected); Assert.Null(f.Store.Get(f.Parent.Id)!.Runs.Last().CompletionRequirement);
+    }
+
+    [Fact]
+    public async Task CancelledWorkerWithNoReportIsCollectedWithoutRelaunchOrDuplicateArtifacts()
+    {
+        using var f = new Fixture(); await f.Spawn([]);
+        var worker = f.Store.Workers(f.Parent.Id).Single(); await f.Agents.CancelAsync(worker.Id);
+        Assert.False(await f.Agents.CanCompleteAsync(f.Context()));
+        Assert.True(await f.Agents.CanCompleteAsync(f.Context()));
+        var saved = f.Store.Get(f.Parent.Id)!; var receipt = Assert.Single(saved.Runs.Last().WorkerResults);
+        Assert.Contains("Cancelled", receipt.Value); Assert.Equal(2, saved.Artifacts.Count);
+        var repeated = await f.Invoke("agent_result", new { agentId = worker.Id }); Assert.Equal(receipt.Value, repeated.Content);
+        Assert.Equal(2, f.Parent.Artifacts.Count); Assert.Single(f.Store.Workers(f.Parent.Id));
+    }
+
+    [Fact]
+    public async Task CollectionSaveFailureLeavesWorkerUncollectedAndCanRetry()
+    {
+        using var f = new Fixture(_ => new ScriptedModel([RuntimeTests.Done(Finish())])); await f.Spawn([]);
+        var ctx = f.Context() with { Store = new FaultStore(f.Store, "agent.result.saved") };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Agents.CanCompleteAsync(ctx));
+        Assert.False(f.Store.Workers(f.Parent.Id).Single().Collected); Assert.Empty(f.Run.WorkerResults);
+        Assert.False(await f.Agents.CanCompleteAsync(f.Context()));
+        Assert.True(f.Store.Workers(f.Parent.Id).Single().Collected); Assert.Single(f.Store.Get(f.Parent.Id)!.Runs.Last().WorkerResults);
+        Assert.Equal(2, f.Parent.Artifacts.Count);
+    }
+
+    [Fact]
+    public async Task RestartBetweenParentReceiptAndWorkerMarkerReusesSavedResult()
+    {
+        using var f = new Fixture(); await f.Spawn([]);
+        var worker = f.Store.Workers(f.Parent.Id).Single(); await f.Agents.CancelAsync(worker.Id);
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(f.Store.DataDirectory, "sessions.db")))
+        {
+            db.Open(); using var command = db.CreateCommand();
+            command.CommandText = "CREATE TRIGGER fail_collection BEFORE UPDATE ON workers WHEN json_extract(NEW.payload,'$.collected')=1 BEGIN SELECT RAISE(ABORT,'injected'); END";
+            command.ExecuteNonQuery();
+            await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() => f.Agents.CanCompleteAsync(f.Context()));
+            Assert.False(f.Store.Workers(f.Parent.Id).Single().Collected);
+            Assert.Single(f.Store.Get(f.Parent.Id)!.Runs.Last().WorkerResults);
+            command.CommandText = "DROP TRIGGER fail_collection"; command.ExecuteNonQuery();
+        }
+        var saved = f.Store.Get(f.Parent.Id)!;
+        var context = f.Context() with { Session = saved, Run = saved.Runs.Last() };
+        Assert.False(await f.Agents.CanCompleteAsync(context)); Assert.True(await f.Agents.CanCompleteAsync(context));
+        Assert.True(f.Store.Workers(f.Parent.Id).Single().Collected); Assert.Equal(2, saved.Artifacts.Count);
+        Assert.Single(f.Store.Get(f.Parent.Id)!.Runs.Last().WorkerResults);
+    }
+
+    [Fact]
+    public async Task WorkerProseReceivesFinishReportFeedbackInsteadOfFailing()
+    {
+        var model = new ScriptedModel([RuntimeTests.Done(RuntimeTests.Message("My investigation is complete."))], [RuntimeTests.Done(Finish())]);
+        using var f = new Fixture(_ => model); await f.Spawn([]);
+        Assert.False(await f.Agents.CanCompleteAsync(f.Context()));
+        Assert.Equal("Completed", f.Store.Workers(f.Parent.Id).Single().State);
+        Assert.Contains("worker_report_pending", model.Requests[1].Instructions);
+        Assert.Contains("agent_finish", model.Requests[1].Instructions);
+    }
+
     [Fact]
     public async Task ChildEditCheckpointsAreUndoableFromParentAndConflictSafe()
     {
@@ -384,7 +462,13 @@ public sealed class WorkerTests
     public async Task WorkerFailuresAroundEffectsReconcileWithoutRepeatingSpawn(string fault, bool changed)
     {
         using var f = new Fixture(_ => new ScriptedModel([RuntimeTests.Done(RuntimeTests.Call("edit", "file_create", Json.Serialize(new { path = "effect.txt", content = "one effect" })), Finish())]), s => new FaultStore(s, fault));
-        await f.Spawn(["effect.txt"], "durable-spawn"); await f.Agents.CanCompleteAsync(f.Context());
+        await f.Spawn(["effect.txt"], "durable-spawn");
+        if (fault == "tool.completed") await f.Agents.CanCompleteAsync(f.Context());
+        else
+        {
+            await Assert.ThrowsAsync<UserFacingException>(() => f.Agents.CanCompleteAsync(f.Context()));
+            Assert.False(f.Store.Workers(f.Parent.Id).Single().Collected); Assert.Empty(f.Run.WorkerResults);
+        }
         Assert.Equal(changed, File.Exists(Path.Combine(f.Dir.Path, "effect.txt")));
         f.Agents.RecoverChildren(f.Parent); await f.Spawn(["effect.txt"], "durable-spawn");
         Assert.Single(f.Store.Workers(f.Parent.Id)); Assert.Equal(changed, File.Exists(Path.Combine(f.Dir.Path, "effect.txt")));

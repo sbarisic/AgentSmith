@@ -29,6 +29,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         if (type is "model.requested" or "question.answered") { runningStatus = "Thinking"; return; }
         if (type == "model.completed")
         {
+            EndStream(); // Separate responses even when no tool event follows the first answer.
             if (TryJson(Text(data, "usage"), out var usage))
             {
                 inputTokens += Number(usage, "input_tokens");
@@ -41,6 +42,12 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         { workflow = Text(data, "workflow"); guideStyle = TerminalTheme.Guide(workflow); }
         switch (type)
         {
+            case "agent.collected":
+                MessageText("› Collected Agent #" + Text(data, "number") + " · " + Text(data, "state"));
+                MessageText("  Saved result: /artifact " + Text(data, "artifactId"), "dim"); break;
+            case "run.completion.pending":
+                MessageText("Completion pending · " + Text(data, "reason"), "status-warning");
+                MessageText("Next: " + Text(data, "next")); break;
             case "steering.saved": case "steering.incorporated": case "steering.sent":
                 SteeringActivity(data); break;
             case "steering.status":
@@ -193,6 +200,17 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 Message("Your input", Text(data, "text"));
                 break;
             case "user.submitted":
+                MessageTitle("You");
+                if (data.TryGetProperty("content", out var submittedContent) && submittedContent.ValueKind == JsonValueKind.Array)
+                    UserContent(submittedContent);
+                else MessageText(Text(data, "text"));
+                EndPrompt();
+                break;
+            case "prompt.queued":
+                MessageText(Text(data, "message"), "dim");
+                if (data.TryGetProperty("content", out var queuedContent) && queuedContent.ValueKind == JsonValueKind.Array)
+                    UserContent(queuedContent, imagesOnly: true);
+                break;
             case "answer.submitted":
                 Message("You", Text(data, "text"));
                 break;
@@ -239,6 +257,9 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 if (Text(data, "provider").Length > 0) Field("Provider", Text(data, "provider") + " · " + Text(data, "model"));
                 if (data.TryGetProperty("workers", out var workerStates)) Field("Workers", workerStates.GetArrayLength().ToString());
                 Title("Conversation details"); Field("Session", Text(data, "id")); Field("State", Text(data, "state"));
+                Field("Reason", Text(data, "reason"));
+                if (data.TryGetProperty("completionRequirement", out var requirement) && requirement.ValueKind == JsonValueKind.Object)
+                { Field("Completion", Text(requirement, "reason")); Field("Next", Text(requirement, "next")); }
                 if (TryJson(Text(data, "context"), out var context)) Context(context);
                 break;
             case "run.inspection":
@@ -347,6 +368,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             var historyWriter = Text(message, "role") == "assistant" ? new MarkdownWriter(output, color, width, MarkdownEnabled, guideStyle) : null;
             void HistoryText(string value) { if (historyWriter is null) MessageText(value); else historyWriter.Append(value); }
             if (content.ValueKind == JsonValueKind.String) HistoryText(content.GetString() ?? "");
+            else if (content.ValueKind == JsonValueKind.Array && historyWriter is null) UserContent(content);
             else if (content.ValueKind == JsonValueKind.Array)
                 foreach (var block in content.EnumerateArray()) { if (!string.IsNullOrEmpty(Text(block, "text"))) HistoryText(Text(block, "text")); else if (Text(block, "type") == "input_image") HistoryText("[Image " + Text(block, "attachment_id") + "]"); }
             historyWriter?.Finish();
@@ -354,6 +376,22 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         }
         guideStyle = TerminalTheme.Guide(workflow);
         output.WriteLine(); Line("  ── Resumed ──", "dim"); output.WriteLine();
+    }
+    private void UserContent(JsonElement content, bool imagesOnly = false)
+    {
+        var imageNumber = 0;
+        foreach (var part in content.EnumerateArray())
+        {
+            if (Text(part, "type") == "input_image")
+            {
+                var dimensions = Number(part, "width") > 0 && Number(part, "height") > 0
+                    ? $" · {Number(part, "width")}×{Number(part, "height")}" : "";
+                var size = Number(part, "bytes") > 0 ? $" · {Number(part, "bytes") / 1024d:0.#} KiB" : "";
+                MessageText($"[Image {++imageNumber}{dimensions}{size}]", "accent");
+                if (Text(part, "attachment_id").Length > 0) MessageText("  Attachment: " + Text(part, "attachment_id"), "dim");
+            }
+            else if (!imagesOnly && Text(part, "text").Length > 0) MessageText(Text(part, "text"));
+        }
     }
     private void Context(JsonElement data)
     {

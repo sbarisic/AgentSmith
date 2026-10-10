@@ -78,7 +78,7 @@ public static class PauseGuidance
     {
         PauseReason.RequestLimit => "Request budget reached. Inspect /limits or change /limits <requests> <minutes>, then type continue for another bounded batch.",
         PauseReason.TimeLimit => "Time budget reached. Inspect /limits, then type continue for another bounded batch.",
-        PauseReason.NoProgress => "Repeated unchanged tool rounds detected. Inspect the saved work before continuing or abandoning it.",
+        PauseReason.NoProgress => "Progress stalled. Inspect /status for the reason and /agents for worker state. Use /steer to clarify the next step, then type continue explicitly.",
         PauseReason.ContextLimit or PauseReason.CompactionFailed => "Context preparation paused. Inspect /context; use /compact to retry, then type continue. Saved edits remain intact.",
         _ => "Work paused. Inspect /status for the reason, then type continue explicitly to retry."
     } + " Queued follow-ups remain held.";

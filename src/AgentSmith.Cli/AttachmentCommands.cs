@@ -5,6 +5,18 @@ namespace AgentSmith.Cli;
 internal sealed partial class CliApp
 {
     private UserPrompt? nextPrompt;
+    private System.Text.Json.Nodes.JsonObject[] DisplayHistory(Session session)
+    {
+        var attachments = Store.Attachments(session.Id);
+        return session.History.Select((item, index) =>
+        {
+            var display = item.DeepClone().AsObject();
+            display["_workflow"] = session.MessageWorkflows.TryGetValue(index, out var workflow) ? workflow.ToString() : null;
+            if (display["role"]?.ToString() == "user" && display["content"] is System.Text.Json.Nodes.JsonArray)
+                display["content"] = PromptPresentation.Content(display["content"], attachments);
+            return display;
+        }).ToArray();
+    }
     internal ConsoleInput Composer => input;
     internal async Task<string?> ReadResumeDecision(Session session, CancellationToken ct)
     {

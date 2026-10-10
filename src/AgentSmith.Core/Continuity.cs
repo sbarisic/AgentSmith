@@ -2,6 +2,7 @@ namespace AgentSmith.Core;
 
 public sealed class ContextSnapshot
 {
+    public List<CompactionEvidenceSlice> EvidenceSlices { get; set; } = [];
     public string Unit { get; set; } = "characters";
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string? ParentId { get; set; }
@@ -15,6 +16,7 @@ public sealed class ContextSnapshot
     public double DurationMilliseconds { get; set; }
     public List<string> Usage { get; set; } = [];
 }
+public sealed record CompactionEvidenceSlice(string Hash, int Offset, int Length);
 public sealed class CompactionAttempt
 {
     public string? PolicyIdentity { get; set; }

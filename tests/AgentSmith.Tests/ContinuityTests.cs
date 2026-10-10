@@ -93,6 +93,69 @@ public sealed class ContinuityTests
         Assert.Null(s.ActiveContextId); Assert.Equal(original, ContextBuilder.Hash(store.Get(s.Id)!.History));
     }
     [Fact]
+    public async Task OversizedProtocolGroupUsesEvidenceSlicesAndKeepsHistoryAndRecentGroupsIntact()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.History.Add(User("Keep this goal"));
+        s.History.Add(new() { ["type"] = "reasoning", ["encrypted_content"] = "opaque" });
+        s.History.Add(RuntimeTests.Call("big", "file_read", "{}"));
+        s.History.Add(new() { ["type"] = "function_call_output", ["call_id"] = "big", ["output"] = new string('x', 90000) + "FINAL_EVIDENCE" });
+        s.History.Add(RuntimeTests.Call("recent", "file_read", "{}"));
+        s.History.Add(new() { ["type"] = "function_call_output", ["call_id"] = "recent", ["output"] = "recent evidence" });
+        s.History.Add(RuntimeTests.Message("latest response"));
+        var original = ContextBuilder.Hash(s.History);
+        var model = new ScriptedModel(Enumerable.Range(0, 8).Select(_ => new[] { Summary("Preserved goal, evidence, and unfinished work.") }).ToArray());
+        var builder = new ContextBuilder(store, model, new CountingTools());
+        var context = await builder.PrepareAsync(s, new(), _ => { }, default, true);
+        Assert.InRange(model.Requests.Count, 3, 8);
+        Assert.All(model.Requests, r => { Assert.Empty(r.Tools); Assert.True(builder.Size(r.Instructions, r.Input, r.Tools) <= 48000); });
+        Assert.Contains(model.Requests, r => r.Input[0]["content"]!.ToString().Contains("FINAL_EVIDENCE"));
+        var snapshot = ContextBuilder.Active(store.Get(s.Id)!)!;
+        Assert.Equal(4, snapshot.Through); Assert.Equal(2, snapshot.FormatVersion);
+        Assert.Equal(model.Requests.Count, snapshot.EvidenceSlices.Count);
+        Assert.Equal(0, snapshot.EvidenceSlices[0].Offset);
+        for (var i = 1; i < snapshot.EvidenceSlices.Count; i++)
+            Assert.Equal(snapshot.EvidenceSlices[i - 1].Offset + snapshot.EvidenceSlices[i - 1].Length, snapshot.EvidenceSlices[i].Offset);
+        Assert.Single(snapshot.EvidenceSlices.Select(p => p.Hash).Distinct());
+        Assert.Equal(original, ContextBuilder.Hash(store.Get(s.Id)!.History));
+        Assert.Contains(context.Request.Input, i => i["call_id"]?.ToString() == "recent" && i["type"]?.ToString() == "function_call_output");
+    }
+
+    [Fact]
+    public async Task InterruptedEvidenceSliceDoesNotActivatePartialSnapshot()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.History.Add(User("goal")); s.History.Add(RuntimeTests.Message(new string('x', 90000)));
+        for (var i = 0; i < 2; i++) { s.History.Add(User("next " + i)); s.History.Add(RuntimeTests.Message("recent")); }
+        var original = ContextBuilder.Hash(s.History);
+        var model = new ScriptedModel([Summary("First slice")], [new("text", "interrupted")]);
+        await Assert.ThrowsAsync<ContextBudgetException>(() => new ContextBuilder(store, model, new CountingTools()).PrepareAsync(s, new(), _ => { }, default, true));
+        Assert.Null(store.Get(s.Id)!.ActiveContextId); Assert.Equal(original, ContextBuilder.Hash(s.History)); Assert.Equal(2, model.Requests.Count);
+    }
+
+    [Fact]
+    public async Task EvidenceSlicesShrinkWhenProviderCountExceedsEstimate()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.Connection.Capabilities.ContextTokens = 200000;
+        s.History.Add(User("goal")); s.History.Add(RuntimeTests.Message(new string('x', 80000)));
+        for (var i = 0; i < 2; i++) { s.History.Add(User("next " + i)); s.History.Add(RuntimeTests.Message("recent")); }
+        var model = new ExactCountingModel();
+        await new ContextBuilder(store, model, new CountingTools()).PrepareAsync(s, new(), _ => { }, default, true);
+        Assert.NotNull(s.ActiveContextId); Assert.InRange(model.Requests.Count, 3, 8);
+        Assert.All(model.Requests, r => Assert.True(ExactCountingModel.Count(r) <= 32000));
+    }
+
+    private sealed class ExactCountingModel : IModelClient
+    {
+        public List<ModelRequest> Requests { get; } = [];
+        public static int Count(ModelRequest r) => r.Instructions.Length + r.Input.Sum(i => i.ToJsonString().Length);
+        public Task<TokenMeasurement?> CountTokensAsync(ModelRequest r, CancellationToken ct) => Task.FromResult<TokenMeasurement?>(new(Count(r), "test count", true));
+        public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest r, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        { ct.ThrowIfCancellationRequested(); Requests.Add(r); await Task.Yield(); yield return Summary("Observed evidence; unfinished task."); }
+    }
+
+    [Fact]
     public void ProtocolGroupsPreserveReasoningAllCallsAndAllResults()
     {
         JsonObject Item(string type, string? id = null) => new() { ["type"] = type, ["call_id"] = id };

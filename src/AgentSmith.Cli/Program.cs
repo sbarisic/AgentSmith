@@ -25,6 +25,7 @@ public static partial class Program
         var outputBudget = new Option<int>("--max-output-tokens") { Recursive = true, DefaultValueFactory = _ => 0, Description = "Output reserve; default ChatGPT 16384, local 8192." };
         root.Options.Add(provider); root.Options.Add(endpoint); root.Options.Add(outputBudget);
         WorkerCommands(root, dataOption, jsonOption, noColor, provider, endpoint, outputBudget);
+        ModelCommands(root, dataOption, jsonOption, noColor, provider, endpoint, outputBudget);
         var auth = new Command("auth", "Manage ChatGPT account registrations."); root.Subcommands.Add(auth);
         var login = new Command("login", "Continue with ChatGPT in the system browser.");
         var loginAccount = new Option<string?>("--account") { Description = "Reauthorize an existing account ID; omitted registers another account." };
@@ -85,15 +86,16 @@ public static partial class Program
             command.Options.Add(workflow);
             var plan = new Option<bool>("--plan") { Description = "Investigate and prepare a plan; implementation requires an explicit review decision." };
             var workspace = new Option<string?>("--workspace") { Description = "Project directory; defaults to the current directory." };
-            var model = new Option<string>("--model") { Description = "Explicit model ID from smith models.", Required = true };
+            var model = new Option<string?>("--model") { Description = "Model ID; omitted uses the saved chat default or latest parent session." };
             var prompt = new Option<string?>("--prompt") { Required = name == "run", Description = "User request." };
             command.Options.Add(workspace); command.Options.Add(model); command.Options.Add(prompt); command.Options.Add(mode); command.Options.Add(plan); root.Subcommands.Add(command);
             command.SetAction(async (p, ct) => await Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), async app =>
             {
                 var path = WorkspaceTools.ValidateRoot(p.GetValue(workspace) ?? Environment.CurrentDirectory);
-                var selected = p.GetValue(model)!;
+                var selection = app.ResolveChatModel(p.GetValue(model), p.GetResult(provider) is { Implicit: false } ? p.GetValue(provider) : null, p.GetValue(endpoint), p.GetValue(outputBudget));
+                var selected = selection.Model;
                 var session = new Session { Workspace = path, Model = selected, Mode = p.GetValue(mode), Workflow = CliApp.ParseWorkflow(p.GetValue(workflow), p.GetValue(plan)),
-                    Connection = new() { Provider = p.GetValue(provider), Endpoint = ResolveEndpoint(p.GetValue(provider), p.GetValue(endpoint)), MaxOutputTokens = p.GetValue(outputBudget) } };
+                    AccountId = selection.AccountId, Connection = selection.Connection() };
                 session.EnabledWorkers = app.ResolveWorkers(p.GetValue(workerNames));
                 session.WorkerPolicy = new() { MaxConcurrent = p.GetValue(maxWorkers), MaxLocalConcurrent = p.GetValue(maxLocalWorkers) }; session.WorkerPolicy.Validate();
                 session.Execution = new() { MaxRequests = p.GetValue(maxSteps), MaxMinutes = p.GetValue(maxMinutes) }; session.Execution.Validate();
@@ -107,6 +109,7 @@ public static partial class Program
                 app.Store.Save(session, new("conversation.created", session.Id, null, new { workspace = path, model = selected }));
                 app.SetConversation(session);
                 foreach (var image in p.GetValue(images) ?? []) app.AttachFile(session, image);
+                if (name == "chat") app.Store.SaveChatDefault(ChatModelSelection.From(session));
                 app.Write("conversation", app.Header(session));
                 return await app.Chat(session, p.GetValue(prompt), name == "chat", ct);
             }));
@@ -362,7 +365,13 @@ internal sealed partial class CliApp : IDisposable
             { QueueMessage(session, prompt!, nextPrompt); nextPrompt = null; prompt = null; continue; }
             if (!claimed && Unfinished(session))
             { if (nextPrompt is not null) input.RestorePrompt(nextPrompt); nextPrompt = null; Write("error", new { message = "Resume or explicitly abandon unfinished work before a new prompt. Use /recover." }); prompt = null; continue; }
-            if (!continuing) Write("user.submitted", new { workflow = session.Workflow.ToString(), text = claimed ? session.History.Last(i => i["role"]?.ToString() == "user")["content"]?.ToString() : prompt });
+            if (!continuing)
+            {
+                var submittedContent = claimed ? session.History.Last(i => i["role"]?.ToString() == "user")["content"]
+                    : nextPrompt?.HistoryItem()["content"] ?? System.Text.Json.Nodes.JsonValue.Create(prompt);
+                Write("user.submitted", new { workflow = session.Workflow.ToString(), text = prompt,
+                    content = PromptPresentation.Content(submittedContent, Store.Attachments(session.Id)) });
+            }
             var run = await Run(session, prompt, null, ct); prompt = null;
             if (run.State == RunState.AwaitingUser)
             {
@@ -385,7 +394,7 @@ internal sealed partial class CliApp : IDisposable
         var name = parts[0].ToLowerInvariant();
         var args = parts.Length == 2 ? parts[1].Trim() : "";
         void Error(string message, FailureDetail? failure = null) => Write("error", new { message = failure?.Sanitized().Reason ?? message, failure = failure?.Sanitized() });
-        try { if (await WorkflowCommand(name, args, session) || await ContinuityCommand(name, args, session)) return CommandAction.Handled; }
+        try { if (await ModelCommand(name, args, session) || await WorkflowCommand(name, args, session) || await ContinuityCommand(name, args, session)) return CommandAction.Handled; }
         catch (UserFacingException ex) { Error(ex.Message, ex.Detail); return CommandAction.Handled; }
         if (name is not ("/work" or "/help" or "/usage" or "/status" or "/context" or "/paste" or "/exit" or "/markdown" or "/tools" or "/mode" or "/changes" or "/undo" or "/processes" or "/stop" or "/recover" or "/plan" or "/tasks" or "/artifacts" or "/artifact"))
         { Error($"Unknown command: {TerminalRenderer.Safe(parts[0])[..Math.Min(80, TerminalRenderer.Safe(parts[0]).Length)]}. Type /help for available commands. Use /paste for literal slash-prefixed text."); return CommandAction.Handled; }
@@ -458,7 +467,7 @@ internal sealed partial class CliApp : IDisposable
             case "/status":
             case "/context":
                 var currentContext = activeRun is null ? new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.Build(session).Manifest : session.Runs.LastOrDefault()?.ContextManifest;
-                Write("status", new { pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending"), session.Id, session.Execution, session.Delegation, session.WorkerPolicy, remainingMinutes = Math.Max(0, session.Execution.MaxMinutes - (session.Runs.LastOrDefault() is { } currentRun ? (currentRun.State == RunState.Running && currentRun.BatchStartedAt is { } batchStart ? (DateTimeOffset.UtcNow - batchStart).TotalMinutes : currentRun.BatchExecutionMilliseconds / 60000) : 0)), remainingRequests = Math.Max(0, session.Execution.MaxRequests - (session.Runs.LastOrDefault()?.BatchRequests ?? 0)), provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), report = WorkflowPolicy.Active(session), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), context = currentContext, snapshot = ContextBuilder.Active(session) }); break;
+                Write("status", new { pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending"), session.Id, session.Execution, session.Delegation, session.WorkerPolicy, remainingMinutes = Math.Max(0, session.Execution.MaxMinutes - (session.Runs.LastOrDefault() is { } currentRun ? (currentRun.State == RunState.Running && currentRun.BatchStartedAt is { } batchStart ? (DateTimeOffset.UtcNow - batchStart).TotalMinutes : currentRun.BatchExecutionMilliseconds / 60000) : 0)), remainingRequests = Math.Max(0, session.Execution.MaxRequests - (session.Runs.LastOrDefault()?.BatchRequests ?? 0)), provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), report = WorkflowPolicy.Active(session), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), reason = session.Runs.LastOrDefault()?.Reason, completionRequirement = session.Runs.LastOrDefault()?.CompletionRequirement, context = currentContext, snapshot = ContextBuilder.Active(session) }); break;
             case "/markdown":
                 if (args.Length == 0) Write("display", new { message = $"Markdown display is {(terminal.MarkdownEnabled ? "on" : "off")}. Use /markdown on or /markdown off." });
                 else if (args.Equals("on", StringComparison.OrdinalIgnoreCase) || args.Equals("off", StringComparison.OrdinalIgnoreCase))

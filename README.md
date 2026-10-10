@@ -4,27 +4,62 @@ AgentSmith is a Windows-first C# coding assistant with a terminal interface, Cha
 
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
 
-Recent source-only changes are identified below and have not yet been compiled or exercised. Earlier verification records describe the revisions tested at that time, not a guarantee for the current source snapshot.
+## Model selection and chat defaults
 
-Steering/worker display follow-up (source-only): worker activity uses `› Spawn Agent #n`, `› Wait for Agent #n`, and `› Message Agent #n`. Saved steering shows its recipient, sender (You or Parent agent), and a quoted, redacted preview. Subsequent delivery notices reference the same message without repeating its body in compact mode. `/steering` lists previews up to 1,000 characters and full message IDs for removal; verbose activity also shows the expanded bounded preview. These presentation changes do not alter delivery or execution and have not been compiled or published.
+```text
+/models                  List models for this conversation's provider/account
+/model                   Show the current model and saved new-chat default
+/model <id>              Select the next prompt's model and save it as the default
+smith model <id>         Save a default outside a conversation
+smith model              Show the saved default
+smith chat               Start a new chat using that default
+```
 
-## Actionable errors — source update pending build
+Change models between runs; unfinished work, pending decisions and workers must settle first. Existing conversations keep their provider and account. Use `smith model <id> --provider local --endpoint http://127.0.0.1:8080/v1` to configure a local default for new conversations. Worker profiles and permission/workflow settings are unchanged. Model IDs are validated against the selected provider before saving; smaller models must have enough context for the configured budget.
+
+Defaults are scoped to `--data-dir` and include provider, endpoint, account reference and output budget, never credentials. A successfully configured `smith chat --model <id>` also saves its selection; explicit CLI options override defaults. Without a saved default, new chats use the most recent parent session's selection. A fresh installation with no prior model prompts you to configure one. `smith resume` keeps that session's saved model. `smith run` can use defaults but does not replace them. Usage remains attributed to each model across switches.
+
+Delivered locally on 2026-10-10 with **452 passing Release tests** and a refreshed self-contained Windows x64 build. Published checks with an isolated mock catalog confirmed default persistence, `smith chat` without a model argument, `/models`, and a `/model` change across new chats. No live provider inference was performed.
+
+## Repetition and oversized context recovery
+
+Submitted prompts and queue acknowledgements display image attachment labels with dimensions and size when available. Replay uses the same labels. The live transcript previously displayed only prompt text even though image parts were passed to the runner. These labels are attachment metadata, not graphical previews or confirmation that inference succeeded. This change is included in the 452-test local delivery above; physical clipboard/terminal acceptance was not repeated.
+
+Smith now automatically collects settled worker results when the parent attempts to finish, including failed, blocked and cancelled workers. It saves report and checkpoint references, then gives the parent another request to inspect that evidence. Collection does not turn failed work into success or bypass recovery. For the reported collection loop, use `smith resume` and explicitly `continue`; no manual collection or compaction is needed for this blocker.
+
+The automatic-collection follow-up passed **438 Release tests** and was published to the local Windows x64 folder. Published smoke checks passed. Coverage includes a parent that never calls `agent_result`, failed saves and restart between the saved parent receipt and worker collection marker. Live ChatGPT/Bonsai acceptance of this change remains unverified.
+
+If completion is blocked by uncollected worker results or an unfinished Document/Review report, Smith now shows the specific requirement and required tool action. The same feedback is included in the next model request and retained across pauses. Failed and cancelled workers still require result collection; they do not need to be relaunched. `/status` shows the pause reason and completion requirement. This does not bypass report, permission or recovery checks.
+
+The completion-feedback follow-up passed **434 Release tests** and was published to the local Windows x64 folder. Published smoke checks passed; live provider compliance remains unverified.
+
+Generated answers now stop with a visible progress pause when substantial phrases repeat excessively. Unfinished response tool calls never run. Smith also pauses after three tool-free attempts to finish while required work remains unsettled. Completed responses flush Markdown separately, preventing adjacent answers from joining into one paragraph.
+
+Compaction summarizes oversized historical groups through bounded, provenance-linked evidence slices. The original history and complete tool-call/result groups stay intact. A snapshot becomes active only after all slices succeed and the protected current context fits. The eight-request limit still applies; cancellation or a failed slice leaves the previous context intact.
+
+For a session already paused with the old oversized-group error: reopen with `smith resume`, run `/compact`, and type `continue` after compaction succeeds. Saved edits are not rolled back. A repetition pause instead calls for inspecting `/status` and `/agents`, optionally giving `/steer <direction>`, and explicitly continuing.
+
+Delivered locally on 2026-10-10 with **430 passing Release tests** and a refreshed self-contained Windows x64 build, including the activity and error-display changes below. Published help and isolated JSON status checks passed. Live provider reproduction and physical terminal visual acceptance were not repeated. Full delivery evidence is recorded in CLI_IMPLEMENTATION_PLAN.md. Earlier verification records describe the revisions tested at that time.
+
+Steering/worker display: worker activity uses `› Spawn Agent #n`, `› Wait for Agent #n`, and `› Message Agent #n`. Saved steering shows its recipient, sender (You or Parent agent), and a quoted, redacted preview. Subsequent delivery notices reference the same message without repeating its body in compact mode. `/steering` lists previews up to 1,000 characters and full message IDs for removal; verbose activity also shows the expanded bounded preview. These presentation changes do not alter delivery or execution.
+
+## Actionable errors
 
 New tool failures identify the action and target, then show **Reason**, **Effect**, and **Next**, with a stable error code and `/details <call-id>` link. Missing paths, stale hashes, patch conflicts, reserved files, unknown workers, and inactive workers have distinct explanations. Worker assignment errors show the attempted path and assigned exact files: naming a folder does not authorize its descendants.
 
 Worker failures report the observed request/context/time limit where recorded, retained file-operation count, and completion-report availability. `/agent #number` displays these details; `/changes` exposes recorded edits. A failed worker can leave useful edits behind. Uncertain effects retain recovery requirements, and older events do not invent missing causes or edit counts. SQLite storage errors have a distinct category and do not promise that the latest state was saved.
 
-This is source-only: regression tests have been added but not run. No compilation, publish, live data changes, or interruption of the running agent is included.
+These paths have automated regression coverage. No live session data was changed for validation.
 
-## Compact activity and fetched-content display — source updates pending build
+## Compact activity and fetched-content display
 
-Web-read excerpts and HTTP response bodies now use nested square content blocks with white text on a subtle dark background. Web blocks identify the source, preserve code indentation, and keep wrapped lines and omission notices inside the block. Retained-artifact links remain below it. Plain output keeps the same guides without color. This display change has not been compiled or published while the user's agent is running.
+Web-read excerpts and HTTP response bodies now use nested square content blocks with white text on a subtle dark background. Web blocks identify the source, preserve code indentation, and keep wrapped lines and omission notices inside the block. Retained-artifact links remain below it. Plain output keeps the same guides without color.
 
-Compact activity uses one worker-start block with a bounded task description and a vertical assignment list. Worker waits/results identify conversation-local aliases, wait limits use minutes, and completed workers expose their recorded reason and report/transcript commands. Short status badges carry background colors while surrounding text stays white. Routine reads, listings and searches combine their result and call duration on one line; `/display verbose` retains separate call timings. The busy composer identifies the current activity and distinguishes total run time from worker/process duration. The worker-report renderer now handles artifact ID references directly instead of emitting empty rows. These source changes have only received static review; compilation, tests and publishing are deferred until the running agent exits.
+Compact activity uses one worker-start block with a bounded task description and a vertical assignment list. Worker waits/results identify conversation-local aliases, wait limits use minutes, and completed workers expose their recorded reason and report/transcript commands. Short status badges carry background colors while surrounding text stays white. Routine reads, listings and searches combine their result and call duration on one line; `/display verbose` retains separate call timings. The busy composer identifies the current activity and distinguishes total run time from worker/process duration. The worker-report renderer now handles artifact ID references directly instead of emitting empty rows.
 
 The next readability pass follows three steps: clean and frame process streams, shorten plan/map summaries, then expose direct retained-log navigation. Source implementation strips terminal control sequences across stdout/stderr chunks, groups output in bounded content blocks, and factors repeated directories out of path-only listings. Raw logs remain unchanged. Process completion and exit code stay outside the preview budget. Plan updates show completed/total counts and abbreviated changed steps; `/tasks` preserves full descriptions and verification criteria. Map notices distinguish depth/scan budgets, excluded entries, scan issues and preview omissions.
 
-While idle, open a specific process log with `/artifact process:#15`, search it with `/artifact process:#15 search error`, or page it with `/artifact process:#15 read <cursor>`. Process aliases use the saved conversation's numbering and survive restart. Ordinary artifact IDs remain supported; the next-page command uses the returned character cursor. No new artifact numbering or schema migration is needed. Regression coverage for fragmented control sequences, path-only shortening and log access is included in source but has not been run; this pass is not compiled or published yet.
+While idle, open a specific process log with `/artifact process:#15`, search it with `/artifact process:#15 search error`, or page it with `/artifact process:#15 read <cursor>`. Process aliases use the saved conversation's numbering and survive restart. Ordinary artifact IDs remain supported; the next-page command uses the returned character cursor. No new artifact numbering or schema migration is needed. Regression coverage includes fragmented control sequences, path-only shortening and log access.
 
 ## Live steering and worker messages
 
