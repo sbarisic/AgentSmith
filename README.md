@@ -4,6 +4,60 @@ AgentSmith is a Windows-first C# coding assistant with a terminal interface, Cha
 
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
 
+## Interactive composer
+
+Type `/` for local command and finite-argument suggestions. Up/Down selects suggestions and Tab/Enter completes without executing; press Enter again to submit. Outside the menu, Up/Down recalls accepted prompts from this conversation and restores your unsent draft. Ctrl+Backspace deletes a word without splitting pasted blocks or joined Unicode characters. See [composer keyboard controls](COMPOSER_KEYS.md) for limits, literal paste behavior and terminal caveats.
+
+## Listening to audio files
+
+Ask Smith to listen to a workspace file, for example: `Listen to assets/explosion.wav and describe the sound and any audible distortion.` The parent and enabled workers can use `audio_listen(path, question, startSeconds, durationSeconds)` in any workflow with Inspect permission. The main chat model stays unchanged; a separate audio model returns text evidence, shown in a content block and saved for `/artifact <id>`.
+
+Set `OPENAI_API_KEY` in the shell environment before starting Smith. Audio uses `https://api.openai.com/v1/chat/completions`, with separate API billing; ChatGPT sign-in does not configure it. Keep the key out of chat, source files and command history. The default audio model is `gpt-audio-1.5`; `SMITH_AUDIO_MODEL` can select another audio-input Chat Completions model available to your API account. Missing credentials produce a configuration error without sending audio.
+
+Supported inputs are workspace-relative PCM WAV and MP3 files. WAV accepts mono/stereo integer PCM at 8–192 kHz with 8/16/24/32-bit samples; selected audio is normalized to 16-bit PCM. `startSeconds` and `durationSeconds` are whole seconds; duration zero selects up to 120 seconds. MP3 requires both values zero and is sent whole, with duration reported as unavailable. Convert other formats or MP3 excerpts to PCM WAV first. Source files are limited to 25 MiB, submitted clips to 10 MiB, and requests to 120 seconds. Workspace exclusions and link/traversal checks apply. The tool does not play sound through speakers or fetch URLs.
+
+Results include source/clip hashes, selected range, model, API usage and limitations. Audio and its analysis are untrusted evidence; descriptions can be wrong and do not prove audio quality. Saved receipts reuse successful results after restart. Failed requests are not automatically retried; a cancelled request may already have incurred API usage. Raw audio and credentials are not stored in conversation artifacts. [OpenAI audio input documentation](https://developers.openai.com/api/docs/guides/audio-chat-completions).
+
+## Worker execution budgets
+
+Pending source update: the busy status bar includes active worker numbers, for example `agents 2 [#8, #9]`. It refreshes once per second from saved worker state. Prepared/waiting and cancelling workers remain listed until settled; completed/failed workers drop out. More than eight worker numbers are summarized with `+N`; `/agents` shows the full list. This status-bar change awaits a rebuild.
+
+Delegation guidance: prefer workers when at least two agents can make useful progress concurrently—multiple workers, or a worker alongside identified independent parent work. The parent handles single sequential tasks itself when it would otherwise only wait for one worker, even when delegation is explicitly requested. Requests do not override permissions, manual-delegation opt-in, enabled profiles, concurrency limits, file reservations or process barriers. Splitting dependent work or filling worker slots is not a goal.
+
+The composer context indicator `ctx last ~32k/128k tok (25%)` shows the last prepared input versus its working budget, not cumulative usage or the model's full capacity. `~` marks estimates; unknown-capacity sessions use `chars` instead of tokens. Narrow terminals show a compact percentage. New tool output and unsent draft text are not included until context is prepared again; `/context` provides details.
+
+The worker wait cap is **six minutes (360,000 ms)**. `agent_wait` still returns early on selected-worker completion, steering or cancellation. Process waits remain capped at 60 seconds.
+
+New workers default to **100 model requests / 30 minutes**, bounded by the parent's remaining deadline. Use `/worker-budget` to inspect the setting and `/worker-budget 200 45` while idle to change it for future workers in that conversation. New chats accept `--worker-max-requests 200 --worker-max-minutes 45`. This persists across resume, includes compaction requests, and is separate from `/worker-limits` concurrency. Existing workers keep their spawn-time budget; stopped workers are not automatically restarted. These changes are included in the local 2026-10-11 build.
+
+## Markdown tables
+
+Formatted responses display Markdown tables with square borders, aligned columns and wrapped cell contents. Narrow terminals use labeled rows when columns would be too cramped. Inline emphasis remains styled and ordinary text stays white. `/markdown off` keeps the original table markup.
+
+Routine tool summaries and C# symbol listings use light gray; tool headings use cyan. Git changes, plan progress and diagnostic headings use status colors while keeping their text labels. Normal answers stay white; `--no-color` retains plain text. These changes were published locally on 2026-10-11 after 37 renderer tests passed. Start a new Smith process to use them.
+
+## C# navigation and diagnostics
+
+Smith can find C# declarations with `csharp_symbols` in any workflow, including Inspect and workers. This parses source without evaluating projects. Results include signatures, locations, hashes, scan coverage and omission reasons. Syntax searches do not resolve overloads or establish complete references.
+
+An Execute parent in Work or Document can use `csharp_load` with a workspace `.csproj`, `.sln` or `.slnx`. Configuration defaults to Debug; multi-target projects require a framework. Loading starts an owned helper process. Smith waits for that process and checks `csharp_status`, then uses `csharp_query` for definitions, references, callers or implementations. MSBuild evaluation runs project code as your Windows account and may write generated files. It is not a sandbox. Loading does not request restore, workload downloads or a normal build; missing dependencies produce partial or unavailable coverage.
+
+Queries use an immutable Roslyn workspace without analyzers or source generators. Linked-file project variants are labeled; metadata-only definitions identify an assembly rather than inventing a source path. Only workspace source is included. Generated source files already produced by design-time loading inside the workspace may be included; files outside the workspace are excluded. Workers can query snapshots explicitly shared through `agent_spawn.navigationSnapshotIds`, but cannot load or refresh projects.
+
+Source/configuration/reference changes invalidate snapshots. Settle editing workers before refreshing. Each root conversation allows two loaded snapshots; active worker grants prevent replacement. Snapshots last for the current CLI lifetime only. Resume preserves provenance and retained query artifacts, but never evaluates projects automatically. Queries return at most 50 results and 8 KiB per page; use the returned cursor or artifact to inspect more evidence.
+
+Build/test summaries now prioritize compiler errors and failed tests. Repeated compiler diagnostics are grouped while retaining project/framework associations. Passing test names remain available in report details:
+
+```text
+/diagnostics <report-id>
+/diagnostics <report-id> errors
+/diagnostics <report-id> failed 2
+```
+
+The model's `diagnostics_read` tool also supports path/text filters and cursor paging, including explicitly shared worker reports. Existing saved reports are normalized when read; raw artifacts are preserved. Report completeness, process exit status and verification success are separate. Missing locations or target metadata remain unavailable rather than inferred. Use current build/test evidence to verify current code.
+
+Automated and local acceptance outcomes, including unavailable live-provider checks, are recorded in [CLI_IMPLEMENTATION_PLAN.md](CLI_IMPLEMENTATION_PLAN.md).
+
 ## Model selection and chat defaults
 
 ```text
@@ -52,6 +106,8 @@ Worker failures report the observed request/context/time limit where recorded, r
 These paths have automated regression coverage. No live session data was changed for validation.
 
 ## Compact activity and fetched-content display
+
+The interactive composer shows the selected parent model, reasoning setting and current workflow/permission mode above its status and input rows, for example `gpt-6.1-sol · reasoning: default · Work / Execute`. Smith currently sends no reasoning-effort override, so `default` means the provider's setting; it is not a measured low/medium/high usage tier. The row refreshes for model/workflow changes and resume. Long local model paths show their filename; narrow terminals shorten the model label before the mode. This is included in the local build; physical terminal verification remains pending.
 
 Web-read excerpts and HTTP response bodies now use nested square content blocks with white text on a subtle dark background. Web blocks identify the source, preserve code indentation, and keep wrapped lines and omission notices inside the block. Retained-artifact links remain below it. Plain output keeps the same guides without color.
 
@@ -118,14 +174,26 @@ Shared long-term memory is enabled by default. The parent agent can save useful 
 
 ## Public web research
 
-The model can call `web_search(query)` and `web_read(url)` through the same registry with either ChatGPT or local models. Parent agents and workers can use them in Work, Plan, Document, and Review, including Inspect permission. Ask normally: "Search the official .NET documentation for this API, open the relevant page, and cite the source." `/tools` lists availability. No new slash command or search API key is required.
+ChatGPT sessions default to native hosted `web_search` through the existing ChatGPT sign-in connection. No separate OpenAI API key is needed; availability depends on the model and account policy. Parent agents and workers can search in Work, Plan, Document, and Review, including Inspect permission. Ask normally: "Search the official .NET documentation for this API, open the relevant page, and cite the source." Smith shows search progress and converts provider citations into readable source links. Original search records and citation annotations remain in saved history. Native-mode text is displayed when each message completes so its citations can be included.
+
+Use `/web-search` to inspect the setting, or select one of these while idle:
+
+```text
+/web-search native   # ChatGPT hosted search; local models use basic search
+/web-search basic    # DuckDuckGo search through Smith
+/web-search off      # Disable search; web_read and HTTP tools stay available
+```
+
+The selection persists per conversation and new workers inherit it. `/status` shows the effective setting. Compaction does not enable search. Smith does not silently switch providers when native search fails; select `basic` or `off` explicitly if the account/model cannot use it. Hosted queries execute at the provider during inference, so Smith's local URL/query checks do not intercept them. Instructions prohibit sending private content in queries; this is not a local privacy filter.
+
+The following limits apply to **basic search and Smith's `web_read`**, independently of native search:
 
 - Search uses [DuckDuckGo's non-JavaScript HTML search](https://duckduckgo.com/duckduckgo-help-pages/features/non-javascript), returning up to five titles, source URLs, and bounded snippets. Queries are sent to DuckDuckGo; prompts instruct the model to use public terms rather than private project/memory content. Recognized credential patterns are rejected before sending, without claiming perfect secret detection.
 - Page reads accept public HTTP/HTTPS HTML and text on default ports. A separate client sends no ChatGPT tokens, browser cookies, or user authentication. Scripts and subresources do not run. Private/reserved addresses, credential-bearing URLs, and private redirect destinations are rejected; DNS addresses are checked and the connection uses the validated address.
 - Reads are bounded to 30 seconds, five redirects, and 2 MiB decompressed input. Up to 100,000 extracted characters are retained as a conversation artifact; the model initially receives up to 6,000 characters and five links. Artifacts retain the source URL, retrieval time, truncation state, and up to thirty links. Use `/artifacts` and `/artifact <id>` to inspect them; the model can page/search them with artifact tools. Source text is historical evidence, never authorization.
 - The lightweight reader extracts the main/article text where available and removes scripts, forms, navigation, and hidden markup. It is not a full browser or a guarantee of complete page coverage. PDF, images, OCR, authenticated pages, JavaScript rendering, and browser automation remain unsupported. CAPTCHA, unsupported responses, timeouts, and unrecognized search layouts return explicit errors. There is no hidden provider fallback.
 
-Verification so far: a separate PowerShell HTTP probe returned ten DuckDuckGo HTML result links with HTTP 200 and no challenge on 2026-10-10. This verifies endpoint availability only. The C# code and regression cases now compile and passed the baseline suite after upgrading AngleSharp to 1.5.0. Live parent/worker public-web research acceptance remains pending.
+Previous basic-search verification: a separate PowerShell HTTP probe returned ten DuckDuckGo HTML result links with HTTP 200 and no challenge on 2026-10-10. The earlier C# implementation passed its baseline suite after upgrading AngleSharp to 1.5.0. Native search is a source-only update: request, stream, citation, persistence and policy regression cases were added but have not been compiled or run while the user's agent is active. Live native-search and worker acceptance remain unverified. The current running build is unchanged. See [OpenAI's sign-in limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) and [web-search contract](https://developers.openai.com/api/docs/guides/tools-web-search).
 
 ## Clipboard, context, and larger tasks
 
@@ -148,7 +216,7 @@ The local adapter counts the chat template and tools with `/apply-template` and 
 
 `/limits` shows the batch policy; `/limits 200 90` sets 200 requests and 90 minutes while idle. Defaults are **150 model requests and 60 minutes** per explicitly started/continued batch, including compaction requests. Request/time pauses direct you to `/limits`; context pauses direct you to `/context` and `/compact`. Three identical non-waiting tool rounds pause for lack of progress. Questions, reviews, cancellation, recovery and queue holds still require explicit action.
 
-Enabled-worker conversations default to `/delegation proactive`; use `--delegation manual` or `/delegation manual` to delegate only when requested. Suitable tasks include investigation, report diagnosis, focused edits, test writing, patch review, documentation and shared screenshot analysis. Parents retain integration, test execution, and compaction. Workers cannot execute processes or approve decisions. Up to two workers are admitted, with 16 launches per parent run and 20 requests/10 minutes per worker, within the parent deadline. A one-slot endpoint serializes inference and displays waiting status. `agent_wait` supports up to three minutes (180,000 ms), returning early when a selected worker finishes or the run is cancelled. `process_wait` remains capped at 60 seconds. Waiting itself makes no extra model calls. `/usage` distinguishes purpose, outcome, waiting, reported cached input and compaction overhead; local tokens are not exact cloud savings.
+Enabled-worker conversations default to `/delegation proactive`; use `--delegation manual` or `/delegation manual` to delegate only when requested. Suitable tasks include investigation, report diagnosis, focused edits, test writing, patch review, documentation and shared screenshot analysis. Parents retain integration, test execution, and compaction. Workers cannot execute processes or approve decisions. Worker admission follows the saved concurrency limits (new chats default to six total and one local), with 16 launches per parent run and a default 100 requests/30 minutes per worker, within the parent deadline. A one-slot endpoint serializes inference and displays waiting status. `agent_wait` supports up to six minutes (360,000 ms), returning early when a selected worker finishes or the run is cancelled. `process_wait` remains capped at 60 seconds. Waiting itself makes no extra model calls. `/usage` distinguishes purpose, outcome, waiting, reported cached input and compaction overhead; local tokens are not exact cloud savings.
 
 Schema v7 creates a consistent v6 backup and persists attachment records plus policy/capability/grant metadata. Migration preserves saved decisions and held queues. No local server reconfiguration, automatic model loading, background inference, commit or public release is part of this milestone.
 
@@ -239,7 +307,7 @@ smith workers add gpt-review --provider chatgpt --model gpt-6.1-sol --mode inspe
 smith chat --model gpt-6-luna --workers bonsai-edit,bonsai-review,gpt-edit,gpt-review --max-workers 6 --max-local-workers 1
 ```
 
-Use a model listed by `smith models`. Multiple tasks can use the same profile concurrently; profile names describe capabilities, not dedicated slots. The parent prefers enabled local profiles for routine work and enabled GPT profiles for difficult analysis, implementation, or review. It starts independent tasks before waiting and remains responsible for integration and verification. Proactive delegation does not spawn unnecessary tasks just to fill capacity.
+Use a model listed by `smith models`. Multiple tasks can use the same profile concurrently; profile names describe capabilities, not dedicated slots. The parent prefers enabled local profiles for routine work and enabled GPT profiles for difficult analysis, implementation, or review. The guidance above makes useful parallel work the first criterion, before choosing a profile. It starts independent tasks before waiting and remains responsible for integration and verification. Proactive delegation does not spawn unnecessary tasks just to fill capacity.
 
 New chats default to six active workers total, with at most one local worker inside that total. Both settings accept 1..16; the parent is excluded. The total limit applies to all providers combined, so six GPT workers may run when no local workers occupy slots. `/worker-limits` shows limits; `/worker-limits 8 1` changes them while idle. `/status` also shows the saved policy. Sessions without a saved worker policy default to two total/one local. Explicitly saved limits are preserved; use `/worker-limits <total> 1` while idle to lower an existing local limit. Sixteen launches per run and existing worker deadlines still apply. Endpoint capacity continues to govern local inference; raising worker limits does not increase local server slots.
 
@@ -328,7 +396,7 @@ Message blocks have a vertical guide. Section guides use workflow colors: Work i
 
 Use `/mode` to see both the workflow and permission level. `/mode work|plan|document|review` selects a workflow without starting inference; type your task afterward. `/mode planning` and `/mode documentation` are aliases. `/mode inspect|edit|execute` changes permissions without bypassing workflow restrictions or plan approval. `/work` returns to Work, subject to the same unfinished-work checks as leaving a workflow.
 
-To start immediately, use `/plan Make a plan to implement player movement`, `/document Update the installation instructions`, or `/review`. `/plan new <task>` remains supported; `/plan` alone shows the saved plan. Reserved plan commands are `new`, `show`, `revise`, `implement`, and `leave`; use `/plan new <task>` if your task begins with one of those words. `/mode plan <task>` and `/mode document <task>` also start tasks immediately; `/mode review --path <path>` starts a scoped review. Existing `/workflow`, `/plan leave`, and permission commands remain available.
+To start immediately, use `/plan Make a plan to implement player movement`, `/document Update the installation instructions`, or `/review`. `/plan new <task>` remains supported; `/plan` alone shows the saved plan. Reserved plan commands are `new`, `show`, `read`, `revise`, `implement`, and `leave`; use `/plan new <task>` if your task begins with one of those words. `/mode plan <task>` and `/mode document <task>` also start tasks immediately; `/mode review --path <path>` starts a scoped review. Existing `/workflow`, `/plan leave`, and permission commands remain available.
 
 - Conversation and display: `/status`, `/usage`, `/context`, `/compact`, `/paste`, `/markdown`, `/display compact|verbose`, `/details <call-id|process-alias>`, and `/exit`.
 - Tools and recovery: `/tools`, `/mode`, `/changes`, `/undo <checkpoint-id>`, `/processes`, `/stop <process-id|#number>`, and `/recover [abandon]`.
@@ -344,6 +412,8 @@ Workflow and permissions are separate. **Work** is the default workflow; new con
 ```text
 /plan new <task>            Investigate a new task in Plan workflow
 /plan show                  Display the current saved plan
+/plans [page]               Find plans saved for this workspace across conversations
+/plan read <id>             Read another saved plan without activating it
 /plan revise <instruction>  Revise the active plan
 /plan implement             Open the implementation review picker
 /plan leave                 Return to Work without approving a draft
@@ -351,6 +421,10 @@ Workflow and permissions are separate. **Work** is the default workflow; new con
 ```
 
 Plans are saved in AgentSmith's SQLite state, not automatically written into the workspace. They retain revisions, stable step IDs, verification criteria, notes, references, and approval history. At most one step is In progress. Finishing a response does not automatically complete its tasks.
+
+Directory lookup: new plans record the normalized workspace directory where they were created and their creation time. `/plans` lists ten plans per page from the same exact directory and Smith data directory; `/plan read <id>` shows the latest revision with its source conversation. Windows path case and trailing separators are normalized; parent, child, and sibling directories are separate. These reads work while busy. Older plans use their saved conversation's workspace, explicitly marked as inferred; their creation time remains unknown. Lookup does not rewrite old history.
+
+Parent agents and workers can use `plan_list(page)` and `plan_fetch(planId)` to find earlier plans before substantial work. Fetching provides read-only evidence: it does not activate a plan, transfer approvals, grant artifact access, or allow edits to another conversation's plan. Current user instructions and permissions remain authoritative, and files must be checked again. Resume the source conversation to update its plan. Directory lookup is implemented in source but has not been built or live-verified yet; the running executable remains unchanged.
 
 `plan_submit` requires Plan workflow and no unresolved recorded questions. In Work, `plan_update` tracks progress without a review gate. Invalid submissions and stale/invalid updates are rejected before execution, so they do not create an uncertain-mutation recovery state. For an older run stopped on a rejected `plan_submit`, exit and resume with the updated build: recovery records a missing submission receipt as not committed, preserving the draft without replaying or approving it. Continue only when explicitly requested; genuine file/process uncertainty still requires recovery.
 
@@ -492,7 +566,7 @@ See [current delivery evidence](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-l
 
 ## Later roadmap
 
-API-key access, remote/authenticated LM Studio servers, automatic model loading, full terminal emulation, Roslyn, browser automation, MCP/plugins, desktop UI, nested agents, worker process execution, and public distribution remain deferred. Public web search/read tools are implemented as described above. LM Studio and bounded model-specific workers are implemented.
+API-key access, remote/authenticated LM Studio servers, automatic model loading, full terminal emulation, browser automation, MCP/plugins, desktop UI, nested agents, worker process execution, and public distribution remain deferred. Public web search/read tools are implemented as described above. LM Studio and bounded model-specific workers are implemented.
 
 Protocol references: [ChatGPT sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), and [preview requirements](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations). Reviewed on 2026-10-09.
 

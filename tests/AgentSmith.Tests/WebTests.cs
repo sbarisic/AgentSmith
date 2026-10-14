@@ -27,7 +27,7 @@ public sealed class WebTests
         public Fixture(Handler handler)
         {
             Store = new(Path.Combine(Dir.Path, "data")); Tools = new(Store, new WebTools(handler));
-            Session = new() { Workspace = Dir.Path, Mode = PermissionMode.Inspect, Runs = [new() { State = RunState.Running }] };
+            Session = new() { Workspace = Dir.Path, WebSearch = "basic", Mode = PermissionMode.Inspect, Runs = [new() { State = RunState.Running }] };
             Store.Save(Session, new("test", Session.Id, null, new { }));
         }
         public async Task<JsonNode> Call(string name, object args, CancellationToken ct = default)

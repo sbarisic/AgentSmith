@@ -128,7 +128,7 @@ public static class DotnetVerification
                     if (results.Length != Count("total") || Count("passed") + (long)Count("failed") > Count("total")) throw new InvalidDataException("TRX counts do not match its test records.");
                     total = checked(total + Count("total")); passed = checked(passed + Count("passed")); failed = checked(failed + Count("failed"));
                     skipped += results.Count(e => (string?)e.Attribute("outcome") == "NotExecuted");
-                    foreach (var test in results) tests.Add(new { name = (string?)test.Attribute("testName"), outcome = (string?)test.Attribute("outcome"), duration = (string?)test.Attribute("duration"), message = test.Descendants(ns + "Message").FirstOrDefault()?.Value, stackTrace = test.Descendants(ns + "StackTrace").FirstOrDefault()?.Value });
+                    foreach (var test in results) tests.Add(new { testId = (string?)test.Attribute("testId"), executionId = (string?)test.Attribute("executionId"), name = (string?)test.Attribute("testName"), outcome = (string?)test.Attribute("outcome"), duration = (string?)test.Attribute("duration"), message = test.Descendants(ns + "Message").FirstOrDefault()?.Value, stackTrace = test.Descendants(ns + "StackTrace").FirstOrDefault()?.Value });
                 }
             }
         }
@@ -136,15 +136,25 @@ public static class DotnetVerification
         { state = "incomplete"; reason = "Report parsing failed or exceeded its bounds; inspect the retained artifacts."; }
         if (process.State is "Interrupted" or "Stopped" or "Failed" || !process.TerminationConfirmed) { state = "incomplete"; reason = "Process outcome was interrupted or unconfirmed."; }
         if (state == "complete" && verification.Kind == "test" && total == 0) state = "no_tests";
-        var full = Json.Serialize(new { verificationId = id, kind = verification.Kind, state, reason, processId = process.Id, processState = process.State, process.ExitCode, process.DurationMilliseconds, process.TerminationConfirmed, total, passed, failed, skipped, diagnostics, tests, artifacts });
+        var full = Json.Serialize(new { conversationId = ctx.Session.Id, runId = process.RunId, verificationId = id, kind = verification.Kind, state, reason, processId = process.Id, processState = process.State, process.ExitCode, process.DurationMilliseconds, process.TerminationConfirmed, total, passed, failed, skipped, diagnostics, tests, artifacts });
         var summaryPath = ArtifactAccess.Validate(ctx, Path.Combine(verification.Directory, "summary.json")); Directory.CreateDirectory(verification.Directory);
         if (Encoding.UTF8.GetByteCount(full) <= ArtifactAccess.MaxBytes) File.WriteAllText(summaryPath, full, new UTF8Encoding(false));
         else { state = "incomplete"; reason = "Normalized report exceeds the artifact size limit."; File.WriteAllText(summaryPath, Json.Serialize(new { state, reason })); }
         var summary = ArtifactAccess.Register(ctx, summaryPath, "verification", process.Id);
         var compact = new JsonObject { ["verificationId"] = id, ["kind"] = verification.Kind, ["state"] = state, ["reason"] = reason, ["processId"] = process.Id, ["processState"] = process.State, ["exitCode"] = process.ExitCode, ["durationMilliseconds"] = process.DurationMilliseconds, ["terminationConfirmed"] = process.TerminationConfirmed, ["total"] = total, ["passed"] = passed, ["failed"] = failed, ["skipped"] = skipped, ["summaryArtifactId"] = summary.Id, ["sourceArtifactIds"] = new JsonArray(artifacts.Select(a => (JsonNode)JsonValue.Create(a)!).ToArray()) };
+        var normalized = Diagnostics.Normalize(JsonNode.Parse(full)!);
+        compact["errors"] = normalized.Where(e => e.Severity == "error").Sum(e => e.Occurrences);
+        compact["warnings"] = normalized.Where(e => e.Severity == "warning").Sum(e => e.Occurrences);
+        compact["succeeded"] = state == "complete" && process.ExitCode == 0 && (verification.Kind == "build" || total > 0 && failed == 0);
         var items = new JsonArray();
-        foreach (var item in diagnostics.Cast<object>().Concat(tests)) { var node = JsonNode.Parse(Json.Serialize(item)); if (items.ToJsonString().Length + node!.ToJsonString().Length > 12000) break; items.Add(node); }
-        compact["items"] = items; compact["moreItems"] = items.Count < diagnostics.Count + tests.Count;
+        foreach (var entry in normalized.Where(e => e.Severity != "passed").Take(20))
+        {
+            var node = JsonNode.Parse(Json.Serialize(entry with { Message = entry.Message[..Math.Min(entry.Message.Length, 1200)], StackTrace = null }));
+            if (Encoding.UTF8.GetByteCount(compact.ToJsonString()) + Encoding.UTF8.GetByteCount(items.ToJsonString()) + Encoding.UTF8.GetByteCount(node!.ToJsonString()) > 7400) break;
+            items.Add(node);
+        }
+        compact["items"] = items; compact["moreItems"] = items.Count < normalized.Count;
+        compact["details"] = "/diagnostics " + summary.Id;
         verification.Result = compact.ToJsonString(); ctx.Save("verification.completed", new { verification.Id, state }); return new(verification.Result);
     }
 }

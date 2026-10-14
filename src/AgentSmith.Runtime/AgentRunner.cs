@@ -226,6 +226,7 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                         if (repetition.Append(ev.Text)) throw new ResponseRepetitionException();
                         emit(new("text.delta", session.Id, run.Id, new { text = ev.Text }));
                     }
+                    if (ev.Type == "web-search") emit(new("web.search.progress", session.Id, run.Id, new { message = ev.Text }));
                     if (ev.Type == "completed") { completed = ev.Output; run.Usage = ev.Usage; }
                 }
                 if (completed is null) throw new UserFacingException("The response stream ended before completion. No tools from it were executed.");

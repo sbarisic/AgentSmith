@@ -61,11 +61,13 @@ public sealed class ContinuousChatTests
             var s = new Session { Workspace = root }; app.Store.Save(s, new("created", s.Id, null, new { }));
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)); var chat = app.Chat(s, "first", true, timeout.Token);
             await model.Requests.Reader.ReadAsync(timeout.Token);
-            foreach (var command in new[] { "/mode", "/help all", "/worker-limits", "/worker-limits 8 2", "/mode plan", "/mode document", "/mode edit", "/mode plan Another task", "/plan Another task" }) input.Lines.Writer.TryWrite(command);
+            foreach (var command in new[] { "/mode", "/help all", "/worker-limits", "/worker-limits 8 2", "/worker-budget", "/worker-budget 200 45", "/mode plan", "/mode document", "/mode edit", "/mode plan Another task", "/plan Another task", "/plans", "/plan show", "/plan read missing" }) input.Lines.Writer.TryWrite(command);
             input.Lines.Writer.TryWrite("queue barrier"); await Until(() => app.Store.Queue(s.Id).Items.Count == 1);
             var saved = app.Store.Get(s.Id)!;
             Assert.Equal(WorkflowMode.Work, saved.Workflow); Assert.Equal(PermissionMode.Execute, saved.Mode);
             Assert.Equal(2, saved.WorkerPolicy.MaxConcurrent);
+            Assert.Equal(100, saved.WorkerPolicy.MaxRequests);
+            Assert.Equal(30, saved.WorkerPolicy.MaxMinutes);
             Assert.Single(saved.Runs); Assert.Empty(saved.Reports); Assert.Empty(saved.Plans);
             input.Lines.Writer.TryWrite("/exit"); await chat;
         }

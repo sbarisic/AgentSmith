@@ -32,6 +32,7 @@ public sealed class ContinuityTests
         Assert.Equal(original, ContextBuilder.Hash(s.History)); Assert.Single(s.ContextSnapshots);
         Assert.Contains(context.Request.Input, i => i["content"]?.ToString() == "Keep my current request verbatim");
         Assert.All(model.Requests, r => Assert.Empty(r.Tools)); Assert.True(s.ContextSnapshots[0].After < 18000);
+        Assert.All(model.Requests, r => Assert.False(r.NativeWebSearch));
         var saved = store.Get(s.Id)!; Assert.Equal(s.ActiveContextId, saved.ActiveContextId); Assert.Equal(original, ContextBuilder.Hash(saved.History));
         Assert.Empty(ChatGptModelClient.BuildRequest(model.Requests[0])["tools"]!.AsArray());
         Assert.Equal(context.Request.Input.Count, builder.Build(saved).Request.Input.Count);

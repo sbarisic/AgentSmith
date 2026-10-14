@@ -20,11 +20,15 @@ internal static class CommandHelp
             new("/review [--base <ref>|--commit <ref>|--path <path>]", "Start a read-only audit; default is current changes"),
             new("/workflow [work]", "Legacy workflow status / return-to-Work command")]),
         new("session", "Conversation and saved results", [
+            new("/help [workflows|session|tools|queue|settings|all]", "Show commands and keyboard controls"),
             new("/status", "Show current state and remaining execution limits"), new("/usage", "Show cloud and local token usage"),
             new("/tasks", "Show saved plan steps"), new("/reports", "List Document and Review reports"),
+            new("/plans [page]", "Find plans from conversations in this exact workspace directory"),
+            new("/plan read <id>", "Read a directory plan without adopting it or transferring approval"),
             new("/report [id]", "Read a report; defaults to the active report"),
             new("/report export <id> <new-path.md>", "Export a report to a new Markdown file"),
             new("/artifacts", "List retained logs and verification reports"),
+            new("/diagnostics <report-id> [errors|warnings|failed|skipped|passed|all] [page]", "Inspect structured build diagnostics and test outcomes"),
             new("/artifact <id|process:#number> [read <cursor>|search <text>]", "Read, page or search a retained artifact; process:#15 opens that process log"), new("/exit", "Exit; saved work can be resumed with smith resume")]),
         new("tools", "Tools, workers, and recovery", [
             new("/tools", "List tools, including image_read, workspace_map, http_request and web research"), new("/changes", "Inspect checkpointed file changes"),
@@ -36,13 +40,16 @@ internal static class CommandHelp
             new("/steer <text>", "Redirect this run at the next safe boundary; normal busy input stays queued"),
             new("/steering [remove <message-id>]", "Inspect delivery states or remove a pending message"),
             new("/agent <id|#number> message <text>", "Send steering to an active worker without expanding its assignment"),
-            new("/cancel · Escape · Ctrl+C", "Stop the active run; keep edits and hold queued prompts"),
+            new("/cancel · Escape · Ctrl+C", "Stop the active run; keep edits and hold queued prompts; Escape first dismisses suggestions"),
             new("/queue", "Show queued follow-ups and their hold state"), new("/queue remove <id>|clear|continue", "Remove pending items or explicitly release the queue"),
             new("/answer <question-id> <text>", "Address a pending question in redirected input"),
             new("/review <review-id> <decision>", "Address a pending plan decision in redirected input"),
             new("/paste", "Enter multiline text; /end submits it as message content"),
             new("/attach <image-path>", "Attach an image to the draft"),
-            new("Alt+V · Tab · Enter · Delete", "Paste; focus draft blocks; preview a block; remove it")]),
+            new("Slash · Up/Down · Tab/Enter · Escape", "Filter command suggestions; select; complete without running; dismiss (Ctrl+C still cancels)"),
+            new("Up/Down", "Without suggestions or block focus, recall conversation prompts and restore the unsent draft"),
+            new("Ctrl+Backspace", "Delete the preceding word or punctuation run; pasted blocks are removed atomically"),
+            new("Alt+V · Tab · Enter · Delete", "Paste; without suggestions, focus draft blocks; preview a block; remove it")]),
         new("settings", "Display, context, and memory", [
             new("/model [id]", "Show selection or change the next prompt's model while idle; also saves the new-chat default"),
             new("/models", "List models available from this conversation's provider"),
@@ -51,6 +58,8 @@ internal static class CommandHelp
             new("/context budget balanced|max|<tokens>", "Set the context budget while idle"), new("/compact", "Compact saved context without resuming work"),
             new("/limits [requests minutes]", "Show or change execution limits"), new("/delegation [proactive|manual]", "Show or change delegation to enabled local and GPT profiles"),
             new("/worker-limits [total local]", "Show parallel worker limits; change while idle (1..16 each)"),
+            new("/worker-budget [requests minutes]", "Show or change the budget for new workers while idle (default 100 requests / 30 minutes)"),
+            new("/web-search [native|basic|off]", "Select ChatGPT native search or DuckDuckGo fallback while idle; saved per conversation"),
             new("/memory [list [page]|search <text>|show <id>]", "Browse the shared memory library"),
             new("/memory add <text>|edit <id> <text>|forget <id>", "Manage memory entries while idle"), new("/memory on|off", "Enable or disable automatic memory use")])
     ];

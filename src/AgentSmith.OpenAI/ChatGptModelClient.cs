@@ -28,7 +28,7 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
     }
     public static JsonObject BuildRequest(ModelRequest request)
     {
-        var functions = new JsonArray(request.Tools.Select(t => (JsonNode)new JsonObject
+        var functions = new JsonArray(request.Tools.Where(t => !request.NativeWebSearch || t.Name != "web_search").Select(t => (JsonNode)new JsonObject
         {
             ["type"] = "function",
             ["name"] = t.Name,
@@ -36,16 +36,23 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
             ["parameters"] = t.Parameters.DeepClone(),
             ["strict"] = t.Name != "agent_spawn"
         }).ToArray());
+        var tools = new JsonArray();
+        if (functions.Count > 0) tools.Add(new JsonObject { ["type"] = "namespace", ["name"] = "agentsmith", ["description"] = "AgentSmith tools enabled for this conversation", ["tools"] = functions });
+        var include = new JsonArray("reasoning.encrypted_content");
+        if (request.NativeWebSearch)
+        {
+            tools.Add(new JsonObject { ["type"] = "web_search" });
+            include.Add("web_search_call.action.sources");
+        }
         return new JsonObject
         {
             ["model"] = request.Model,
-            ["max_output_tokens"] = request.MaxOutputTokens ?? 16384,
             ["instructions"] = request.Instructions,
             ["stream"] = true,
             ["store"] = false,
             ["input"] = new JsonArray(request.Input.Select(i => (JsonNode)i.DeepClone()).ToArray()),
-            ["include"] = new JsonArray("reasoning.encrypted_content"),
-            ["tools"] = request.Tools.Count == 0 ? new JsonArray() : new JsonArray(new JsonObject { ["type"] = "namespace", ["name"] = "agentsmith", ["description"] = "AgentSmith tools enabled for this conversation", ["tools"] = functions })
+            ["include"] = include,
+            ["tools"] = tools
         };
     }
     public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -54,11 +61,17 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await accessToken(cancellationToken));
         message.Content = new StringContent(BuildRequest(request).ToJsonString(), Encoding.UTF8, "application/json");
         using var response = await http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        if (!response.IsSuccessStatusCode) throw new UserFacingException($"ChatGPT inference failed (HTTP {(int)response.StatusCode}). Check account access and usage limits.");
+        if (!response.IsSuccessStatusCode)
+        {
+            var advice = request.NativeWebSearch && (int)response.StatusCode is 400 or 403 or 422
+                ? " This request included native web search, whose availability depends on model/account policy. Use /web-search basic or /web-search off while idle if search is unavailable. No fallback was attempted."
+                : " Check account access and usage limits.";
+            throw new UserFacingException($"ChatGPT inference failed (HTTP {(int)response.StatusCode})." + advice);
+        }
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await foreach (var ev in ParseStreamAsync(stream, cancellationToken)) yield return ev;
+        await foreach (var ev in ParseStreamAsync(stream, cancellationToken, nativeWebSearch: request.NativeWebSearch)) yield return ev;
     }
-    public static async IAsyncEnumerable<ModelEvent> ParseStreamAsync(Stream stream, [EnumeratorCancellation] CancellationToken ct, string provider = "ChatGPT")
+    public static async IAsyncEnumerable<ModelEvent> ParseStreamAsync(Stream stream, [EnumeratorCancellation] CancellationToken ct, string provider = "ChatGPT", bool nativeWebSearch = false)
     {
         // Read chunks rather than ReadLineAsync: a malicious or broken server cannot allocate an unbounded line.
         using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: true);
@@ -66,6 +79,7 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
         var pending = new StringBuilder();
         var data = new StringBuilder();
         var finishedItems = new SortedDictionary<int, JsonObject>();
+        var displayedMessages = new HashSet<int>();
         var total = 0;
         while (true)
         {
@@ -95,14 +109,23 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
                 try { item = JsonNode.Parse(json)!.AsObject(); }
                 catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException) { throw new UserFacingException("Malformed model stream event."); }
                 var type = item["type"]?.GetValue<string>();
-                if (type == "response.output_text.delta") yield return new("text", item["delta"]?.GetValue<string>());
+                // Native annotations arrive with the completed message. Avoid printing opaque markers first.
+                if (type == "response.output_text.delta" && !nativeWebSearch) yield return new("text", item["delta"]?.GetValue<string>());
+                if (nativeWebSearch && type is "response.web_search_call.in_progress" or "response.web_search_call.searching" or "response.web_search_call.completed")
+                    yield return new("web-search", type == "response.web_search_call.completed" ? "Web search completed" : "Searching web…");
                 if (type == "response.output_item.done")
                 {
                     if (item["item"] is not JsonObject finished || item["output_index"] is null) throw new UserFacingException("Invalid completed output item.");
                     var index = item["output_index"]!.GetValue<int>();
                     if (index < 0 || index > 255 || !finishedItems.TryAdd(index, (JsonObject)finished.DeepClone())) throw new UserFacingException("Invalid or duplicate output index.");
+                    if (nativeWebSearch && finished["type"]?.ToString() == "message")
+                    {
+                        displayedMessages.Add(index);
+                        yield return new("text", WebCitations.Message(finished));
+                    }
                 }
-                if (type is "response.failed" or "response.incomplete" or "error") throw new UserFacingException($"{provider} returned an unsuccessful response. Check model access, output budget, and context limits.");
+                if (type is "response.failed" or "response.incomplete" or "error") throw new UserFacingException($"{provider} returned an unsuccessful response. Check model access, output budget, and context limits."
+                    + (nativeWebSearch ? " Native web search was enabled; if unavailable, select /web-search basic or /web-search off while idle. No fallback was attempted." : ""));
                 if (type == "response.completed")
                 {
                     var result = item["response"]?.AsObject();
@@ -112,6 +135,13 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
                         ? output.Select(i => (JsonObject)i!.DeepClone()).ToArray()
                         : finishedItems.Values.ToArray();
                     if (finalItems.Count == 0) throw new UserFacingException("Completed response contained no usable output items.");
+                    if (nativeWebSearch)
+                    {
+                        IEnumerable<KeyValuePair<int, JsonObject>> indexed = output is { Count: > 0 } ? finalItems.Select((value, index) => new KeyValuePair<int, JsonObject>(index, value)) : finishedItems;
+                        foreach (var (index, value) in indexed)
+                            if (value["type"]?.ToString() == "message" && displayedMessages.Add(index))
+                                yield return new("text", WebCitations.Message(value));
+                    }
                     yield return new("completed", Output: finalItems, Usage: result["usage"]?.ToJsonString());
                     yield break;
                 }

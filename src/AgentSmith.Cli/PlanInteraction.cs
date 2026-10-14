@@ -10,8 +10,13 @@ internal sealed partial class CliApp
     private async Task PlanCommand(Session session, string args)
     {
         var parts = args.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries); var verb = parts.FirstOrDefault()?.ToLowerInvariant() ?? "show"; var note = parts.Length > 1 ? parts[1] : "";
-        if (verb is not ("new" or "show" or "revise" or "implement" or "leave")) { verb = "new"; note = args; }
-        if (verb is "show" or "implement" or "leave" && note.Length > 0) throw new UserFacingException("Usage: /plan <task>, /plan show, /plan revise <note>, /plan implement, or /plan leave. Use /plan new <task> for a task beginning with a reserved command word.");
+        if (verb is not ("new" or "show" or "read" or "revise" or "implement" or "leave")) { verb = "new"; note = args; }
+        if (verb == "read")
+        {
+            if (string.IsNullOrWhiteSpace(note) || note.Any(char.IsWhiteSpace)) throw new UserFacingException("Usage: /plan read <id>. Use /plans to find saved plans in this workspace.");
+            Write("plan.display", new { plan = Store.ReadPlan(session.Workspace, note) }); return;
+        }
+        if (verb is "show" or "implement" or "leave" && note.Length > 0) throw new UserFacingException("Usage: /plan <task>, /plan show, /plan read <id>, /plan revise <note>, /plan implement, or /plan leave. Use /plan new <task> for a task beginning with a reserved command word.");
         if (verb == "show") { Write("plan.display", new { plan = Planning.Active(session) }); return; }
         if (activeRun is not null) throw new UserFacingException("Wait for the active run or use /cancel before changing plans.");
         if (verb != "show" && WorkflowPolicy.IsTask(session.Workflow)) throw new UserFacingException("Finish the Document/Review workflow or leave it with /workflow work before changing plans.");

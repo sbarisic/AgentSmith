@@ -1,6 +1,7 @@
 using AgentSmith.Core;
 using AgentSmith.OpenAI;
 using AgentSmith.Runtime;
+using AgentSmith.Tools;
 
 namespace AgentSmith.Cli;
 
@@ -33,31 +34,33 @@ internal sealed partial class CliApp
         finally { source.Cancel(); }
         Write("run.cancelling", new { message = "Cancelling… Waiting for cleanup and saved outcomes." });
     }
-    private void QueueMessage(Session session, string text, UserPrompt? rich = null)
+    private void QueueMessage(Session session, string text, UserPrompt? rich = null, bool literal = false)
     {
         try
         {
+            input.SetHistory(session);
             var item = rich is null ? Store.Enqueue(session.Id, text) : Store.Enqueue(session.Id, rich);
+            input.AcceptPrompt(rich ?? UserPrompt.Text(text), literal);
             var position = Store.Queue(session.Id).Items.Count(i => i.State == "Pending");
             var images = rich?.Parts.Count(p => p.Kind == "image") ?? 0;
             Write("prompt.queued", new { item.Id, position, imageCount = images,
                 content = images > 0 ? PromptPresentation.Content(rich!.HistoryItem()["content"], Store.Attachments(session.Id)) : null,
                 message = $"Queued #{position} · {item.Id}" + (images > 0 ? $" · {images} image(s) attached" : "") + $" · {Activity.Clean(text, 100)}" });
         }
-        catch (UserFacingException ex) { if (rich is null) input.Restore(text); else input.RestorePrompt(rich); Write("error", new { message = ex.Message, failure = ex.Detail?.Sanitized() }); }
+        catch (UserFacingException ex) { if (rich is null && !literal) input.Restore(text); else input.RestorePrompt(rich ?? UserPrompt.Text(text)); Write("error", new { message = ex.Message, failure = ex.Detail?.Sanitized() }); }
     }
     private async Task BusyInput(Session session, string line)
     {
         var literal = input.SubmittedLiteral;
         var rich = TakeSubmittedPrompt();
-        if (literal || rich?.Parts.Any(p => p.Kind == "image") == true) { QueueMessage(session, line, rich); return; }
         if (pasteActive)
         {
-            if (line == "/end") { QueueMessage(session, string.Join('\n', pasteLines)); pasteLines.Clear(); pasteActive = false; }
+            if (line == "/end") { QueueMessage(session, string.Join('\n', pasteLines), literal: true); pasteLines.Clear(); pasteActive = false; input.EditingEnabled = true; }
             else pasteLines.Add(line);
             return;
         }
-        if (line.Trim() == "/paste") { pasteActive = true; Write("paste", new { message = "Enter lines; /end submits a queued prompt." }); return; }
+        if (literal || rich?.Parts.Any(p => p.Kind == "image") == true) { QueueMessage(session, line, rich, literal); return; }
+        if (line.Trim() == "/paste") { pasteActive = true; input.EditingEnabled = false; Write("paste", new { message = "Enter lines; /end submits a queued prompt." }); return; }
         if (!line.TrimStart().StartsWith('/')) { QueueMessage(session, line, rich); return; }
         var name = line.Trim().Split(' ', 2)[0].ToLowerInvariant();
         if (name is "/answer" or "/review")
@@ -70,7 +73,7 @@ internal sealed partial class CliApp
 
         if (name == "/cancel") { CancelActive(); return; }
         if (name == "/exit") { exitRequested = true; CancelActive(); Store.HoldQueue(session.Id, "CLI exit"); return; }
-        if (name is "/model" or "/models" or "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/tasks" or "/processes" or "/changes")
+        if (name is "/web-search" or "/model" or "/models" or "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/worker-budget" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/diagnostics" or "/tasks" or "/plans" or "/plan" or "/processes" or "/changes")
         {
             // Queue storage is independent; other busy reads use a committed snapshot, never the runner's mutable session.
             await HandleCommand(line, Store.Get(session.Id) ?? throw new UserFacingException("Conversation is unavailable.")); return;
@@ -83,6 +86,7 @@ internal sealed partial class CliApp
         using var source = CancellationTokenSource.CreateLinkedTokenSource(ct); activeRun = source;
         if (continuous && !input.Interactive) decisionRequiresAddress = true;
         var task = Task.Run(() => work(source.Token), CancellationToken.None);
+        input.SetContext(session);
         input.Status = "Running"; if (continuous) input.Show();
         var elapsed = System.Diagnostics.Stopwatch.StartNew(); var lastSecond = -1;
         try
@@ -93,8 +97,10 @@ internal sealed partial class CliApp
                 if (continuous && second != lastSecond)
                 {
                     lastSecond = second;
+                    input.SetContext(session);
                     var pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending");
-                    input.Status = (source.IsCancellationRequested ? "Cancelling" : terminal.RunningStatus) + $" · run {TerminalDuration.Format(TimeSpan.FromSeconds(second), "0")}" + (pendingSteering > 0 ? $" · {pendingSteering} steering pending" : ""); input.Refresh();
+                    var workerSummary = ComposerContext.WorkerSummary(Store.Workers(session.Id));
+                    input.Status = (source.IsCancellationRequested ? "Cancelling" : terminal.RunningStatus) + " · " + workerSummary + $" · run {TerminalDuration.Format(TimeSpan.FromSeconds(second), "0")}" + (pendingSteering > 0 ? $" · {pendingSteering} steering pending" : ""); input.Refresh();
                 }
                 if (continuous && !exitRequested)
                 {
@@ -127,7 +133,7 @@ internal sealed partial class CliApp
             try { await task; } catch { /* Preserve the initiating failure after owned work has stopped. */ }
             Store.HoldQueue(session.Id, "Execution interrupted"); throw;
         }
-        finally { activeRun = null; input.Hide(); input.Status = ""; }
+        finally { activeRun = null; input.Hide(); input.Status = ""; input.SetContext(session); }
     }
     private async Task<bool> ContinuityCommand(string name, string args, Session session)
     {
@@ -138,6 +144,21 @@ internal sealed partial class CliApp
         if (await AgentCommand(name, args, session)) return true;
         switch (name)
         {
+            case "/diagnostics":
+                var diagnosticArgs = args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var page = 1;
+                if (diagnosticArgs.Length is < 1 or > 3 || diagnosticArgs.Length == 3 && (!int.TryParse(diagnosticArgs[2], out page) || page is < 1 or > 100))
+                    throw new UserFacingException("Usage: /diagnostics <report-id> [errors|warnings|failed|all] [page 1..100]");
+                var request = new System.Text.Json.Nodes.JsonObject { ["artifactId"] = diagnosticArgs[0], ["filter"] = diagnosticArgs.Length > 1 ? diagnosticArgs[1] : "all", ["path"] = "", ["query"] = "", ["cursor"] = "" };
+                System.Text.Json.Nodes.JsonNode resultPage = null!;
+                for (var index = 1; index <= page; index++)
+                {
+                    resultPage = System.Text.Json.Nodes.JsonNode.Parse(Diagnostics.Read(Context(Store.Get(session.Id) ?? session), request).Content)!;
+                    if (index < page && resultPage["cursor"] is null) throw new UserFacingException("That diagnostic page does not exist.");
+                    request["cursor"] = resultPage["cursor"]?.DeepClone() ?? "";
+                }
+                resultPage["page"] = page;
+                Write("diagnostics.result", resultPage); return true;
             case "/cancel":
                 if (args.Length > 0) throw new UserFacingException("Usage: /cancel");
                 CancelActive(); return true;

@@ -14,6 +14,8 @@ internal sealed partial class CliApp
             display["_workflow"] = session.MessageWorkflows.TryGetValue(index, out var workflow) ? workflow.ToString() : null;
             if (display["role"]?.ToString() == "user" && display["content"] is System.Text.Json.Nodes.JsonArray)
                 display["content"] = PromptPresentation.Content(display["content"], attachments);
+            if (display["role"]?.ToString() == "assistant" && display["content"] is System.Text.Json.Nodes.JsonArray)
+                display["content"] = WebCitations.Message(display);
             return display;
         }).ToArray();
     }
@@ -39,7 +41,10 @@ internal sealed partial class CliApp
     internal void SetConversation(Session session)
     {
         currentConversation = session.Id;
+        input.SetContext(session);
+        input.SetHistory(session);
         input.Notice = message => Write("paste", new { message });
+        input.ImageAvailable = id => Store.Attachments(session.Id).Any(a => a.Id == id && File.Exists(a.Path));
         input.ImportImage = content =>
         {
             if (!session.Connection.Capabilities.Vision) throw new UserFacingException("Selected model does not advertise image input.");

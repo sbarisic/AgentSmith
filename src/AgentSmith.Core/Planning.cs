@@ -37,6 +37,9 @@ public sealed class PlanReview
 public sealed class WorkPlan
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string OriginWorkspace { get; set; } = "";
+    public bool OriginInferred { get; set; }
+    public DateTimeOffset? CreatedAt { get; set; }
     public string State { get; set; } = "Draft";
     public List<PlanRevision> Revisions { get; set; } = [];
     public List<PlanApproval> Approvals { get; set; } = [];
@@ -81,7 +84,7 @@ public static class Planning
         ValidateUpdate(ctx.Session, expectedRevision, revision);
         var plan = Active(ctx.Session);
         var scopeChanged = plan?.Approvals.LastOrDefault() is { } approval && ScopeChanged(plan.Revisions.Single(r => r.Revision == approval.Revision), revision);
-        if (plan is null) { plan = new(); ctx.Session.Plans.Add(plan); ctx.Session.ActivePlanId = plan.Id; }
+        if (plan is null) { plan = new() { OriginWorkspace = PlanDirectory.Normalize(ctx.Workspace), CreatedAt = DateTimeOffset.UtcNow }; ctx.Session.Plans.Add(plan); ctx.Session.ActivePlanId = plan.Id; }
         revision.Revision = expectedRevision + 1; revision.RunId = ctx.Run.Id;
         plan.Revisions.Add(revision);
         if (scopeChanged) { ctx.Session.Workflow = WorkflowMode.Plan; plan.State = "Draft"; }

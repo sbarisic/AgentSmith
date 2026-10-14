@@ -100,7 +100,7 @@ public class ProtocolTests
     {
         var request = ChatGptModelClient.BuildRequest(new("model", "instructions", [], new AgentSmith.Tools.WorkspaceTools().Definitions));
         Assert.False(request["store"]!.GetValue<bool>()); Assert.True(request["stream"]!.GetValue<bool>());
-        Assert.Equal(16384, request["max_output_tokens"]!.GetValue<int>());
+        Assert.Null(request["max_output_tokens"]); // Unsupported on the ChatGPT sign-in Responses route.
         Assert.Equal("namespace", request["tools"]![0]!["type"]!.ToString());
         foreach (var unsupported in new[] { "temperature", "previous_response_id", "conversation", "metadata" }) Assert.False(request.ContainsKey(unsupported));
     }

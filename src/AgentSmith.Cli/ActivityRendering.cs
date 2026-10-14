@@ -29,7 +29,12 @@ public sealed partial class TerminalRenderer
         taskStatus[id] = status + description;
         var title = description.Length == 0 ? id : description;
         if (!Verbose) title = AgentSmith.Core.Activity.Clean(title, Math.Max(16, width - status.Length - 10));
-        MessageText("[" + status + "] " + title);
+        var style = status.ToLowerInvariant() switch
+        {
+            "completed" => "success", "in progress" => "info", "blocked" => "warning",
+            "failed" => "error", _ => "activity"
+        };
+        MessageText("[" + status + "] " + title, style);
     }
     public static string BoundedPreview(string text, bool verbose = false)
     {
@@ -77,11 +82,18 @@ public sealed partial class TerminalRenderer
     {
         switch (Text(data, "kind"))
         {
+            case "audio-analysis":
+                MessageText("Audio · " + Text(data, "path") + " · " + Text(data, "model"), "info");
+                MessageText("Start " + Text(data, "startSeconds") + "s · duration " + (Text(data, "durationSeconds") is { Length: > 0 } duration ? duration + "s" : "unavailable (whole MP3)"), "dim");
+                ContentBlock("Audio analysis", Text(data, "analysis"));
+                if (Flag(data, "partial")) MessageText("Selected clip only; the rest of the file was not analyzed.", "dim");
+                if (Flag(data, "truncated")) MessageText("Audio model response reached its output limit.", "status-warning");
+                MessageText("Retained analysis: /artifact " + Text(data, "artifactId"), "dim"); break;
             case "web-image":
             case "workspace-image":
                 var imageSource = Text(data, "path");
                 if (Uri.TryCreate(Text(data, "url"), UriKind.Absolute, out var imageUrl)) imageSource = imageUrl.GetLeftPart(UriPartial.Path);
-                MessageText(imageSource + " · " + Text(data, "width") + " × " + Text(data, "height") + " · " + Text(data, "bytes") + " bytes");
+                MessageText(imageSource + " · " + Text(data, "width") + " × " + Text(data, "height") + " · " + Text(data, "bytes") + " bytes", "activity");
                 MessageText("Image attachment: " + Text(data, "attachmentId"), "dim"); break;
             case "workspace-map":
                 MessageText("Workspace map · " + Text(data, "totalEntries") + " entries · " + Text(data, "path"), "status-neutral");
@@ -108,7 +120,7 @@ public sealed partial class TerminalRenderer
             foreach (var result in results.EnumerateArray())
             {
                 MessageText(Text(result, "title"), "accent");
-                MessageText(Text(result, "url"));
+                MessageText(Text(result, "url"), "info");
                 MessageText(Text(result, "snippet"), "dim");
             }
         }

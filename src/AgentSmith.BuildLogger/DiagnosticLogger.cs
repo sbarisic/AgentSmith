@@ -10,14 +10,17 @@ public sealed class DiagnosticLogger : ILogger
     private readonly object gate = new();
     private long bytes;
     private bool truncated;
+    private readonly Dictionary<int, string?> frameworks = [];
     public void Initialize(IEventSource source)
     {
         writer = new(new FileStream(Parameters ?? throw new LoggerException("Diagnostic path missing."), FileMode.CreateNew, FileAccess.Write, FileShare.Read), new UTF8Encoding(false)) { AutoFlush = true };
         source.BuildStarted += (_, _) => Write(new { type = "started" });
-        source.ErrorRaised += (_, e) => Write(new { type = "error", code = e.Code, message = e.Message, project = e.ProjectFile, file = e.File, line = e.LineNumber, column = e.ColumnNumber });
-        source.WarningRaised += (_, e) => Write(new { type = "warning", code = e.Code, message = e.Message, project = e.ProjectFile, file = e.File, line = e.LineNumber, column = e.ColumnNumber });
+        source.ProjectStarted += (_, e) => { lock (gate) { if (e.BuildEventContext is { } context) frameworks[context.ProjectContextId] = e.GlobalProperties?.TryGetValue("TargetFramework", out var framework) == true ? framework : null; } };
+        source.ErrorRaised += (_, e) => Write(new { type = "error", code = e.Code, message = e.Message, project = e.ProjectFile, framework = Framework(e.BuildEventContext), file = e.File, line = e.LineNumber, column = e.ColumnNumber, endLine = e.EndLineNumber, endColumn = e.EndColumnNumber, subcategory = e.Subcategory });
+        source.WarningRaised += (_, e) => Write(new { type = "warning", code = e.Code, message = e.Message, project = e.ProjectFile, framework = Framework(e.BuildEventContext), file = e.File, line = e.LineNumber, column = e.ColumnNumber, endLine = e.EndLineNumber, endColumn = e.EndColumnNumber, subcategory = e.Subcategory });
         source.BuildFinished += (_, e) => Write(new { type = "finished", succeeded = e.Succeeded, truncated });
     }
+    private string? Framework(BuildEventContext? context) { lock (gate) return context is null ? null : frameworks.GetValueOrDefault(context.ProjectContextId); }
     private void Write(object value)
     {
         lock (gate)

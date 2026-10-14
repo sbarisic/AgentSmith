@@ -1,5 +1,92 @@
 # AgentSmith CLI implementation plan
 
+## Native ChatGPT web search — source changes, 2026-10-11
+
+Added hosted `web_search` to ordinary ChatGPT OAuth Responses requests, with source inclusion and no duplicate local search function. New and resumed conversations default to native; `/web-search native|basic|off` persists an explicit per-conversation choice while idle. Local models use basic search and new workers inherit the selection. `/status` and `/help` expose the controls. Off is enforced during both tool preparation and execution. Compaction remains tool-free.
+
+Search progress reaches the terminal through structured runtime events. Native messages wait for their completed annotations before display; citations become bounded source links, while original search items and annotations are retained in session history. Resume applies the same display projection. Hosted calls are not queued as local function calls. Provider failures show explicit fallback guidance without retrying or logging error bodies. The ChatGPT request builder also omits the unsupported `max_output_tokens` field, retaining the setting as a context reserve and leaving other providers unchanged.
+
+Added regression cases for native/basic request shapes, hosted stream items and citation deduplication, empty completion envelopes, citation bounds/unsafe URLs, history persistence, workflow/provider selection, worker inheritance, disabled local dispatch, CLI persistence and failure-body suppression. Existing basic-search fixtures now select basic explicitly. Static `git diff --check` passed. No build, test execution, publish, live inference or running-agent changes were performed under the current build hold. Model/account availability, live citations, worker native search and compiled regressions remain unverified; the currently published executable does not yet contain this feature.
+
+## Audio listening and active-worker status — local delivery, 2026-10-11
+
+Implemented `audio_listen` for parent and worker use in all Inspect-capable workflows. It reads bounded workspace PCM WAV/MP3 files, supports WAV time selection and normalization, and sends audio to a separately configured OpenAI audio model. `OPENAI_API_KEY` is required; ChatGPT OAuth is never forwarded. `SMITH_AUDIO_MODEL` optionally overrides `gpt-audio-1.5`. Responses retain source/clip hashes, range, model and usage in an `audio-analysis` artifact with a saved receipt. The terminal shows a bounded analysis block and artifact link. Missing configuration, invalid formats, unsupported MP3 ranges and provider failures produce actionable messages.
+
+Verification: 21 audio tool/clip tests passed, then the full Release regression suite passed all 526 tests (371 core/tool tests and 155 integration tests). Coverage includes PCM normalization, clip limits, MP3 restrictions, workspace boundaries, request payload/auth separation, absent credentials, error-body suppression, cancellation, response bounds, workflow availability, persisted receipt reuse and terminal escaping. The suite also verifies the previously pending active-worker status display. The self-contained Windows x64 publish completed successfully; this supersedes the build hold in the next entry.
+
+Live audio-model acceptance was not run: no `OPENAI_API_KEY` was configured in this environment. MP3 duration and local decoding remain unavailable; it is sent whole with a signature check and provider-side validation. No physical terminal/audio-quality acceptance, commit or public publication was performed.
+
+## Active workers in the composer — source changes, 2026-10-11
+
+Added `agents 2 [#8, #9]` to the busy status row, refreshed with the existing one-second composer tick from the current parent's persisted worker records. Prepared/waiting and cancelling workers remain active; terminal states are removed. Shows zero explicitly, orders numbers, and bounds the list to eight numbers plus an overflow count. Added test cases for state transitions and large lists. Static diff checks passed; tests and build remain deferred while the user's agent runs.
+
+## Worker and context updates — local delivery, 2026-10-11
+
+Built and refreshed the self-contained Windows x64 folder after user authorization. This delivers worker budgets (100 requests / 30 minutes by default, `/worker-budget` and startup flags), six-minute worker waits, the composer context indicator, and guidance favoring useful parallel delegation. The source-only build holds in the following three entries are superseded by this delivery.
+
+The complete Release suite ran 502 tests: 501 passed and one failed on a wording expectation for enabled ChatGPT profiles. After aligning the instruction wording, all 39 worker tests passed on rerun. The initial full run included 152 passing integration tests, including context display, budget persistence and busy-command behavior. Worker tests cover completion beyond 20 requests, retained lower-limit enforcement, six-minute wait validation and steering wake behavior. Published `chat --help` shows the new flags; CLI and Runtime assembly hashes match the build output. Static diff checks passed.
+
+No live model task or physical terminal acceptance was run. The HTTP 520 error wording discussed separately is unchanged in this build. No commit or public publication.
+
+## Prefer useful parallel delegation — source changes, 2026-10-11
+
+Updated parent instructions and `agent_spawn` tool guidance to prefer at least two agents making useful progress concurrently: multiple workers or parent plus worker. Single sequential tasks remain with the parent when it would otherwise only wait. Explicit user delegation requests remain supported. Instructions reject artificial splits, duplicate work, filling slots and counting blocked/dependent tasks as parallel work. File reservations, process barriers and runtime admission rules are unchanged. Static diff checks passed; no build, model inference or publish was run while the agent is active. Live model adherence remains unverified.
+
+## Composer context indicator — source changes, 2026-10-11
+
+The model/mode row now includes the last prepared context input, its working budget and percentage used. Estimates are labeled `~`; conservative character-based sessions show character units. Missing/malformed manifests do not invent counts. Narrow layouts use a compact percentage. Rendering reads the saved manifest only and makes no inference or workspace requests. Added regression cases for exact/estimated counts, character fallback, invalid data, resizing and updated snapshots. Static diff checks passed; compilation, test execution and publish are deferred while the agent runs.
+
+## Larger worker budgets — source changes, 2026-10-11
+
+Raised the `agent_wait` maximum from three to six minutes (360,000 ms), including validation, tool description, parent guidance and activity labels. Updated completion/steering tests to request the new maximum and added rejection assertions immediately above the cap and below zero. These test changes remain unrun under the running-agent build hold; the published build still has the three-minute cap. Ordinary progress does not wake waits; completion, steering and cancellation still do.
+
+New worker defaults are 100 requests / 30 minutes, with per-conversation `/worker-budget [requests minutes]` and startup `--worker-max-requests` / `--worker-max-minutes` options. Request accounting includes compaction. Each child gets an independent execution-policy snapshot, and the parent cancellation/deadline still bounds it. Concurrency changes preserve execution budgets; budget changes preserve concurrency. Older parent policies lacking the additive fields receive the new defaults; existing worker records are not rewritten or relaunched.
+
+Regression test source covers completion beyond 20 requests, assignment persistence/isolation, legacy defaults, explicit lower-limit failure with preserved edits, validation and CLI persistence. Busy-command coverage includes rejecting changes while work runs. Compilation and execution remain deferred because the user's agent is running; the published executable retains the previous budget. No commit or publication.
+
+## Markdown tables and activity colors — local delivery, 2026-10-11
+
+Follow-up presentation change: Read/List/Search completion summaries, routine process details and symbol listings use light gray; tool/worker headings and web links use cyan. Git rows, plan progress and diagnostic headings distinguish status with color and retain explicit text labels. Normal assistant prose remains white.
+
+Added streaming table recognition, square borders, stable column widths, wrapped cells, delimiter alignment and a labeled fallback for narrow terminals. Ordinary text remains white; inline emphasis uses the existing theme. Escaped/code pipes, empty cells, partial final lines, malformed rows and literal code/source mode are handled without dropping contents. Rendering buffers only a candidate header and current row, with the existing line-size guard and a 16-column bound.
+
+Added nine regression test cases covering fragmentation, wrapping, narrow layouts, alignment, escaping, literal fallback, empty/header-only tables, Unicode widths and bounded streaming. After the user permitted rebuilding, all 37 selected Markdown/rendering tests passed in Release. The first run exposed an incorrect right-alignment padding expectation in one new test; that assertion was corrected. Static diff checks passed. Refreshed the self-contained Windows x64 publish folder; published help exited 0 and the CLI assembly hash matches the build output. Physical terminal verification and a new full-suite run were not performed; the earlier 481-test result below remains the last full-suite result. No commit or public publication.
+
+## C# navigation and actionable diagnostics — local delivery, 2026-10-11
+
+Implemented `AgentSmith.CodeAnalysis` with Roslyn 5.3.0 and MSBuild Locator 1.11.2. New tools are `csharp_symbols`, `csharp_load`, `csharp_status`, `csharp_query`, and `diagnostics_read`. `/diagnostics <report-id> [errors|warnings|failed|all] [page]` is available both idle and busy. Existing verification summaries now show compiler errors and failed tests first, with stable diagnostic IDs, duplicate counts, project/framework associations and links to details. Raw logs and historical report artifacts remain intact.
+
+Syntax navigation needs no project evaluation. Semantic loading is an owned Execute process restricted to Work/Document parents and the existing editing-worker barrier. It supports csproj, sln and slnx, explicit multi-target selection, no requested restore/build, and bounded partial-coverage reporting. Queries operate on immutable source/options/reference data without analyzers or generators. Results label ambiguous candidates and linked-file variants. Hash checks, managed mutation/undo invalidation, explicit worker grants, two-snapshot capacity, cancellation and restart unavailability are implemented. Session/provenance fields are additive; schema v10 remains unchanged.
+
+Verification:
+
+- Final full Release regression run: **481 passed**, zero failures/skips (348 core/tool and 133 integration), using `xUnit.MaxParallelThreads=1`, `xUnit.ParallelizeTestCollections=false` and `RunConfiguration.MaxCpuCount=1`. The 15-test navigation/diagnostic set and five SDK/helper integration cases also passed independently. Six diagnostic tests passed again after the last defensive bound on historical report metadata.
+- Real disposable SDK fixtures covered project/solution loading without restoring missing assets, multi-target rejection/selection, outside-source exclusion, semantic references, source/configuration staleness, read-only worker grants, restart unavailability, capacity protection, helper termination and preservation of unrelated content. Existing structured compiler-error and failing/skipped/passing TRX tests passed in the full suite.
+- The first parallel Debug suite hit two process-fixture timeouts under contention. Those tests passed when the complete suite used one xUnit collection thread. Two new terminal tests initially used culture-sensitive escape-character comparison; their assertions now use ordinal comparison and pass. Production timeout limits were not increased.
+- Published self-contained Windows x64 to `artifacts/publish/win-x64`. The executable help and isolated project loader smoke checks exited 0; the helper returned four workspace documents, explicitly reported missing assets/generator coverage, did not create `project.assets.json`, and preserved the unrelated text edit. Evidence: `artifacts/navigation-acceptance-20261010-235731/summary.json`, `help.txt`, and `publish-hashes.json`.
+
+Live ChatGPT/Bonsai model acceptance was **not run**: the configured Bonsai endpoint at `http://127.0.0.1:8080/v1/models` was unavailable. No model server was started or reconfigured. The automated checks use real SDK helpers and controlled worker/session fixtures; they do not establish how live models will choose these tools. Physical terminal/composer interaction also remains unverified.
+
+This delivery includes the pending directory plan catalog, readable Git status labels and composer model/workflow row. The earlier source-only build holds below are historical and superseded by this delivery. Production sessions were not rewritten. No commit or public publication.
+
+## Composer model and mode — source changes, 2026-10-10
+
+Added a dedicated composer metadata row with the selected parent model, `reasoning: default`, and workflow/permission mode. Both provider adapters currently omit effort overrides, so the display does not invent low/medium/high values or equate effort with token usage. Context is refreshed on conversation setup, idle command loops and running-status updates. The input owner tracks the number of drawn rows when clearing/redrawing around output, preserving the existing draft and cursor behavior. Local model filenames and width-bounded labels keep long model IDs from hiding the mode.
+
+Reviewed source and checked whitespace. No build, tests, publish or physical terminal verification was performed while the user's agent is active.
+
+## Git status labels — source changes, 2026-10-10
+
+The terminal now translates Git porcelain status into readable labels: `??` becomes `Untracked`, with an explanation that new files have not yet been added to Git. Modified/added/deleted/renamed/copied/type-changed entries show staged and unstaged state separately; conflicts are identified explicitly. Paths, rename endpoints, raw model results and saved history stay intact. The display retains preview bounds and truncation notices; failed status calls cannot be shown as a clean workspace. This is a presentation change only: no files are staged or committed. Source reviewed and whitespace checked; no build, tests or publish while the user's agent runs.
+
+## Directory plan discovery — source changes, 2026-10-10
+
+Added creation workspace/time to new plans and inferred workspace provenance for legacy plans. `IPlanCatalog` reads the existing transactional plan projection without loading or mutating another conversation. The additive JSON metadata keeps schema v10; no migration or production-state rewrite is required. Listing is limited to ten summaries per page, and fetching returns the latest revision with source conversation and origin metadata. Exact normalized workspace matching excludes parents, children and siblings; data directories remain separate.
+
+Added parent/worker tools `plan_list(page)` and `plan_fetch(planId)`, plus `/plans [page]` and `/plan read <id>`. These commands work while busy; mutations remain blocked. Reads do not change active plans, approvals, permission ceilings, workflow, artifact access or worker assignments. Updated help, activity labels, terminal provenance and model guidance.
+
+Added regression-test source for persistence, latest revision, legacy inference without rewriting, directory normalization, pagination, data-directory isolation, worker restrictions, detached reads, CLI routing and rendering. Checked the actual catalog SQL against synthetic records in an in-memory Python SQLite database: current and legacy provenance, latest revision, bounded listing goals and parameterized lookup passed. `git diff --check` passed. C# tests, builds, publish and live acceptance were **not run**, as requested while the user's agent is active. No running process or production database was changed.
+
 ## Model commands and image display — local delivery, 2026-10-10
 
 After the user confirmed Smith was closed, built the pending changes and ran the full Release suite. The first run exposed a cancellation ordering race: a cancelled run could be observed before its queue hold was saved. Changed cancellation to persist the hold before signalling the runner, using `finally` to preserve cancellation if persistence fails. The full rerun passed **452 tests** (326 core/tool, 126 integration), zero failures or skips.
@@ -553,7 +640,7 @@ Real browser sign-in, account-specific model discovery, file-tool inference, and
 
 ## Remaining boundaries
 
-Windows is the supported release platform. LM Studio and bounded worker delegation are implemented in the newer milestone above. API-key access, Roslyn, browser automation, MCP/plugins, desktop UI, and full terminal emulation remain deferred. Automatic compaction, improved activity display, active-run Escape cancellation, and queued follow-ups are implemented above. Current context uses model-aware budgets with a conservative character fallback and pauses when required context cannot be compacted safely. Mid-request steering and cross-instance process control remain outside this milestone.
+Windows is the supported release platform. LM Studio and bounded worker delegation are implemented in the newer milestone above. API-key access, browser automation, MCP/plugins, desktop UI, and full terminal emulation remain deferred. Automatic compaction, improved activity display, active-run Escape cancellation, and queued follow-ups are implemented above. Current context uses model-aware budgets with a conservative character fallback and pauses when required context cannot be compacted safely. Mid-request steering and cross-instance process control remain outside this milestone.
 
 Persistence uses a versioned aggregate with transactional projections; large-history optimization remains future work. File boundaries do not defend against an adversarial process racing filesystem changes. Process logs and conversations can contain workspace/user data. Checkpoints do not roll back commands.
 

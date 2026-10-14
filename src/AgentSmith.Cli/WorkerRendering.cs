@@ -31,7 +31,7 @@ public sealed partial class TerminalRenderer
         // Fast reads get one result line. The composer still identifies an active read.
         // Spawn has its own authoritative agent.started block after the worker is saved.
         if (!Verbose && (name is "agent_spawn" or "agent_message" or "process_poll" || RoutineTool(name) && id.Length > 0)) return;
-        MessageText("› " + label);
+        MessageText("› " + label, "tool");
     }
 
     private bool RoutineResult(JsonElement data, JsonElement result)
@@ -45,11 +45,11 @@ public sealed partial class TerminalRenderer
             : Text(result, "totalLines").Length > 0 ? Text(result, "totalLines") + " total lines" : "";
         if (Flag(result, "truncated") || Flag(result, "limitReached")) detail += " · more available";
         var timing = CallTiming(data);
-        MessageText("✓ " + label + (detail.Length > 0 ? " · " + detail : "") + (timing.Length > 0 ? " · call " + timing : ""));
+        MessageText("✓ " + label + (detail.Length > 0 ? " · " + detail : "") + (timing.Length > 0 ? " · call " + timing : ""), "activity");
         return true;
     }
 
-    // Only the short badge gets a background; details remain white and wrap independently.
+    // Only the short badge gets a background; routine details are gray, problems stay white.
     private void StatusLine(string badge, string text, string style)
     {
         badge = Safe(badge); text = Safe(text).Replace('\n', ' ');
@@ -62,8 +62,9 @@ public sealed partial class TerminalRenderer
             if (take > 0 && char.IsHighSurrogate(text[take - 1])) take--;
         }
         Paint("  │", guideStyle); Paint(" ", "normal"); Paint(" " + badge + " ", style);
-        Paint(" " + text[..take], "normal"); output.WriteLine();
-        if (take < text.Length) Wrapped(text[take..].TrimStart(), "normal", "  │   ");
+        var detailStyle = style is "status-error" or "status-warning" ? "normal" : "activity";
+        Paint(" " + text[..take], detailStyle); output.WriteLine();
+        if (take < text.Length) Wrapped(text[take..].TrimStart(), detailStyle, "  │   ");
     }
 
     private static string WorkerLabel(JsonElement data) => Number(data, "number") > 0
@@ -71,7 +72,7 @@ public sealed partial class TerminalRenderer
     private void WorkerStarted(JsonElement data)
     {
         var label = WorkerLabel(data); workerStates[Text(data, "agentId")] = "Running";
-        MessageText("› Spawn " + label + " · " + Activity.Clean(Text(data, "profile"), 80));
+        MessageText("› Spawn " + label + " · " + Activity.Clean(Text(data, "profile"), 80), "tool");
         var task = Text(data, "task");
         if (task.Length == 0) task = Text(data, "message"); // Older event payloads.
         if (task.Length > 0) MessageText("  " + Activity.Clean(task, Verbose ? 600 : 160));
@@ -81,7 +82,7 @@ public sealed partial class TerminalRenderer
             else
             {
                 MessageText("  Assigned files:", "dim");
-                foreach (var path in paths.EnumerateArray().Take(Verbose ? 20 : 4)) MessageText("    " + Activity.Clean(path.GetString() ?? "", 200));
+                foreach (var path in paths.EnumerateArray().Take(Verbose ? 20 : 4)) MessageText("    " + Activity.Clean(path.GetString() ?? "", 200), "activity");
                 var omitted = paths.GetArrayLength() - (Verbose ? 20 : 4);
                 if (omitted > 0) MessageText($"    +{omitted} more assigned paths", "dim");
             }

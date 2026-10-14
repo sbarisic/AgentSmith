@@ -6,10 +6,14 @@ public sealed class WorkerPolicy
     // Keep the legacy total limit; default local admission to one to avoid contention.
     public int MaxConcurrent { get; set; } = 2;
     public int MaxLocalConcurrent { get; set; } = 1;
+    public int MaxRequests { get; set; } = 100;
+    public int MaxMinutes { get; set; } = 30;
     public void Validate()
     {
         if (MaxConcurrent is < 1 or > 16 || MaxLocalConcurrent is < 1 or > 16)
             throw new UserFacingException("Worker limits must each be 1..16. The local limit is also bounded by the total limit.");
+        if (MaxRequests is < 1 or > 10000 || MaxMinutes is < 1 or > 1440)
+            throw new UserFacingException("Worker budget requires 1..10000 requests and 1..1440 minutes.");
     }
 }
 public sealed class ModelConnection
@@ -30,6 +34,7 @@ public sealed class WorkerProfile
 }
 public sealed class WorkerRecord
 {
+    public string[] NavigationSnapshotIds { get; set; } = [];
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public int Number { get; set; }
     public string ParentId { get; set; } = "";

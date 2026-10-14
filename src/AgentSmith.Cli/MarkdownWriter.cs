@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace AgentSmith.Cli;
 
 /// <summary>A bounded, line-streaming Markdown subset for terminals. Never emits model-supplied escapes.</summary>
-public sealed class MarkdownWriter(TextWriter output, bool color, int width, bool enabled = true, string guideStyle = "dim")
+public sealed partial class MarkdownWriter(TextWriter output, bool color, int width, bool enabled = true, string guideStyle = "dim")
 {
     private readonly StringBuilder pending = new();
     private char fence;
@@ -37,12 +37,20 @@ public sealed class MarkdownWriter(TextWriter output, bool color, int width, boo
     {
         if (pending.Length > 0) RenderLine(pending.ToString(), longLine);
         pending.Clear(); longLine = false;
+        FlushTable();
         if (fence != '\0') WriteLine([new("└─", "dim", 2)], "  │ ", "  │ ", false);
         fence = '\0'; fenceLength = 0; diffFence = false;
         output.Flush();
     }
 
     private void RenderLine(string source, bool literal)
+    {
+        if (enabled && !literal && fence == '\0' && TryRenderTableLine(source)) return;
+        FlushTable();
+        RenderMarkdownLine(source, literal);
+    }
+
+    private void RenderMarkdownLine(string source, bool literal)
     {
         var line = source.Replace("\t", "    ");
         if (!enabled) { WriteLine(Cells(line, ""), "  │ ", "  │ ", false); return; }

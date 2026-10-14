@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace AgentSmith.Storage;
 
-public sealed partial class SessionStore : ISessionStore, IWorkerStore, IMemoryStore, ISteeringStore
+public sealed partial class SessionStore : ISessionStore, IWorkerStore, IMemoryStore, ISteeringStore, IPlanCatalog
 {
     private readonly string root;
     public string DataDirectory => root;
@@ -190,6 +190,12 @@ public sealed partial class SessionStore : ISessionStore, IWorkerStore, IMemoryS
     }
     private static void SaveInTransaction(Session session, AgentEvent agentEvent, SqliteConnection db, SqliteTransaction tx)
     {
+        // Additive payload metadata: old plans retain their identity and unknown creation time.
+        foreach (var plan in session.Plans.Where(p => string.IsNullOrEmpty(p.OriginWorkspace) && Path.IsPathFullyQualified(session.Workspace)))
+        {
+            plan.OriginWorkspace = PlanDirectory.Normalize(session.Workspace);
+            plan.OriginInferred = true;
+        }
         void Execute(string sql, params (string, object?)[] args)
         {
             using var command = db.CreateCommand();

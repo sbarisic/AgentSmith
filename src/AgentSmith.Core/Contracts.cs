@@ -16,12 +16,15 @@ public enum WorkflowMode { Work, Plan, Document, Review }
 public enum ToolEffect { ReadOnly, SessionState, Workspace, Process, MemoryState, Network }
 public sealed class Session
 {
+    public List<NavigationSnapshot> NavigationSnapshots { get; set; } = [];
+    public string[] NavigationSnapshotIds { get; set; } = [];
     public Dictionary<int, WorkflowMode> MessageWorkflows { get; set; } = [];
     public List<WorkflowReport> Reports { get; set; } = [];
     public string? ActiveReportId { get; set; }
     public ExecutionPolicy Execution { get; set; } = new();
     public ContextPolicy ContextPolicy { get; set; } = new();
     public string Delegation { get; set; } = "proactive";
+    public string WebSearch { get; set; } = "native";
     public double ModelWaitMilliseconds { get; set; }
     public List<AttachmentRecord> Attachments { get; set; } = [];
     public List<ArtifactGrant> ArtifactGrants { get; set; } = [];
@@ -151,7 +154,7 @@ public sealed class ProcessRecord
     public bool Truncated { get; set; }
 }
 public sealed record ToolOutput(string Content, Question? Question = null, bool PlanReview = false, bool FinishRun = false, IReadOnlyList<string>? ImageAttachmentIds = null);
-public sealed record ModelRequest(string Model, string Instructions, IReadOnlyList<JsonObject> Input, IReadOnlyList<ToolDefinition> Tools, int? MaxOutputTokens = null);
+public sealed record ModelRequest(string Model, string Instructions, IReadOnlyList<JsonObject> Input, IReadOnlyList<ToolDefinition> Tools, int? MaxOutputTokens = null, bool NativeWebSearch = false);
 public sealed record ModelEvent(string Type, string? Text = null, IReadOnlyList<JsonObject>? Output = null, string? Usage = null);
 public sealed record ContextResult(ModelRequest Request, string Manifest);
 

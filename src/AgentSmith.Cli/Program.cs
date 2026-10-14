@@ -12,6 +12,7 @@ public static partial class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args is ["--internal-csharp-load", var request, var output]) return await NavigationHelper.Run(request, output);
         Console.OutputEncoding = new System.Text.UTF8Encoding(false);
         var dataOption = new Option<string?>("--data-dir") { Description = "Override the local state directory.", Recursive = true };
         var jsonOption = new Option<bool>("--json") { Description = "Write newline-delimited JSON events.", Recursive = true };
@@ -75,6 +76,9 @@ public static partial class Program
             var maxWorkers = new Option<int>("--max-workers") { DefaultValueFactory = _ => 6, Description = "Maximum active workers, excluding parent (1..16; default 6)." };
             var maxLocalWorkers = new Option<int>("--max-local-workers") { DefaultValueFactory = _ => 1, Description = "Maximum local workers within the total limit (1..16; default 1)." };
             command.Options.Add(maxWorkers); command.Options.Add(maxLocalWorkers);
+            var workerRequests = new Option<int>("--worker-max-requests") { DefaultValueFactory = _ => 100, Description = "Model requests per worker, including compaction (1..10000)." };
+            var workerMinutes = new Option<int>("--worker-max-minutes") { DefaultValueFactory = _ => 30, Description = "Minutes per worker, bounded by the parent deadline (1..1440)." };
+            command.Options.Add(workerRequests); command.Options.Add(workerMinutes);
             var contextBudget = new Option<string>("--context-budget") { DefaultValueFactory = _ => "balanced" };
             var maxSteps = new Option<int>("--max-steps") { DefaultValueFactory = _ => 150 };
             var maxMinutes = new Option<int>("--max-minutes") { DefaultValueFactory = _ => 60 };
@@ -97,7 +101,7 @@ public static partial class Program
                 var session = new Session { Workspace = path, Model = selected, Mode = p.GetValue(mode), Workflow = CliApp.ParseWorkflow(p.GetValue(workflow), p.GetValue(plan)),
                     AccountId = selection.AccountId, Connection = selection.Connection() };
                 session.EnabledWorkers = app.ResolveWorkers(p.GetValue(workerNames));
-                session.WorkerPolicy = new() { MaxConcurrent = p.GetValue(maxWorkers), MaxLocalConcurrent = p.GetValue(maxLocalWorkers) }; session.WorkerPolicy.Validate();
+                session.WorkerPolicy = new() { MaxConcurrent = p.GetValue(maxWorkers), MaxLocalConcurrent = p.GetValue(maxLocalWorkers), MaxRequests = p.GetValue(workerRequests), MaxMinutes = p.GetValue(workerMinutes) }; session.WorkerPolicy.Validate();
                 session.Execution = new() { MaxRequests = p.GetValue(maxSteps), MaxMinutes = p.GetValue(maxMinutes) }; session.Execution.Validate();
                 session.ContextPolicy.Budget = p.GetValue(contextBudget)!; session.ContextPolicy.Validate();
                 session.Delegation = p.GetValue(delegation)!;
@@ -248,9 +252,12 @@ internal sealed partial class CliApp : IDisposable
         if (addressedDecisions.TryDequeue(out var decision)) return decision;
         ct.ThrowIfCancellationRequested();
         attention.WaitFor(attentionKey);
-        return await input.ReadLineAsync(ct);
+        var editing = input.EditingEnabled;
+        input.EditingEnabled = attentionKey == "composer" && !pasteActive;
+        try { return await input.ReadLineAsync(ct); }
+        finally { input.EditingEnabled = editing; }
     }
-    public async Task<Run> Run(Session session, string? prompt, string? answer, CancellationToken ct)
+    public async Task<Run> Run(Session session, string? prompt, string? answer, CancellationToken ct, bool recordHistory = true, bool literal = false)
     {
         if (prompt is null && answer is null && session.Runs.LastOrDefault() is { State: RunState.Paused } paused
             && new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.RequiresExplicitRetry(session))
@@ -260,11 +267,29 @@ internal sealed partial class CliApp : IDisposable
         }
         if (Store.Queue(session.Id).HoldReason is "AwaitingUser" or "AwaitingPlan") Store.HoldQueue(session.Id, null);
         var rich = nextPrompt; nextPrompt = null;
-        var run = await Pump(session, token =>
+        input.SetHistory(session);
+        var historyPrompt = prompt is null || answer is not null ? null : rich ?? UserPrompt.Text(prompt);
+        var accepted = false;
+        Run run;
+        try
         {
-            var client = ModelClient(session);
-            return new AgentRunner(Store, client, Agents) { MaxContextCharacters = ContextLimit }.RunAsync(session, prompt, answer, e => Write(e.Type, e.Payload, e.ConversationId, e.RunId), token, rich);
-        }, ct);
+            run = await Pump(session, token =>
+            {
+                var client = ModelClient(session);
+                return new AgentRunner(Store, client, Agents) { MaxContextCharacters = ContextLimit }.RunAsync(session, prompt, answer, e =>
+                {
+                    if (e.Type == "run.started" && !accepted && historyPrompt is not null)
+                    { accepted = true; if (recordHistory) input.AcceptPrompt(historyPrompt, literal); }
+                    Write(e.Type, e.Payload, e.ConversationId, e.RunId);
+                }, token, rich);
+            }, ct);
+        }
+        catch
+        {
+            if (!accepted && recordHistory && historyPrompt is not null)
+            { if (rich is not null || literal) input.RestorePrompt(historyPrompt); else input.Restore(prompt!); }
+            throw;
+        }
         Store.SettleQueue(session.Id, run);
         if (run.State != RunState.Completed)
         {
@@ -313,6 +338,7 @@ internal sealed partial class CliApp : IDisposable
         while (true)
         {
             if (exitRequested) return 0;
+            input.SetContext(session);
             var workflowPrompt = false;
             if (Planning.Active(session)?.PendingReview is not null)
             {
@@ -330,7 +356,7 @@ internal sealed partial class CliApp : IDisposable
             }
             if (queuedPrompt is not null) { prompt = queuedPrompt; queuedPrompt = null; workflowPrompt = true; }
             var claimed = false;
-            if (prompt is null && interactive && Store.ClaimQueued(session) is { } queuedRun)
+            if (prompt is null && interactive && !pasteActive && Store.ClaimQueued(session) is { } queuedRun)
             {
                 claimed = true;
                 Write("prompt.dispatched", new { runId = queuedRun.Id, message = "Starting queued prompt · " + queuedRun.Id });
@@ -341,6 +367,8 @@ internal sealed partial class CliApp : IDisposable
                 prompt = await ReadInput(ct);
             }
             if (prompt is null && !claimed) { Store.HoldQueue(session.Id, "End of input"); return 0; }
+            if (pasteActive && !claimed)
+            { await BusyInput(session, prompt!); prompt = null; continue; }
             if (!input.Interactive && !claimed && input.HasBlocks && prompt?.TrimStart().StartsWith('/') != true)
             { nextPrompt = input.Compose(prompt); input.ClearDraft(); }
             var literalPaste = input.SubmittedLiteral;
@@ -354,17 +382,17 @@ internal sealed partial class CliApp : IDisposable
                 Write("paste", new { message = "Enter lines; finish with /end on its own line. Slash-prefixed text here is sent literally." });
                 var lines = new List<string>();
                 string? line;
-                while ((line = await ReadInput(ct)) is not null && line != "/end") lines.Add(line);
+                while ((line = await ReadInput(ct, "paste")) is not null && line != "/end") lines.Add(line);
                 if (line is null) return 0; // EOF does not submit an unfinished paste.
-                prompt = string.Join('\n', lines); nextPrompt = UserPrompt.Text(prompt); input.ClearSubmission();
+                prompt = string.Join('\n', lines); nextPrompt = UserPrompt.Text(prompt); literalPaste = true; input.ClearSubmission();
             }
             if (!claimed && string.IsNullOrWhiteSpace(prompt)) { prompt = null; continue; }
-            var continuing = !claimed && prompt == "continue" && session.Runs.LastOrDefault()?.State == RunState.Paused;
+            var continuing = !claimed && !literalPaste && prompt == "continue" && session.Runs.LastOrDefault()?.State == RunState.Paused;
             if (continuing && !literalPaste) { claimed = true; prompt = null; nextPrompt = null; }
             if (!claimed && !workflowPrompt && Store.Queue(session.Id).Items.Any(i => i.State == "Pending"))
-            { QueueMessage(session, prompt!, nextPrompt); nextPrompt = null; prompt = null; continue; }
+            { QueueMessage(session, prompt!, nextPrompt, literalPaste); nextPrompt = null; prompt = null; continue; }
             if (!claimed && Unfinished(session))
-            { if (nextPrompt is not null) input.RestorePrompt(nextPrompt); nextPrompt = null; Write("error", new { message = "Resume or explicitly abandon unfinished work before a new prompt. Use /recover." }); prompt = null; continue; }
+            { if (nextPrompt is not null) input.RestorePrompt(nextPrompt); else input.Restore(prompt!); nextPrompt = null; Write("error", new { message = "Resume or explicitly abandon unfinished work before a new prompt. Use /recover." }); prompt = null; continue; }
             if (!continuing)
             {
                 var submittedContent = claimed ? session.History.Last(i => i["role"]?.ToString() == "user")["content"]
@@ -372,7 +400,7 @@ internal sealed partial class CliApp : IDisposable
                 Write("user.submitted", new { workflow = session.Workflow.ToString(), text = prompt,
                     content = PromptPresentation.Content(submittedContent, Store.Attachments(session.Id)) });
             }
-            var run = await Run(session, prompt, null, ct); prompt = null;
+            var run = await Run(session, prompt, null, ct, recordHistory: !claimed && !workflowPrompt, literal: literalPaste); prompt = null;
             if (run.State == RunState.AwaitingUser)
             {
                 if (!interactive || !await Answer(session, ct)) return 3;
@@ -396,15 +424,19 @@ internal sealed partial class CliApp : IDisposable
         void Error(string message, FailureDetail? failure = null) => Write("error", new { message = failure?.Sanitized().Reason ?? message, failure = failure?.Sanitized() });
         try { if (await ModelCommand(name, args, session) || await WorkflowCommand(name, args, session) || await ContinuityCommand(name, args, session)) return CommandAction.Handled; }
         catch (UserFacingException ex) { Error(ex.Message, ex.Detail); return CommandAction.Handled; }
-        if (name is not ("/work" or "/help" or "/usage" or "/status" or "/context" or "/paste" or "/exit" or "/markdown" or "/tools" or "/mode" or "/changes" or "/undo" or "/processes" or "/stop" or "/recover" or "/plan" or "/tasks" or "/artifacts" or "/artifact"))
+        if (name is not ("/work" or "/help" or "/usage" or "/status" or "/context" or "/paste" or "/exit" or "/markdown" or "/tools" or "/mode" or "/changes" or "/undo" or "/processes" or "/stop" or "/recover" or "/plan" or "/plans" or "/tasks" or "/artifacts" or "/artifact"))
         { Error($"Unknown command: {TerminalRenderer.Safe(parts[0])[..Math.Min(80, TerminalRenderer.Safe(parts[0]).Length)]}. Type /help for available commands. Use /paste for literal slash-prefixed text."); return CommandAction.Handled; }
-        if (name is not ("/help" or "/markdown" or "/mode" or "/undo" or "/stop" or "/recover" or "/plan" or "/artifact") && args.Length > 0)
+        if (name is not ("/help" or "/markdown" or "/mode" or "/undo" or "/stop" or "/recover" or "/plan" or "/plans" or "/artifact") && args.Length > 0)
         { Error($"{name} does not accept arguments. Type /help for usage."); return CommandAction.Handled; }
         try { switch (name)
         {
             case "/work": await WorkflowModeCommand(session, "work"); break;
             case "/usage": Write("usage", Store.Usage(session.Id)); break;
             case "/plan": await PlanCommand(session, args); break;
+            case "/plans":
+                var planPage = 1;
+                if (args.Length > 0 && !int.TryParse(args, out planPage)) throw new UserFacingException("Usage: /plans [page]. Page starts at 1.");
+                Write("plan.list", Store.ListPlans(session.Workspace, planPage)); break;
             case "/tasks": Write("plan.display", new { plan = Planning.Active(session) }); break;
             case "/artifacts": Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), "artifact_list", new System.Text.Json.Nodes.JsonObject()).Content }); break;
             case "/artifact":
@@ -467,7 +499,7 @@ internal sealed partial class CliApp : IDisposable
             case "/status":
             case "/context":
                 var currentContext = activeRun is null ? new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.Build(session).Manifest : session.Runs.LastOrDefault()?.ContextManifest;
-                Write("status", new { pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending"), session.Id, session.Execution, session.Delegation, session.WorkerPolicy, remainingMinutes = Math.Max(0, session.Execution.MaxMinutes - (session.Runs.LastOrDefault() is { } currentRun ? (currentRun.State == RunState.Running && currentRun.BatchStartedAt is { } batchStart ? (DateTimeOffset.UtcNow - batchStart).TotalMinutes : currentRun.BatchExecutionMilliseconds / 60000) : 0)), remainingRequests = Math.Max(0, session.Execution.MaxRequests - (session.Runs.LastOrDefault()?.BatchRequests ?? 0)), provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), report = WorkflowPolicy.Active(session), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), reason = session.Runs.LastOrDefault()?.Reason, completionRequirement = session.Runs.LastOrDefault()?.CompletionRequirement, context = currentContext, snapshot = ContextBuilder.Active(session) }); break;
+                Write("status", new { webSearch = session.WebSearch == "native" && session.Connection.Provider != ModelProvider.ChatGpt ? "basic (local provider)" : session.WebSearch, pendingSteering = Store.Steering(session.Id).Count(i => i.State == "Pending"), session.Id, session.Execution, session.Delegation, session.WorkerPolicy, remainingMinutes = Math.Max(0, session.Execution.MaxMinutes - (session.Runs.LastOrDefault() is { } currentRun ? (currentRun.State == RunState.Running && currentRun.BatchStartedAt is { } batchStart ? (DateTimeOffset.UtcNow - batchStart).TotalMinutes : currentRun.BatchExecutionMilliseconds / 60000) : 0)), remainingRequests = Math.Max(0, session.Execution.MaxRequests - (session.Runs.LastOrDefault()?.BatchRequests ?? 0)), provider = session.Connection.Provider.ToString(), session.Model, session.Connection.LoadedContextTokens, workers = Store.Workers(session.Id).Select(WorkerCoordinator.Summary), workflow = session.Workflow.ToString(), report = WorkflowPolicy.Active(session), mode = session.Mode.ToString(), state = session.Runs.LastOrDefault()?.State.ToString(), reason = session.Runs.LastOrDefault()?.Reason, completionRequirement = session.Runs.LastOrDefault()?.CompletionRequirement, context = currentContext, snapshot = ContextBuilder.Active(session) }); break;
             case "/markdown":
                 if (args.Length == 0) Write("display", new { message = $"Markdown display is {(terminal.MarkdownEnabled ? "on" : "off")}. Use /markdown on or /markdown off." });
                 else if (args.Equals("on", StringComparison.OrdinalIgnoreCase) || args.Equals("off", StringComparison.OrdinalIgnoreCase))

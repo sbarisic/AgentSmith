@@ -17,6 +17,29 @@ public sealed class ModeCommandTests : IDisposable
         app.Store.Save(session, new("created", session.Id, null, new { })); return session;
     }
     [Fact]
+    public async Task WebSearchSelectionPersistsWithoutStartingInference()
+    {
+        using var app = new CliApp(root, true, true); var session = Create(app);
+        Assert.Equal("native", session.WebSearch);
+        foreach (var policy in new[] { "off", "basic", "native" })
+        {
+            await app.HandleCommand("/web-search " + policy, session);
+            Assert.Equal(policy, app.Store.Get(session.Id)!.WebSearch);
+        }
+        await app.HandleCommand("/web-search automatic", session);
+        Assert.Equal("native", app.Store.Get(session.Id)!.WebSearch);
+        Assert.Empty(session.Runs); Assert.Empty(session.History);
+    }
+    [Fact]
+    public void HostedSearchProgressIsReadable()
+    {
+        using var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
+        renderer.Render("web.search.progress", new { message = "Searching web…" });
+        renderer.Render("web.search.progress", new { message = "Web search completed" });
+        Assert.Contains("› Searching web", output.ToString());
+        Assert.Contains("› Web search completed", output.ToString());
+    }
+    [Fact]
     public async Task WorkerLimitsAreLocalValidatedAndPersistent()
     {
         using var app = new CliApp(root, true, true); var session = Create(app);
@@ -25,6 +48,19 @@ public sealed class ModeCommandTests : IDisposable
         foreach (var input in new[] { "/worker-limits", "/worker-limits 0 2", "/worker-limits 17 2", "/worker-limits 6", "/worker-limits many 2" })
             Assert.Equal(CliApp.CommandAction.Handled, await app.HandleCommand(input, session));
         Assert.Equal(8, app.Store.Get(session.Id)!.WorkerPolicy.MaxConcurrent);
+        Assert.Empty(session.Runs); Assert.Empty(session.History);
+    }
+    [Fact]
+    public async Task WorkerBudgetPersistsAndConcurrencyChangesPreserveIt()
+    {
+        using var app = new CliApp(root, true, true); var session = Create(app);
+        await app.HandleCommand("/worker-budget 200 45", session);
+        await app.HandleCommand("/worker-limits 8 1", session);
+        foreach (var input in new[] { "/worker-budget", "/worker-budget 0 30", "/worker-budget 10001 30", "/worker-budget 20 0", "/worker-budget 20 1441", "/worker-budget many 30", "/worker-budget 20" })
+            Assert.Equal(CliApp.CommandAction.Handled, await app.HandleCommand(input, session));
+        var saved = app.Store.Get(session.Id)!.WorkerPolicy;
+        Assert.Equal(200, saved.MaxRequests); Assert.Equal(45, saved.MaxMinutes);
+        Assert.Equal(8, saved.MaxConcurrent); Assert.Equal(1, saved.MaxLocalConcurrent);
         Assert.Empty(session.Runs); Assert.Empty(session.History);
     }
     [Theory]

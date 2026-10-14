@@ -42,6 +42,10 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         { workflow = Text(data, "workflow"); guideStyle = TerminalTheme.Guide(workflow); }
         switch (type)
         {
+            case "web.search.progress":
+                runningStatus = Text(data, "message") == "Web search completed" ? "Thinking" : "Searching web";
+                MessageText("› " + Text(data, "message"), "info"); break;
+            case "web.search.policy": MessageText(Text(data, "message"), "info"); break;
             case "agent.collected":
                 MessageText("› Collected Agent #" + Text(data, "number") + " · " + Text(data, "state"));
                 MessageText("  Saved result: /artifact " + Text(data, "artifactId"), "dim"); break;
@@ -96,12 +100,14 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 WorkerStatus(data); break;
             case "plan.display":
                 Plan(data.GetProperty("plan")); break;
+            case "plan.list": DirectoryPlanList(data); break;
             case "plan.review": Plan(data); break;
             case "plan.review.pending": MessageText(Text(data, "text"), "accent"); MessageText(Text(data, "responses"), "dim"); break;
             case "plan.decision": MessageText("Plan decision: " + Text(data, "decision") + " " + Text(data, "mode"), "accent"); break;
             case "plan.updated":
                 PlanProgress(data); break;
             case "artifact.result": if (TryJson(Text(data, "content"), out var artifact)) Artifact(artifact); break;
+            case "diagnostics.result": DiagnosticPage(data); break;
             case "tools":
                 Title("Registered tools · serial execution");
                 foreach (var tool in data.EnumerateArray())
@@ -144,14 +150,18 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                     if (ToolFailure(result, data)) { }
                     else if (RoutineResult(data, result)) { }
                     else if (Text(data, "name") is "agent_spawn" or "agent_wait" or "agent_result" or "agent_cancel" or "agent_message") WorkerResult(Text(data, "name"), result);
-                    else if (Text(result, "kind") is "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
+                    else if (Text(result, "kind") is "audio-analysis" or "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
                     else if (Text(result, "kind") is "web-search" or "web-page") WebResult(result);
                     else if (Text(data, "name") is "workflow_read" or "workflow_update" or "workflow_finish"
                         || result.TryGetProperty("targetKind", out _) && result.TryGetProperty("current", out _)) WorkflowResult(result);
+                    else if (result.TryGetProperty("plans", out _)) DirectoryPlanList(result);
                     else if (result.TryGetProperty("current", out _))
                     { if (Text(data, "name") != "plan_update" || Verbose) Plan(result); }
+                    else if (Text(result, "kind") == "diagnostics") DiagnosticPage(result);
+                    else if (Text(result, "kind") == "navigation") NavigationResult(result);
                     else if (result.TryGetProperty("verificationId", out _) && result.TryGetProperty("kind", out _)) Verification(result);
                     else if (result.TryGetProperty("artifactId", out _) || result.TryGetProperty("artifacts", out _)) Artifact(result);
+                    else if (Text(data, "name") == "git_status") GitStatus(result);
                     else if (result.TryGetProperty("checkpointId", out _) || result.TryGetProperty("processId", out _) || result.TryGetProperty("exitCode", out _)) Operation(result, Text(data, "name") == "git_diff");
                     else if (result.TryGetProperty("error", out var error)) MessageText("  " + error.GetString(), "status-error");
                     else if (result.TryGetProperty("path", out var path))
@@ -160,7 +170,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                     else if (result.TryGetProperty("matches", out var matches)) MessageText($"  {matches.GetArrayLength()} matches" + (Flag(result, "limitReached") ? " · limit reached" : ""), "dim");
                 }
                 activeActivities.Remove(Text(data, "id"));
-                if (Verbose && CallTiming(data).Length > 0) MessageText("Call completed · " + CallTiming(data), "dim");
+                if (Verbose && CallTiming(data).Length > 0) MessageText("Call completed · " + CallTiming(data), "activity");
                 break;
             case "tool.rejected":
                 runningStatus = "Thinking"; activeActivities.Remove(Text(data, "id"));
@@ -248,6 +258,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 }
                 break;
             case "status":
+                if (Text(data, "webSearch").Length > 0) Field("Web search", Text(data, "webSearch"));
                 if (data.TryGetProperty("pendingSteering", out var pendingSteering)) Field("Steering pending", pendingSteering.ToString());
                 if (data.TryGetProperty("workerPolicy", out var workerPolicy)) Field("Worker limits", Text(workerPolicy, "maxConcurrent") + " total / " + Text(workerPolicy, "maxLocalConcurrent") + " local · parent excluded");
                 if (data.TryGetProperty("execution", out var limits)) Field("Batch limits", Text(limits, "maxRequests") + " requests / " + Text(limits, "maxMinutes") + " minutes · " + Text(data, "remainingRequests") + " requests left · " + Text(data, "remainingMinutes") + " minutes left");
@@ -448,6 +459,10 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         if (!data.TryGetProperty("current", out var current) || current.ValueKind != JsonValueKind.Object)
         { MessageText("No saved plan revision.", "dim"); return; }
         MessageText("Plan " + Text(data, "id") + " · revision " + Text(current, "revision") + " · " + Text(data, "state"), "accent");
+        if (Text(data, "originWorkspace").Length > 0)
+            MessageText("Created in: " + Text(data, "originWorkspace") + (Flag(data, "originInferred") ? " (inferred from saved conversation)" : ""), "dim");
+        if (Text(data, "sourceConversationId").Length > 0) MessageText("Source conversation: " + Text(data, "sourceConversationId"), "dim");
+        if (Text(data, "notice").Length > 0) MessageText(Text(data, "notice"), "dim");
         MessageText(Text(current, "goal"));
         foreach (var key in new[] { "deliverables", "constraints", "questions" })
             if (current.TryGetProperty(key, out var list) && list.GetArrayLength() > 0) { MessageText(key + ":", "accent"); foreach (var item in list.EnumerateArray()) MessageText("  - " + item.GetString()); }
@@ -457,6 +472,20 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             MessageText("  Verify: " + Text(step, "verification"), "dim");
             if (Text(step, "note").Length > 0) MessageText("  " + Text(step, "note"));
         }
+    }
+    private void DirectoryPlanList(JsonElement data)
+    {
+        MessageText("Saved directory plans · " + Text(data, "workspace") + " · page " + Text(data, "page"), "accent");
+        var plans = data.GetProperty("plans");
+        if (plans.GetArrayLength() == 0) MessageText("No saved plans on this page.", "dim");
+        foreach (var plan in plans.EnumerateArray())
+        {
+            MessageText(Text(plan, "id") + " · " + Text(plan, "state") + " · revision " + Text(plan, "revision"), "accent");
+            MessageText("  " + Text(plan, "goal"));
+            MessageText("  Conversation: " + Text(plan, "sourceConversationId") + (Flag(plan, "originInferred") ? " · origin inferred" : ""), "dim");
+        }
+        if (Flag(data, "hasMore")) MessageText("Next page: /plans " + (Number(data, "page") + 1), "dim");
+        MessageText("Read: /plan read <id> · Reading does not activate or approve a plan.", "dim");
     }
     private void Artifact(JsonElement data)
     {
@@ -471,10 +500,51 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
     }
     private void Verification(JsonElement data)
     {
-        MessageText(Text(data, "kind") + " · " + Text(data, "state") + " · exit " + Text(data, "exitCode"), "accent");
+        var outcome = Text(data, "state") != "complete" ? Text(data, "state") : Text(data, "exitCode") == "0" ? "succeeded" : "failed";
+        MessageText(Text(data, "kind") + " " + outcome + $" · {Number(data, "errors")} errors · {Number(data, "warnings")} warnings · exit " + Text(data, "exitCode"), outcome == "succeeded" ? "accent" : "warning");
         if (Text(data, "kind") == "test") MessageText($"Tests: {Number(data, "passed")} passed, {Number(data, "failed")} failed, {Number(data, "skipped")} skipped; {Number(data, "total")} total.");
-        if (data.TryGetProperty("items", out var items)) foreach (var item in items.EnumerateArray()) MessageText(Text(item, "code") + " " + Text(item, "file") + " " + Text(item, "name") + " " + Text(item, "outcome") + " " + Text(item, "message"));
-        MessageText("Report artifact: " + Text(data, "summaryArtifactId"), "dim");
+        DiagnosticItems(data);
+        MessageText("Details: /diagnostics " + Text(data, "summaryArtifactId"), "dim");
+        if (Text(data, "reason").Length > 0) MessageText(Text(data, "reason"), "warning");
+    }
+    private void DiagnosticPage(JsonElement data)
+    {
+        MessageText("Diagnostics · " + Text(data, "state") + " · " + Text(data, "totalMatches") + " matching records", "accent");
+        DiagnosticItems(data);
+        if (Text(data, "reason").Length > 0) MessageText(Text(data, "reason"), "warning");
+        if (Text(data, "cursor").Length > 0) MessageText("Next: /diagnostics " + Text(data, "artifactId") + " " + Text(data, "filter") + " " + (Number(data, "page") + 1), "dim");
+    }
+    private void DiagnosticItems(JsonElement data)
+    {
+        if (!data.TryGetProperty("items", out var items)) return;
+        foreach (var item in items.EnumerateArray())
+        {
+            var location = Text(item, "path");
+            if (location.Length > 0) location += ":" + Text(item, "line") + ":" + Text(item, "column");
+            var severityStyle = Text(item, "severity").ToLowerInvariant() switch
+            {
+                "error" or "failed" => "error", "warning" or "skipped" => "warning",
+                "passed" => "success", _ => "activity"
+            };
+            MessageText("  " + string.Join(" · ", new[] { Text(item, "id"), Text(item, "severity"), Text(item, "code"), location, Text(item, "test") }.Where(s => s.Length > 0)), severityStyle);
+            if (Text(item, "message").Length > 0) MessageText("  " + Text(item, "message"));
+            if (Number(item, "occurrences") > 1) MessageText("  Occurrences: " + Number(item, "occurrences"), "dim");
+        }
+    }
+    private void NavigationResult(JsonElement data)
+    {
+        if (data.TryGetProperty("items", out var items))
+        {
+            MessageText("C# navigation · " + Text(data, "total") + " matches", "accent");
+            foreach (var item in items.EnumerateArray())
+            {
+                var label = Text(item, "signature") is { Length: > 0 } signature ? signature : Text(item, "symbol");
+                var location = item.TryGetProperty("location", out var loc) && loc.ValueKind == JsonValueKind.Object ? Text(loc, "path") + ":" + Text(loc, "line") + ":" + Text(loc, "column") : "metadata";
+                MessageText("  " + label + " · " + location, "activity");
+            }
+            MessageText("Retained results: /artifact " + Text(data, "artifactId"), "dim");
+        }
+        else MessageText("C# snapshot · " + Text(data, "state") + " · " + Text(data, "project"), "accent");
         if (Text(data, "reason").Length > 0) MessageText(Text(data, "reason"), "warning");
     }
     private void Stream(string text)

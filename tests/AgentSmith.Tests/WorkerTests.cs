@@ -10,6 +10,32 @@ namespace AgentSmith.Tests;
 
 public sealed class WorkerTests
 {
+    [Theory]
+    [InlineData("native")]
+    [InlineData("basic")]
+    [InlineData("off")]
+    public async Task NewWorkersInheritSearchPolicy(string policy)
+    {
+        using var f = new Fixture(); f.Parent.WebSearch = policy;
+        await f.Spawn([]);
+        var child = f.Store.Get(Assert.Single(f.Store.Workers(f.Parent.Id)).ChildId)!;
+        Assert.Equal(policy, child.WebSearch);
+        Assert.Equal(policy != "off", f.Agents.Available(child).Any(t => t.Name == "web_search"));
+        await f.Agents.StopAllAsync(f.Parent.Id);
+    }
+    [Fact]
+    public async Task SemanticLoadingObeysEditingWorkerBarrierAndWorkersOnlyGetReadTools()
+    {
+        using var f = new Fixture(); await f.Spawn(["C.cs"]);
+        var failure = await Assert.ThrowsAsync<UserFacingException>(() => f.Invoke("csharp_load", new { project = "A.csproj", configuration = "", framework = "" }));
+        Assert.Contains("reservations", failure.Message);
+        var child = f.Store.Get(f.Store.Workers(f.Parent.Id).Single().ChildId)!;
+        Assert.Contains(f.Agents.Available(child), d => d.Name == "csharp_symbols");
+        Assert.Contains(f.Agents.Available(child), d => d.Name == "diagnostics_read");
+        Assert.DoesNotContain(f.Agents.Available(child), d => d.Name == "csharp_load");
+        await Assert.ThrowsAsync<UserFacingException>(() => f.Invoke("csharp_status", new { snapshotId = "unshared" }, child));
+        await f.Agents.StopAllAsync(f.Parent.Id);
+    }
     private sealed class WaitingModel : IModelClient
     {
         public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, [EnumeratorCancellation] CancellationToken ct)
@@ -54,7 +80,9 @@ public sealed class WorkerTests
         var child = f.Store.Get(worker.ChildId)!;
         Assert.DoesNotContain(f.Agents.Available(child), t => t.Name == "agent_message");
         await Assert.ThrowsAsync<UserFacingException>(() => f.Invoke("agent_message", new { agentId = worker.Id, text = "illegal" }, child));
-        var waiting = f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 180000 });
+        await Assert.ThrowsAsync<UserFacingException>(() => f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 360001 }));
+        await Assert.ThrowsAsync<UserFacingException>(() => f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = -1 }));
+        var waiting = f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 360000 });
         f.Store.SendSteering(f.Parent.Id, f.Parent.Id, "Stop waiting and inspect current status.");
         Assert.Contains("steering", (await waiting.WaitAsync(TimeSpan.FromSeconds(5))).Content);
         Assert.True(f.Store.Workers(f.Parent.Id).Single().Active);
@@ -135,15 +163,48 @@ public sealed class WorkerTests
             ? RuntimeTests.Call("create", "file_create", Json.Serialize(new { path = "a.txt", content = "saved edit" }))
             : RuntimeTests.Call("read-" + i, "file_read", Json.Serialize(new { path = "a.txt", startLine = i, lineCount = 1 }))) }).ToArray();
         using var f = new Fixture(_ => new ScriptedModel(responses));
+        f.Parent.WorkerPolicy.MaxRequests = 20;
         await f.Spawn(["a.txt"]);
         var worker = Assert.Single(f.Store.Workers(f.Parent.Id));
-        await f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 180000 });
+        await f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 360000 });
         var saved = Assert.Single(new SessionStore(f.Store.DataDirectory).Workers(f.Parent.Id));
         Assert.Equal("Failed", saved.State);
         Assert.Equal("worker_request_limit", saved.Failure?.Code);
         Assert.Equal(20, saved.RequestsUsed); Assert.Equal(20, saved.RequestLimit);
         Assert.Equal(1, saved.AppliedCheckpointCount);
         Assert.Equal("saved edit", File.ReadAllText(Path.Combine(f.Dir.Path, "a.txt")));
+    }
+
+    [Fact]
+    public async Task WorkerCanCompleteBeyondTwentyRequestsWithPersistedAssignmentBudget()
+    {
+        var responses = Enumerable.Range(0, 25).Select(i => new[] { RuntimeTests.Done(
+            RuntimeTests.Call("read-" + i, "file_read", Json.Serialize(new { path = "a.txt", startLine = i + 1, lineCount = 1 }))) })
+            .Append(new[] { RuntimeTests.Done(Finish()) }).ToArray();
+        using var f = new Fixture(_ => new ScriptedModel(responses));
+        File.WriteAllLines(Path.Combine(f.Dir.Path, "a.txt"), Enumerable.Range(1, 30).Select(i => "Line " + i));
+        await f.Spawn([]);
+        var worker = Assert.Single(f.Store.Workers(f.Parent.Id));
+        // Later parent settings must not alter the independent child snapshot.
+        f.Parent.WorkerPolicy.MaxRequests = 2;
+        f.Parent.WorkerPolicy.MaxMinutes = 1;
+        await f.Invoke("agent_wait", new { agentIds = new[] { worker.Id }, waitMilliseconds = 360000 });
+        var saved = Assert.Single(f.Store.Workers(f.Parent.Id));
+        Assert.Equal("Completed", saved.State);
+        Assert.Equal(26, saved.RequestsUsed); Assert.Equal(100, saved.RequestLimit);
+        var child = f.Store.Get(saved.ChildId)!;
+        Assert.Equal(100, child.Execution.MaxRequests); Assert.Equal(30, child.Execution.MaxMinutes);
+        child.Runs[^1].BatchRequests = 40;
+        Assert.Contains("60 model requests left", f.Agents.SessionInstructions(child));
+    }
+
+    [Fact]
+    public void OlderWorkerPolicyGetsNewDefaultsWithoutChangingConcurrency()
+    {
+        var policy = System.Text.Json.JsonSerializer.Deserialize<WorkerPolicy>("{\"maxConcurrent\":8,\"maxLocalConcurrent\":1}", Json.Options)!;
+        Assert.Equal(8, policy.MaxConcurrent); Assert.Equal(1, policy.MaxLocalConcurrent);
+        Assert.Equal(100, policy.MaxRequests); Assert.Equal(30, policy.MaxMinutes);
+        policy.Validate();
     }
 
     [Fact]

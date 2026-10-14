@@ -7,13 +7,27 @@ namespace AgentSmith.IntegrationTests;
 public sealed class SteeringRenderingTests
 {
     [Fact]
+    public void AudioAnalysisUsesContentBlockAndRetainedArtifact()
+    {
+        using var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
+        var call = new ToolCall { Id = "listen", Name = "audio_listen", Arguments = Json.Serialize(new { path = "tone.wav", question = "What sound?", startSeconds = 2, durationSeconds = 5 }) };
+        renderer.Render("tool.started", new { id = call.Id, name = call.Name, activity = Activity.Describe(new(), call) });
+        renderer.Render("tool.completed", new { id = call.Id, name = call.Name, content = Json.Serialize(new {
+            kind = "audio-analysis", path = "tone.wav", model = "audio-model", analysis = "Tone\u001b[31m", startSeconds = 2,
+            durationSeconds = 5, partial = true, truncated = false, artifactId = "audio-artifact" }) });
+        var text = output.ToString();
+        Assert.Contains("Listen to audio", text); Assert.Contains("Audio analysis", text);
+        Assert.Contains("Selected clip only", text); Assert.Contains("/artifact audio-artifact", text);
+        Assert.DoesNotContain('\u001b', text);
+    }
+    [Fact]
     public void WorkerActionsUseAliasesAndHumanLabels()
     {
         var session = new Session();
         var workers = new[] { new WorkerRecord { Id = "opaque-worker-id", Number = 11 } };
-        var wait = Activity.Describe(session, new() { Name = "agent_wait", Arguments = Json.Serialize(new { agentIds = new[] { workers[0].Id }, waitMilliseconds = 180000 }) }, workers);
+        var wait = Activity.Describe(session, new() { Name = "agent_wait", Arguments = Json.Serialize(new { agentIds = new[] { workers[0].Id }, waitMilliseconds = 360000 }) }, workers);
         var message = Activity.Describe(session, new() { Name = "agent_message", Arguments = Json.Serialize(new { agentId = workers[0].Id, text = "Only fix\n the browser host." }) }, workers);
-        Assert.Equal("Wait for", wait.Action); Assert.Equal("Agent #11", wait.Target); Assert.Equal("up to 3m", wait.Options);
+        Assert.Equal("Wait for", wait.Action); Assert.Equal("Agent #11", wait.Target); Assert.Equal("up to 6m", wait.Options);
         Assert.Equal("Message", message.Action); Assert.Equal("Agent #11", message.Target); Assert.Equal("Only fix the browser host.", message.Options);
         using var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
         renderer.Render("agent.started", new { agentId = workers[0].Id, number = 11, profile = "bonsai-edit", task = "Fix the browser host", writePaths = new[] { "src/Host.cs" } });

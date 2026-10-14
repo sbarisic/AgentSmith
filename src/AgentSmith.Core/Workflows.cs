@@ -11,6 +11,7 @@ public static class WorkflowPolicy
         if (Planning.Active(s) is { State: "Implementing" } plan && plan.Approvals.LastOrDefault() is { } approval)
             ceiling = (PermissionMode)Math.Min((int)ceiling, (int)approval.Mode);
         if (tool.Capability > ceiling) return false;
+        if (tool.Name == "csharp_load" && s.ParentConversationId is not null) return false;
         if (tool.Name.StartsWith("workflow_", StringComparison.Ordinal)) return s.ParentConversationId is null && IsTask(s.Workflow);
         if (IsTask(s.Workflow) && tool.Name is "plan_update" or "plan_submit") return false;
         return s.Workflow is not (WorkflowMode.Plan or WorkflowMode.Review)

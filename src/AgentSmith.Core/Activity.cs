@@ -34,15 +34,23 @@ public static partial class Activity
         var target = S("path"); var options = "";
         var action = call.Name switch
         {
-            "image_read" => "View image", "workspace_map" => "Map workspace", "http_request" => "HTTP", "web_search" => "Search web", "web_read" => "Read web", "file_read" => "Read", "workspace_list" => "List", "text_search" => "Search", "file_create" => "Create",
+            "csharp_symbols" => "Find C# symbols", "csharp_load" => "Load C# project", "csharp_status" => "Inspect C# snapshot", "csharp_query" => "Navigate C#", "diagnostics_read" => "Read diagnostics",
+            "audio_listen" => "Listen to audio", "image_read" => "View image", "workspace_map" => "Map workspace", "http_request" => "HTTP", "web_search" => "Search web", "web_read" => "Read web", "file_read" => "Read", "workspace_list" => "List", "text_search" => "Search", "file_create" => "Create",
             "file_apply_patch" => "Edit", "file_move" => "Move", "file_delete" => "Delete", "process_start" => "Run",
             "process_poll" => "Poll", "process_wait" => "Wait", "process_input" => "Input", "process_stop" => "Stop", "dotnet_build" => "Build",
             "dotnet_test" => "Test", "user_ask" => "Ask", "plan_update" => "Update plan",
+            "plan_list" => "List directory plans", "plan_fetch" => "Read saved plan", "plan_read" => "Read active plan",
             "agent_spawn" => "Spawn", "agent_wait" => "Wait for", "agent_result" => "Collect",
             "agent_cancel" => "Cancel", "agent_message" => "Message", _ => call.Name.Replace('_', ' ')
         };
         switch (call.Name)
         {
+            case "audio_listen": options = S("startSeconds") + "s · " + (S("durationSeconds") == "0" ? "default range" : S("durationSeconds") + "s"); break;
+            case "csharp_symbols": options = S("query"); break;
+            case "csharp_load": target = session.NavigationSnapshots.FirstOrDefault(s => s.ProcessId == call.Prepared?.OperationId)?.Project ?? S("project"); break;
+            case "csharp_status": target = S("snapshotId"); break;
+            case "csharp_query": options = S("operation") + " · " + S("line") + ":" + S("column"); break;
+            case "diagnostics_read": target = S("artifactId"); options = S("filter"); break;
             case "image_read":
                 if (Uri.TryCreate(target, UriKind.Absolute, out var imageUrl) && imageUrl.Scheme is "http" or "https")
                     target = imageUrl.GetLeftPart(UriPartial.Path);
@@ -52,6 +60,8 @@ public static partial class Activity
             case "web_search": target = S("query"); break;
             case "web_read": target = S("url"); break;
             case "memory_search": target = S("query"); break;
+            case "plan_list": options = "page " + S("page"); break;
+            case "plan_fetch": target = S("planId"); break;
             case "memory_save": target = S("title"); break;
             case "memory_read": case "memory_update": target = S("id"); break;
             case "agent_spawn": target = S("profile"); options = S("task"); break;
@@ -61,7 +71,7 @@ public static partial class Activity
                 target = a["agentIds"] is JsonArray ids ? string.Join(", ", ids.Select(id => AgentLabel(id?.ToString() ?? ""))) : "workers";
                 if (int.TryParse(S("waitMilliseconds"), out var wait))
                 {
-                    var seconds = Math.Clamp(wait, 0, 180000) / 1000;
+                    var seconds = Math.Clamp(wait, 0, 360000) / 1000;
                     options = "up to " + (seconds >= 60 ? $"{seconds / 60}m" + (seconds % 60 > 0 ? $" {seconds % 60}s" : "") : $"{seconds}s");
                 }
                 break;
