@@ -57,19 +57,45 @@ public sealed class ChatGptModelClient(HttpClient http, Func<CancellationToken, 
     }
     public async IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Post, OAuthProtocol.Resource + "/responses");
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await accessToken(cancellationToken));
-        message.Content = new StringContent(BuildRequest(request).ToJsonString(), Encoding.UTF8, "application/json");
-        using var response = await http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        var payload = BuildRequest(request).ToJsonString();
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var advice = request.NativeWebSearch && (int)response.StatusCode is 400 or 403 or 422
-                ? " This request included native web search, whose availability depends on model/account policy. Use /web-search basic or /web-search off while idle if search is unavailable. No fallback was attempted."
-                : " Check account access and usage limits.";
-            throw new UserFacingException($"ChatGPT inference failed (HTTP {(int)response.StatusCode})." + advice);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var message = new HttpRequestMessage(HttpMethod.Post, OAuthProtocol.Resource + "/responses");
+            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await accessToken(cancellationToken));
+            message.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            using var response = await http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var status = (int)response.StatusCode;
+                var transient = status is 500 or 502 or 503 or 504;
+                var retryAfter = response.Headers.RetryAfter;
+                var delay = retryAfter?.Delta ?? (retryAfter?.Date is { } date
+                    ? date - DateTimeOffset.UtcNow : TimeSpan.FromSeconds(attempt));
+                if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+                if (transient && attempt < maxAttempts && delay <= TimeSpan.FromSeconds(30))
+                {
+                    // Retry only rejected HTTP requests, never a partial stream or an entire agent run.
+                    // Release the connection before waiting; each attempt owns a fresh request body.
+                    response.Dispose();
+                    await Task.Delay(delay, cancellationToken);
+                    continue;
+                }
+                var advice = request.NativeWebSearch && status is 400 or 403 or 422
+                    ? " This request included native web search, whose availability depends on model/account policy. Use /web-search basic or /web-search off while idle if search is unavailable. No fallback was attempted."
+                    : transient
+                        ? $" The service is temporarily unavailable after {attempt} attempt(s). " +
+                          (delay > TimeSpan.FromSeconds(30)
+                              ? "The server requested a wait longer than the automatic retry budget. Wait before continuing."
+                              : "Automatic retries were exhausted. Try continuing after a brief wait.")
+                        : " Check account access and usage limits.";
+                throw new UserFacingException($"ChatGPT inference failed (HTTP {status})." + advice);
+            }
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await foreach (var ev in ParseStreamAsync(stream, cancellationToken, nativeWebSearch: request.NativeWebSearch)) yield return ev;
+            yield break;
         }
-        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await foreach (var ev in ParseStreamAsync(stream, cancellationToken, nativeWebSearch: request.NativeWebSearch)) yield return ev;
     }
     public static async IAsyncEnumerable<ModelEvent> ParseStreamAsync(Stream stream, [EnumeratorCancellation] CancellationToken ct, string provider = "ChatGPT", bool nativeWebSearch = false)
     {

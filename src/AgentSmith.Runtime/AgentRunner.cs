@@ -67,8 +67,9 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
         if (run.Calls.Any(c => c.State == CallState.Completed && session.Receipts.TryGetValue(c.Id, out var savedReceipt) && savedReceipt.FinishRun))
         {
             foreach (var tail in run.Calls.Where(c => c.State == CallState.Pending)) CompleteCall(session, tail, Json.Serialize(new { error = "Workflow already finished; later calls were not executed." }));
-            session.Workflow = WorkflowMode.Work; run.State = RunState.Completed; run.Reason = null; run.CompletionRequirement = null;
-            Save("run.outcome", new { state = "Completed", workflow = "Work" }); return run;
+            if (session.Workflow != WorkflowMode.Memorize) session.Workflow = WorkflowMode.Work;
+            run.State = RunState.Completed; run.Reason = null; run.CompletionRequirement = null;
+            Save("run.outcome", new { state = "Completed", workflow = session.Workflow.ToString() }); return run;
         }
         if (run.PauseReason == PauseReason.NoProgress) run.CompletionRequirement = tools.GetCompletionRequirement(context);
         run.State = RunState.Running;
@@ -176,7 +177,7 @@ public sealed class AgentRunner(ISessionStore store, IModelClient model, IToolDi
                     {
                         run.CompletionRequirement = null;
                         foreach (var tail in run.Calls.Where(c => c.State == CallState.Pending)) CompleteCall(session, tail, Json.Serialize(new { error = "Task finished; later calls were not executed." }));
-                        if (session.ParentConversationId is null && WorkflowPolicy.Active(session) is { State: "Completed" }) session.Workflow = WorkflowMode.Work;
+                        if (session.ParentConversationId is null && session.Workflow != WorkflowMode.Memorize && WorkflowPolicy.Active(session) is { State: "Completed" }) session.Workflow = WorkflowMode.Work;
                         run.State = RunState.Completed; run.BatchExecutionMilliseconds = timer.Elapsed.TotalMilliseconds; run.ExecutionMilliseconds += run.BatchExecutionMilliseconds;
                         Save("run.outcome", new { state = run.State.ToString(), run.ExecutionMilliseconds, workflow = session.Workflow.ToString() }); return run;
                     }

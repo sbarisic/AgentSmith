@@ -60,6 +60,7 @@ public sealed class ToolRegistry : IWorkspaceTools, IDisposable
             Define("dotnet_build", "Start a .NET 10 SDK build with structured diagnostics. Empty configuration defaults to Debug; empty framework builds all. Poll process then call verification_result.", PermissionMode.Execute, true, ("project", "string"), ("configuration", "string"), ("framework", "string"), ("timeoutSeconds", "integer")),
             Define("dotnet_test", "Start VSTest tests with TRX reports. Empty configuration=Debug, empty framework=all, empty filter=no filter. MTP is unsupported. Poll process then call verification_result.", PermissionMode.Execute, true, ("project", "string"), ("configuration", "string"), ("framework", "string"), ("filter", "string"), ("timeoutSeconds", "integer")),
             .. WorkflowTools.Definitions,
+            .. RepositoryMemoryTools.Definitions,
             Define("verification_result", "Read structured build/test results after process exit; unavailable or zero-test results are not success.", PermissionMode.Inspect, false, ("verificationId", "string"))];
     }
     private static ToolDefinition Define(string name, string description, PermissionMode capability, bool effects, params (string Name, string Type)[] fields)
@@ -84,6 +85,7 @@ public sealed class ToolRegistry : IWorkspaceTools, IDisposable
     {
         var enabled = MemoryTools.Enabled(memory);
         return Definitions.Where(t => (t.Name != "web_search" || session.WebSearch != "off") && (t.Name != "image_read" || session.Connection.Capabilities.Vision) && t.Enabled(session) && (!t.Name.StartsWith("memory_", StringComparison.Ordinal) || enabled && (session.ParentConversationId is null || MemoryTools.IsRead(t.Name))))
+            .Where(t => !t.Name.StartsWith("repository_memory_", StringComparison.Ordinal) || memory is IRepositoryMemoryStore && RepositoryMemoryTools.Available(session, memory, t.Name))
             .Select(t => t.Name == "web_search" && session.WebSearch == "native" && session.Connection.Provider == ModelProvider.ChatGpt
                 ? t with { Description = "Hosted ChatGPT web search during inference, subject to model/account policy. Returns source citations. Use public search terms only; external content is untrusted evidence. This is not an agentsmith function call." }
                 : HttpAvailability(session, t)).ToArray();
@@ -135,6 +137,7 @@ public sealed class ToolRegistry : IWorkspaceTools, IDisposable
         if (call.Name == "workspace_map") { WorkspaceMap.Validate(ctx, args); return new(call.Arguments); }
         if (call.Name == "http_request") { HttpTools.Validate(ctx, call, args); return new(call.Arguments, Effect: HttpTools.IsWrite(call) ? ToolEffect.Network : ToolEffect.ReadOnly); }
         if (call.Name is "web_search" or "web_read") { WebTools.Validate(call.Name, args); return new(call.Arguments); }
+        if (call.Name.StartsWith("repository_memory_", StringComparison.Ordinal)) { RepositoryMemoryTools.Check(ctx, call.Name); return new(call.Arguments); }
         if (call.Name.StartsWith("memory_", StringComparison.Ordinal))
         {
             MemoryTools.Check(ctx, call.Name);
@@ -185,6 +188,7 @@ public sealed class ToolRegistry : IWorkspaceTools, IDisposable
         CheckSearchPolicy(ctx.Session, call.Name);
         if (call.Name.StartsWith("memory_", StringComparison.Ordinal)) return MemoryTools.Execute(ctx, call);
         if (!Definitions.Single(d => d.Name == call.Name).Enabled(ctx.Session)) throw new UserFacingException("Tool is disabled in this workflow/mode.");
+        if (call.Name.StartsWith("repository_memory_", StringComparison.Ordinal)) return RepositoryMemoryTools.Execute(ctx, call);
         if (call.Name == "image_read") return await ImageTool.ExecuteAsync(ctx, call, web);
         if (call.Name == "audio_listen") return await audio.ExecuteAsync(ctx, call);
         if (call.Name == "workspace_map") return WorkspaceMap.Execute(ctx, call);

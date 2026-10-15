@@ -17,11 +17,12 @@ internal static class CommandCompletion
         new("/plan", "Start, inspect, revise, or review a saved plan"),
         new("/document", "Start a documentation task"),
         new("/review", "Start a read-only audit of changes, a commit, or a path"),
+        new("/memorize", "Inspect sources and refresh repository-local development memories"),
         new("/workflow", "Show workflow status or return to Work"),
         new("/status", "Show current state and execution limits"),
         new("/usage", "Show cloud and local token usage"),
         new("/tasks", "Show saved plan steps"),
-        new("/reports", "List Document and Review reports"),
+        new("/reports", "List Document, Review and Memorize reports"),
         new("/plans", "Find saved plans in this workspace directory"),
         new("/report", "Read or export a saved report"),
         new("/artifacts", "List retained logs and verification reports"),
@@ -55,16 +56,18 @@ internal static class CommandCompletion
         new("/worker-limits", "Show or change parallel worker limits"),
         new("/worker-budget", "Show or change the budget for new workers"),
         new("/web-search", "Select native, basic, or disabled web search"),
-        new("/memory", "Browse, manage, or toggle shared memory")
+        new("/memory", "Browse repository/global memories, manage shared memory, or toggle retrieval")
     ]);
 
     private static readonly Argument[] Arguments =
     [
         new("/help", 1, null, [new("workflows", "Workflows and permissions"), new("session", "Conversation and saved results"), new("tools", "Tools, workers, and recovery"), new("queue", "Input, cancellation, and follow-ups"), new("settings", "Display, context, and memory"), new("all", "All command help")]),
-        new("/mode", 1, null, [new("work", "Work workflow"), new("plan", "Plan workflow"), new("planning", "Alias for plan"), new("document", "Document workflow"), new("documentation", "Alias for document"), new("review", "Read-only Review workflow"), new("inspect", "Inspect permissions"), new("edit", "Edit permissions"), new("execute", "Execute permissions")]),
+        new("/mode", 1, null, [new("work", "Work workflow"), new("plan", "Plan workflow"), new("planning", "Alias for plan"), new("document", "Document workflow"), new("documentation", "Alias for document"), new("review", "Read-only Review workflow"), new("memorize", "Source-read-only repository memory workflow"), new("inspect", "Inspect permissions"), new("edit", "Edit permissions"), new("execute", "Execute permissions")]),
         new("/workflow", 1, null, [new("work", "Return to Work")]),
         new("/plan", 1, null, [new("new", "Start a new plan from the following task"), new("show", "Read the active plan"), new("read", "Read a directory plan by ID"), new("revise", "Revise the plan with the following note"), new("implement", "Open the plan approval picker; does not approve it"), new("leave", "Leave Plan without approving it")]),
         new("/review", 1, null, [new("--base", "Audit changes against a base ref"), new("--commit", "Audit a commit"), new("--path", "Audit a workspace path")]),
+        new("/memorize", 1, null, [new("status", "Inspect the saved Memorize report without starting a scan"), new("--full", "Request a bounded full rescan"), new("--path", "Refresh a relative workspace scope")]),
+        new("/mode", 2, "memorize", [new("status", "Inspect the saved Memorize report"), new("--full", "Request a bounded full rescan"), new("--path", "Refresh a relative workspace scope")]),
         new("/report", 1, null, [new("export", "Export a report to a new Markdown file")]),
         new("/mode", 2, "review", [new("--base", "Audit changes against a base ref"), new("--commit", "Audit a commit"), new("--path", "Audit a workspace path")]),
         new("/diagnostics", 2, null, [new("errors", "Build errors"), new("warnings", "Build warnings"), new("failed", "Failed tests"), new("skipped", "Skipped tests"), new("passed", "Passed tests"), new("all", "All diagnostics")]),
@@ -79,7 +82,9 @@ internal static class CommandCompletion
         new("/context", 2, "budget", [new("balanced", "Balanced context budget"), new("max", "Maximum available context budget")]),
         new("/delegation", 1, null, [new("proactive", "Delegate useful independent tasks proactively"), new("manual", "Delegate only with explicit opt-in")]),
         new("/web-search", 1, null, [new("native", "ChatGPT native search"), new("basic", "DuckDuckGo fallback"), new("off", "Disable search")]),
-        new("/memory", 1, null, [new("list", "List memory entries"), new("search", "Search memory by text"), new("show", "Read a memory by ID"), new("add", "Create a memory from text"), new("edit", "Edit a memory by ID"), new("forget", "Remove a memory from retrieval"), new("on", "Enable automatic memory use"), new("off", "Disable automatic memory use")])
+        new("/memory", 1, null, [new("list", "List global memory entries"), new("search", "Search global memory by text"), new("show", "Read a global memory by ID"), new("current", "Read this workspace's repository memories"), new("global", "Read the global shared library"), new("repository", "Explicitly select a registered repository ID"), new("repositories", "Discover repository registrations; metadata only"), new("add", "Create a global memory from text"), new("edit", "Edit a global memory by ID"), new("forget", "Remove a global memory from retrieval"), new("on", "Enable automatic memory use"), new("off", "Disable automatic memory use")]),
+        new("/memory", 2, "current", [new("list", "List repository memories"), new("search", "Search repository memories by text"), new("show", "Read a repository memory by ID or topic")]),
+        new("/memory", 2, "global", [new("list", "List global memories"), new("search", "Search global memories by text"), new("show", "Read a global memory by ID")])
     ];
 
     internal static IReadOnlyList<Suggestion> GetSuggestions(string text, int position)

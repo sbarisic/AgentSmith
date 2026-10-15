@@ -2,7 +2,8 @@ namespace AgentSmith.Core;
 
 public static class WorkflowPolicy
 {
-    public static bool IsTask(WorkflowMode mode) => mode is WorkflowMode.Document or WorkflowMode.Review;
+    public static bool IsTask(WorkflowMode mode) => mode is WorkflowMode.Document or WorkflowMode.Review or WorkflowMode.Memorize;
+    public static bool IsSourceReadOnly(WorkflowMode mode) => mode is WorkflowMode.Plan or WorkflowMode.Review or WorkflowMode.Memorize;
     public static WorkflowReport? Active(Session s) => s.Reports.SingleOrDefault(r => r.Id == s.ActiveReportId);
     public static bool IsDocumentation(string path) => Path.GetExtension(path).ToLowerInvariant() is ".md" or ".markdown" or ".rst" or ".adoc" or ".asciidoc" or ".txt";
     public static bool Enabled(Session s, ToolDefinition tool)
@@ -14,12 +15,22 @@ public static class WorkflowPolicy
         if (tool.Name == "csharp_load" && s.ParentConversationId is not null) return false;
         if (tool.Name.StartsWith("workflow_", StringComparison.Ordinal)) return s.ParentConversationId is null && IsTask(s.Workflow);
         if (IsTask(s.Workflow) && tool.Name is "plan_update" or "plan_submit") return false;
-        return s.Workflow is not (WorkflowMode.Plan or WorkflowMode.Review)
+        if (s.Workflow == WorkflowMode.Memorize)
+        {
+            // Dedicated parent memory tools may change managed memory state, never workspace sources.
+            if (tool.Effect == ToolEffect.MemoryState)
+                return s.ParentConversationId is null && (tool.Name.StartsWith("memory_", StringComparison.Ordinal)
+                    || tool.Name.StartsWith("repository_memory_", StringComparison.Ordinal));
+            if (tool.Name == "csharp_load" || tool.Name.StartsWith("process_", StringComparison.Ordinal)
+                || tool.Name.StartsWith("dotnet_", StringComparison.Ordinal)) return false;
+            return tool.Capability == PermissionMode.Inspect && tool.Effect is ToolEffect.ReadOnly or ToolEffect.SessionState;
+        }
+        return !IsSourceReadOnly(s.Workflow)
             || tool.Capability == PermissionMode.Inspect && tool.Effect is ToolEffect.ReadOnly or ToolEffect.SessionState or ToolEffect.MemoryState;
     }
     public static void CheckFiles(Session s, IEnumerable<string> paths)
     {
-        if (s.Workflow is WorkflowMode.Plan or WorkflowMode.Review || s.Mode < PermissionMode.Edit)
+        if (IsSourceReadOnly(s.Workflow) || s.Mode < PermissionMode.Edit)
             throw new UserFacingException("File changes require Edit permission in Work or Document workflow.");
         if (Planning.Active(s) is { State: "Implementing" } plan && plan.Approvals.Last().Mode < PermissionMode.Edit)
             throw new UserFacingException("File changes exceed the approved plan permissions.");
@@ -28,8 +39,8 @@ public static class WorkflowPolicy
     }
     public static WorkflowReport Begin(Session s, string task, string targetKind = "changes", string target = ".")
     {
-        if (!IsTask(s.Workflow) || s.ParentConversationId is not null) throw new UserFacingException("A parent Document or Review workflow is required.");
-        var report = new WorkflowReport { Workflow = s.Workflow, Task = task, TargetKind = s.Workflow == WorkflowMode.Document ? "documentation" : targetKind, Target = target };
+        if (!IsTask(s.Workflow) || s.ParentConversationId is not null) throw new UserFacingException("A parent Document, Review or Memorize workflow is required.");
+        var report = new WorkflowReport { Workflow = s.Workflow, Task = task, TargetKind = s.Workflow == WorkflowMode.Document ? "documentation" : s.Workflow == WorkflowMode.Memorize && targetKind == "changes" ? "memory" : targetKind, Target = target };
         s.Reports.Add(report); s.ActiveReportId = report.Id; return report;
     }
 }

@@ -10,7 +10,7 @@ internal static class CommandHelp
     [
         new("workflows", "Workflows and permissions", [
             new("/mode", "Show your workflow and permission level"),
-            new("/mode work|plan|document|review", "Select a workflow, then type your task"),
+            new("/mode work|plan|document|review|memorize", "Select a workflow, then type your task"),
             new("/mode inspect|edit|execute", "Set permissions; workflow restrictions still apply"),
             new("/work", "Return to Work; equivalent to /mode work"),
             new("/plan <task>", "Start planning immediately; /plan new <task> also works"),
@@ -18,15 +18,17 @@ internal static class CommandHelp
             new("/plan revise <note>", "Revise the saved plan"),
             new("/document <task>", "Start a documentation task immediately"),
             new("/review [--base <ref>|--commit <ref>|--path <path>]", "Start a read-only audit; default is current changes"),
+            new("/memorize [--full|--path <relative-path>]", "Inspect sources and refresh local memories; no source edits or execution; leave with /mode work"),
+            new("/memorize status", "Inspect the saved Memorize report without starting a scan"),
             new("/workflow [work]", "Legacy workflow status / return-to-Work command")]),
         new("session", "Conversation and saved results", [
             new("/help [workflows|session|tools|queue|settings|all]", "Show commands and keyboard controls"),
             new("/status", "Show current state and remaining execution limits"), new("/usage", "Show cloud and local token usage"),
-            new("/tasks", "Show saved plan steps"), new("/reports", "List Document and Review reports"),
+            new("/tasks", "Show saved plan steps"), new("/reports", "List Document, Review and Memorize reports"),
             new("/plans [page]", "Find plans from conversations in this exact workspace directory"),
             new("/plan read <id>", "Read a directory plan without adopting it or transferring approval"),
             new("/report [id]", "Read a report; defaults to the active report"),
-            new("/report export <id> <new-path.md>", "Export a report to a new Markdown file"),
+            new("/report export <id> <new-path.md>", "Export to a new Markdown file while idle; leave Memorize explicitly first"),
             new("/artifacts", "List retained logs and verification reports"),
             new("/diagnostics <report-id> [errors|warnings|failed|skipped|passed|all] [page]", "Inspect structured build diagnostics and test outcomes"),
             new("/artifact <id|process:#number> [read <cursor>|search <text>]", "Read, page or search a retained artifact; process:#15 opens that process log"), new("/exit", "Exit; saved work can be resumed with smith resume")]),
@@ -60,8 +62,12 @@ internal static class CommandHelp
             new("/worker-limits [total local]", "Show parallel worker limits; change while idle (1..16 each)"),
             new("/worker-budget [requests minutes]", "Show or change the budget for new workers while idle (default 100 requests / 30 minutes)"),
             new("/web-search [native|basic|off]", "Select ChatGPT native search or DuckDuckGo fallback while idle; saved per conversation"),
-            new("/memory [list [page]|search <text>|show <id>]", "Browse the shared memory library"),
-            new("/memory add <text>|edit <id> <text>|forget <id>", "Manage memory entries while idle"), new("/memory on|off", "Enable or disable automatic memory use")])
+            new("/memory [list [page]|search <text>|show <id>]", "Browse the legacy global library; explicit /memory global reads require memory enabled"),
+            new("/memory current list [page]|search <text>|show <id-or-topic>", "Read this workspace's repository memories"),
+            new("/memory repositories", "Discover registered repositories; metadata only"),
+            new("/memory repository <registered-id> list [page]|search <text>|show <id-or-topic>", "Explicitly read a registered repository's memories"),
+            new("/memory global list [page]|search <text>|show <id>", "Explicitly read the global shared library"),
+            new("/memory add <text>|edit <id> <text>|forget <id>", "Manage global shared entries while idle; repository scopes are read-only"), new("/memory on|off", "Enable or disable automatic retrieval, model memory tools and scoped CLI reads; legacy unscoped commands remain available")])
     ];
 
     public static object Build(string topic)
@@ -70,7 +76,7 @@ internal static class CommandHelp
         if (topic.Length > 0 && topic != "all" && !Groups.Any(g => g.Topic == topic))
             throw new UserFacingException("Unknown help topic. Use /help workflows|session|tools|queue|settings|all.");
         var groups = topic.Length == 0
-            ? new[] { new Group("start", "Start a task", [new("/plan <task>", "Investigate and prepare a plan"), new("/document <task>", "Write or improve documentation"), new("/review", "Audit current changes without editing"), new("/mode <name>", "Work, Plan, Document, Review; or Inspect, Edit, Execute permissions")]),
+            ? new[] { new Group("start", "Start a task", [new("/plan <task>", "Investigate and prepare a plan"), new("/document <task>", "Write or improve documentation"), new("/review", "Audit current changes without editing"), new("/memorize", "Refresh repository-local development memories without changing sources"), new("/mode <name>", "Work, Plan, Document, Review, Memorize; or Inspect, Edit, Execute permissions")]),
                 new Group("daily", "Everyday commands", [new("/status · /usage", "Inspect session state and token usage"), new("/model [id] · /models", "Select the next model and save the new-chat default, or list models"), new("/tasks · /reports · /report <id>", "Read saved plans and reports"), new("/cancel · /queue", "Stop work or manage queued follow-ups"), new("/work · /exit", "Return to Work or exit the CLI")]) }
             : Groups.Where(g => topic == "all" || g.Topic == topic).ToArray();
         return new { topic, groups, example = "/plan Make a plan to implement player movement", note = "Workflow controls the task; permissions control allowed effects. Selecting a workflow never increases permissions or approves a plan.", topics = "More: /help workflows · /help session · /help tools · /help queue · /help settings · /help all" };

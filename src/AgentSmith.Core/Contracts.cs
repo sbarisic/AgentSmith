@@ -12,7 +12,7 @@ public static class Json
 public enum RunState { Running, AwaitingUser, Paused, Completed, Failed, Cancelled, RecoveryRequired, AwaitingPlan }
 public enum CallState { Pending, Started, Completed }
 public enum PermissionMode { Inspect, Edit, Execute }
-public enum WorkflowMode { Work, Plan, Document, Review }
+public enum WorkflowMode { Work, Plan, Document, Review, Memorize }
 public enum ToolEffect { ReadOnly, SessionState, Workspace, Process, MemoryState, Network }
 public sealed class Session
 {

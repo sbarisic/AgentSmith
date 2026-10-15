@@ -16,7 +16,8 @@ public sealed class NavigationIntegrationTests
         public Fixture()
         {
             Directory.CreateDirectory(Root);
-            var store = new SessionStore(Path.Combine(Root, "state"));
+            // Mutable SQLite sidecars are test infrastructure, not semantic source inventory.
+            var store = new SessionStore(Path.Combine(Root, "artifacts", "state"));
             var session = new Session { Workspace = Root }; var run = new Run(); session.Runs.Add(run);
             store.Save(session, new("created", session.Id, run.Id, new { })); Context = new(session, run, store, default);
             File.WriteAllText(Path.Combine(Root, "App.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
@@ -115,7 +116,10 @@ public sealed class NavigationIntegrationTests
         if (!OperatingSystem.IsWindows()) return;
         using var f = new Fixture();
         var first = await f.Load(); var second = await f.Load();
+        Assert.True(first["state"]!.ToString() is "Ready" or "Partial", first.ToJsonString());
+        Assert.True(second["state"]!.ToString() is "Ready" or "Partial", second.ToJsonString());
         var ids = new[] { first["snapshotId"]!.ToString(), second["snapshotId"]!.ToString() };
+        await f.Tools.Navigation.ValidateGrants(f.Context, ids);
         var child = new Session { Workspace = f.Root, ParentConversationId = f.Context.Session.Id, NavigationSnapshotIds = ids };
         var worker = new WorkerRecord { ParentId = f.Context.Session.Id, ParentRunId = f.Context.Run.Id, ChildId = child.Id, NavigationSnapshotIds = ids };
         ((IWorkerStore)f.Context.Store).CreateWorker(worker, child);

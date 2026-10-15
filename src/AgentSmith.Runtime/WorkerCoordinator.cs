@@ -33,7 +33,7 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     public IReadOnlyList<ToolDefinition> Definitions => [.. inner.Definitions, .. AgentTools];
     public static IReadOnlyList<ToolDefinition> DelegationDefinitions => AgentTools;
     public IReadOnlyList<ToolDefinition> Available(Session s) => inner.Available(s).Concat(AgentTools).Where(d => Enabled(s, d)).ToArray();
-    private static bool ChildTool(ToolDefinition d) => ChildReads.Contains(d.Name) || d.Name.StartsWith("file_", StringComparison.Ordinal) || d.Name == "agent_finish";
+    private static bool ChildTool(ToolDefinition d) => ChildReads.Contains(d.Name) || RepositoryMemoryTools.IsRead(d.Name) || d.Name.StartsWith("file_", StringComparison.Ordinal) || d.Name == "agent_finish";
     private bool Enabled(Session s, ToolDefinition d) => d.Enabled(s) && (s.ParentConversationId is not null ? ChildTool(d) : d.Name != "agent_finish" && (!d.Name.StartsWith("agent_", StringComparison.Ordinal) || s.EnabledWorkers.Count > 0));
     public string Instructions(string workspace) => inner.Instructions(workspace);
     public string SessionInstructions(Session s)
@@ -165,7 +165,7 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
         foreach (var path in paths) if (path == "." || Directory.Exists(Path.Combine(ctx.Workspace, path))) throw Failures.Reject("worker_directory_assignment", "Assignments must name exact files; a directory does not include its descendants.", "List the files to edit or create individually in writePaths.", path);
         if (paths.Length > 0)
         {
-            if (profile.Mode < PermissionMode.Edit || ctx.Session.Mode < PermissionMode.Edit || ctx.Session.Workflow is WorkflowMode.Plan or WorkflowMode.Review) throw new UserFacingException("Editing delegation requires Work and Edit permission in both parent and profile.");
+            if (profile.Mode < PermissionMode.Edit || ctx.Session.Mode < PermissionMode.Edit || ctx.Session.Workflow is WorkflowMode.Plan or WorkflowMode.Review or WorkflowMode.Memorize) throw new UserFacingException("Editing delegation requires Work and Edit permission in both parent and profile.");
             CheckWrites(ctx.Session, paths);
             if (ctx.Session.Processes.Any(p => p.State is "Running" or "Prepared" || !p.TerminationConfirmed)) throw new UserFacingException("Stop existing conversation processes with confirmed termination before assigning edits.");
         }

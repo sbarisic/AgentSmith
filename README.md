@@ -1,8 +1,42 @@
 # AgentSmith
 
-AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, and Review workflows share permission checks and saved task state.
+AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, Review, and Memorize workflows share permission checks and saved task state.
 
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
+
+## Repository memorization
+
+`/memorize` starts bounded source inspection and reconciliation of repository-local development knowledge. `/memorize --full` requests a bounded full rescan; `/memorize --path src` restricts inspection to a workspace-relative path. `/mode memorize` and startup `--workflow memorize` select the workflow. This describes the local implementation, not a published release.
+
+Memorize is source-read-only: it allows dedicated memory/index/report state updates, not source edits, project evaluation, process/build/test execution or HTTP writes. Workers may inspect assigned sources; the parent reconciles and commits after collecting them. Resolve active work and recovery before switching workflows. Completion stays in Memorize; use `/workflow work` or `/mode work` to leave explicitly. Leaving an unfinished report does not mark it complete.
+
+Use `/memorize status` for the latest Memorize report in this conversation, `/reports` to list reports, and `/report <id>` for saved evidence and limitations. Status does not scan, refresh or request model inference. Report export is blocked while in Memorize.
+
+### Storage, retrieval and privacy
+
+- Managed memory bodies, source hashes/line references, revision history, scan manifests and commit receipts live under the selected workspace's `.agentsmith/memory`. The global discovery catalog stores repository IDs, locations and registration timestamps, not memory bodies. Treat this local state as private; do not commit it unintentionally.
+- Later model requests prioritize bounded, task-relevant current-repository memories and retain the existing shared global library. Memories are historical evidence, never instructions, authorization or proof that code currently passes verification.
+- Model tools `repository_memory_discover`, `repository_memory_search`, `repository_memory_read` and `repository_memory_status` expose discovery and reads. Search/read use an empty `repositoryId` for this workspace; another registered ID explicitly selects another repository. CLI reads use `/memory current list [page]|search <text>|show <id-or-topic>`, `/memory repositories` (catalog metadata only), or `/memory repository <registered-id> list [page]|search <text>|show <id-or-topic>`. Repository IDs must be registered, validated IDs, not arbitrary paths. Unscoped commands retain the legacy global library; `/memory global list|search|show` makes that scope explicit. The same grammar works with `smith memory`; `current` selects the chat workspace or, outside chat, the current working directory. Repository list pages contain 20 entries. Repository CLI operations are read-only; relinking remains a storage API operation.
+- Existing memory disablement controls apply to repository memory tools, all new scoped CLI reads/discovery (including `/memory global` aliases), and automatic retrieval. Legacy unscoped global-library commands retain their existing behavior. Disabling retrieval does not erase stored history or backups.
+- **Local storage does not mean local inference.** Selected source evidence and retrieved memories may be sent to the configured model provider. Sensitive-file exclusions and secret filtering reduce risk but cannot guarantee that secrets are absent. Review the selected workspace and provider before memorizing it.
+
+### Bounds and recovery
+
+Default scans cap inspected files at 200, total bytes at 2,000,000, each file at 128,000 bytes, model-visible evidence at 64,000 characters, each initial file excerpt at 120 lines and 12,000 characters (or the remaining evidence budget), and visited entries at 10,000. Hashes cover the full inspected file bytes, not just the excerpt; reported evidence truncation means the file was not comprehensively inspected. Scanning skips links and recognized generated/build/vendor/binary/sensitive content and applies `.gitignore`/`.ignore` conservatively. Unsupported ignore syntax can stop a scan. `--full` does not remove these bounds; read reported omissions rather than assuming comprehensive coverage.
+
+Refresh currently rescans bounded eligible sources and reconciles existing topics. `--full` requests full reconsideration within the same limits; it is not a separate unbounded traversal or a changed-file-only scan optimization.
+
+Commits use scan-bound provenance, source rechecks and expected revisions. Identical topics avoid revision churn; user-authored entries are protected, and partial scans do not establish deletion. Catalog contention is reported as incomplete discovery registration; retry after the competing operation settles. Workspace identity is local/path-based, not a remote-URL identity; copied memory state is not automatically adopted by another clone. Move relinking currently exists at the storage API level, not as a CLI command. Local state and catalog updates are separate writes, so interrupted operations require explicit retry rather than an assumption of atomic success.
+
+Repository reads recheck recorded source hashes; changed or inaccessible sources, or a previously recorded stale flag, mark an entry stale. Matching source hashes and a recorded verification timestamp do not mean builds/tests passed or that unreferenced code was inspected.
+
+Relinking requires the original local memory state at the destination and refuses a different destination while the original workspace directory still exists. It is not a clone-merging operation.
+
+Repository state limits are 1,000 entries, 16 scan manifests, 16,000 historical revisions and 4,096 commit receipts. Discovery examines at most 1,000 catalog registrations; these storage/discovery limits are separate from source inspection bounds.
+
+Path/link checks and source hash rechecks do not guarantee containment against adversarial concurrent filesystem path swaps, or lock sources through the final memory save. Use a trusted, stable workspace; these checks are not a filesystem sandbox.
+
+There is no background watcher, vector database, cloud sync, automatic source repair or execution. The October 14, 2026 acceptance record reports a bounded ChatGPT CLI fixture covering creation, fresh-session retrieval, unchanged reconciliation without revision churn, and changed-source refresh followed by fresh retrieval. This is not all-provider or comprehensive concurrency acceptance; see the scoped evidence and limitations in `MEMORIZE_ACCEPTANCE.md`.
 
 ## Interactive composer
 
@@ -394,9 +428,9 @@ Message blocks have a vertical guide. Section guides use workflow colors: Work i
 
 `/help` shows common commands and examples. Use `/help workflows`, `/help session`, `/help tools`, `/help queue`, or `/help settings` for a topic, and `/help all` for the complete command list. Unknown slash commands and help topics are rejected locally.
 
-Use `/mode` to see both the workflow and permission level. `/mode work|plan|document|review` selects a workflow without starting inference; type your task afterward. `/mode planning` and `/mode documentation` are aliases. `/mode inspect|edit|execute` changes permissions without bypassing workflow restrictions or plan approval. `/work` returns to Work, subject to the same unfinished-work checks as leaving a workflow.
+Use `/mode` to see both the workflow and permission level. `/mode work|plan|document|review|memorize` selects a workflow without starting inference; type your task afterward. `/mode planning` and `/mode documentation` are aliases. `/mode inspect|edit|execute` changes permissions without bypassing workflow restrictions or plan approval. `/work` returns to Work, subject to the same unfinished-work checks as leaving a workflow.
 
-To start immediately, use `/plan Make a plan to implement player movement`, `/document Update the installation instructions`, or `/review`. `/plan new <task>` remains supported; `/plan` alone shows the saved plan. Reserved plan commands are `new`, `show`, `read`, `revise`, `implement`, and `leave`; use `/plan new <task>` if your task begins with one of those words. `/mode plan <task>` and `/mode document <task>` also start tasks immediately; `/mode review --path <path>` starts a scoped review. Existing `/workflow`, `/plan leave`, and permission commands remain available.
+To start immediately, use `/plan Make a plan to implement player movement`, `/document Update the installation instructions`, or `/review`. `/plan new <task>` remains supported; `/plan` alone shows the saved plan. Reserved plan commands are `new`, `show`, `read`, `revise`, `implement`, and `leave`; use `/plan new <task>` if your task begins with one of those words. `/mode plan <task>` and `/mode document <task>` also start tasks immediately; `/mode review --path <path>` starts a scoped review. `/memorize [--full|--path <relative-path>]` starts repository memorization; `/memorize status` reads saved status without inference. Existing `/workflow`, `/plan leave`, and permission commands remain available.
 
 - Conversation and display: `/status`, `/usage`, `/context`, `/compact`, `/paste`, `/markdown`, `/display compact|verbose`, `/details <call-id|process-alias>`, and `/exit`.
 - Tools and recovery: `/tools`, `/mode`, `/changes`, `/undo <checkpoint-id>`, `/processes`, `/stop <process-id|#number>`, and `/recover [abandon]`.

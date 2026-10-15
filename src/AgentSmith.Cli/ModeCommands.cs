@@ -8,13 +8,15 @@ internal sealed partial class CliApp
     {
         if (args.Length == 0)
         {
-            Write("mode", new { workflow = session.Workflow.ToString(), message = $"Workflow: {session.Workflow} · Permissions: {session.Mode}\nWorkflows: /mode work|plan|document|review\nPermissions: /mode inspect|edit|execute\nSelect a workflow, then type your task; or start immediately with /plan <task>, /document <task>, or /review.\nWorkflow restrictions and approved-plan permissions still apply." });
+            Write("mode", new { workflow = session.Workflow.ToString(), message = $"Workflow: {session.Workflow} · Permissions: {session.Mode}\nWorkflows: /mode work|plan|document|review|memorize\nPermissions: /mode inspect|edit|execute\nSelect a workflow, then type your task; or start immediately with /plan <task>, /document <task>, /review, or /memorize.\nWorkflow restrictions and approved-plan permissions still apply. Leave Memorize explicitly with /mode work." });
             return true;
         }
         var parts = args.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries);
         var choice = parts[0].ToLowerInvariant() switch { "planning" => "plan", "documentation" => "document", var value => value };
         var task = parts.Length > 1 ? parts[1].Trim() : "";
-        if (choice is not ("work" or "plan" or "document" or "review")) return false;
+        if (choice is not ("work" or "plan" or "document" or "review" or "memorize")) return false;
+        if (session.Workflow == WorkflowMode.Memorize && choice is not ("work" or "memorize"))
+            throw new UserFacingException("Leave Memorize explicitly with /mode work before selecting another workflow.");
         if (choice == "work")
         {
             if (task.Length > 0) throw new UserFacingException("Usage: /mode work or /work. Then send your task.");
@@ -38,7 +40,7 @@ internal sealed partial class CliApp
             await Agents.StopAllAsync(session.Id);
             if (Store.Workers(session.Id).Any(w => w.Active || w.ReservationsHeld || w.State == "RecoveryRequired"))
                 throw new UserFacingException("Settle worker recovery before changing workflows.");
-            if (next is WorkflowMode.Plan or WorkflowMode.Review)
+            if (next is WorkflowMode.Plan or WorkflowMode.Review or WorkflowMode.Memorize)
             {
                 await Registry.Processes.StopAsync(session);
                 if (session.Processes.Any(p => p.State is "Running" or "Prepared" || !p.TerminationConfirmed))

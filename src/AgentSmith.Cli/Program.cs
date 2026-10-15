@@ -86,7 +86,7 @@ public static partial class Program
             var images = new Option<string[]>("--image") { Description = "Attach an image file; repeat up to four times.", AllowMultipleArgumentsPerToken = true };
             command.Options.Add(contextBudget); command.Options.Add(maxSteps); command.Options.Add(maxMinutes); command.Options.Add(delegation); command.Options.Add(images);
             command.Options.Add(workerNames);
-            var workflow = new Option<string?>("--workflow") { Description = "work, plan, document or review. Task workflows return to Work on completion." };
+            var workflow = new Option<string?>("--workflow") { Description = "work, plan, document, review or memorize. Memorize remains source-read-only until explicitly left." };
             command.Options.Add(workflow);
             var plan = new Option<bool>("--plan") { Description = "Investigate and prepare a plan; implementation requires an explicit review decision." };
             var workspace = new Option<string?>("--workspace") { Description = "Project directory; defaults to the current directory." };
@@ -456,7 +456,7 @@ internal sealed partial class CliApp : IDisposable
                 if (activeRun is not null) throw new UserFacingException("Wait for the active run or use /cancel before changing permissions.");
                 if (args.Length > 0)
                 {
-                    if (!Enum.TryParse<PermissionMode>(args, true, out var next) || !Enum.IsDefined(next) || int.TryParse(args, out _)) { Error("Usage: /mode work|plan|document|review or /mode inspect|edit|execute"); break; }
+                    if (!Enum.TryParse<PermissionMode>(args, true, out var next) || !Enum.IsDefined(next) || int.TryParse(args, out _)) { Error("Usage: /mode work|plan|document|review|memorize or /mode inspect|edit|execute"); break; }
                     if (next < session.Mode) await Agents.StopAllAsync(session.Id);
                     if (session.Mode == PermissionMode.Execute && next != PermissionMode.Execute) await Registry.Processes.StopAsync(session);
                     if (session.Workflow != WorkflowMode.Plan && Planning.Active(session) is { State: "Implementing" } approved && next > approved.Approvals.Last().Mode)
@@ -470,7 +470,7 @@ internal sealed partial class CliApp : IDisposable
             case "/changes":
                 Write("changes", new[] { session }.Concat(Agents.ChildSessions(session)).SelectMany(s => s.Mutations).Select(m => new { m.Id, m.Kind, m.State, m.UndoOf, diff = FileOperations.Diff(m) })); break;
             case "/undo":
-                if (session.Workflow is WorkflowMode.Plan or WorkflowMode.Review) throw new UserFacingException("Undo is disabled during Plan and Review workflows.");
+                if (session.Workflow == WorkflowMode.Plan || WorkflowPolicy.IsSourceReadOnly(session.Workflow)) throw new UserFacingException("Undo is disabled during Plan, Review and Memorize workflows.");
                 Write("operation", new { content = (await Agents.UndoAsync(session, args)).Content }); break;
             case "/processes":
                 Write("processes", session.Processes); break;
