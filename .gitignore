@@ -27,6 +27,8 @@ TestResults/
 *.7z
 *.tar
 *.gz
+__pycache__/
+*.pyc
 
 # Local secrets and machine-specific state.
 .env

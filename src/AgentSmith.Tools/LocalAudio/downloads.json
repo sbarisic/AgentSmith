@@ -1,0 +1,52 @@
+{
+  "protocol": 1,
+  "python": "3.11.14",
+  "uv": "0.9.5",
+  "whisperRevision": "536b0662742c02347bc0e980a01041f333bce120",
+  "yamnet": "google/yamnet/1",
+  "classMapSha256": "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2",
+  "downloads": [
+    {
+      "path": "whisper/config.json",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json",
+      "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+      "size": 2370
+    },
+    {
+      "path": "whisper/tokenizer.json",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
+      "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+      "size": 2203239
+    },
+    {
+      "path": "whisper/vocabulary.txt",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
+      "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+      "size": 459861
+    },
+    {
+      "path": "whisper/model.bin",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin",
+      "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+      "size": 483546902
+    },
+    {
+      "path": "python.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.11.14%2B20251014-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "c2a7b0bb86eb9f1cc094a01bdabef7ddc77f89f8e45161fa7819f2b4a7ba7bc1",
+      "size": 25648990
+    },
+    {
+      "path": "uv.zip",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "515dc53d7553f1357d0abc1f70acd921fbb9e30230b1d9a08737236daa6ee920",
+      "size": 20760405
+    },
+    {
+      "path": "yamnet.tar.gz",
+      "url": "https://tfhub.dev/google/yamnet/1?tf-hub-format=compressed",
+      "sha256": "b80da2a1a56926fb0767205051a200dd7b3beaf3ea1ea126c42a53943996e5e0",
+      "size": 14242921
+    }
+  ]
+}

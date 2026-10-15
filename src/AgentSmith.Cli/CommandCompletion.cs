@@ -56,11 +56,13 @@ internal static class CommandCompletion
         new("/worker-limits", "Show or change parallel worker limits"),
         new("/worker-budget", "Show or change the budget for new workers"),
         new("/web-search", "Select native, basic, or disabled web search"),
+        new("/audio", "Inspect local Whisper and YAMNet readiness"),
         new("/memory", "Browse repository/global memories, manage shared memory, or toggle retrieval")
     ]);
 
     private static readonly Argument[] Arguments =
     [
+        new("/audio", 1, null, [new("status", "Inspect local audio installation")]),
         new("/help", 1, null, [new("workflows", "Workflows and permissions"), new("session", "Conversation and saved results"), new("tools", "Tools, workers, and recovery"), new("queue", "Input, cancellation, and follow-ups"), new("settings", "Display, context, and memory"), new("all", "All command help")]),
         new("/mode", 1, null, [new("work", "Work workflow"), new("plan", "Plan workflow"), new("planning", "Alias for plan"), new("document", "Document workflow"), new("documentation", "Alias for document"), new("review", "Read-only Review workflow"), new("memorize", "Source-read-only repository memory workflow"), new("inspect", "Inspect permissions"), new("edit", "Edit permissions"), new("execute", "Execute permissions")]),
         new("/workflow", 1, null, [new("work", "Return to Work")]),

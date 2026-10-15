@@ -42,6 +42,8 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         { workflow = Text(data, "workflow"); guideStyle = TerminalTheme.Guide(workflow); }
         switch (type)
         {
+            case "audio.progress":
+                runningStatus = Text(data, "message"); MessageText("› " + runningStatus, "info"); break;
             case "web.search.progress":
                 runningStatus = Text(data, "message") == "Web search completed" ? "Thinking" : "Searching web";
                 MessageText("› " + Text(data, "message"), "info"); break;

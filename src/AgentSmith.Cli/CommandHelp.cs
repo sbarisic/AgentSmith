@@ -33,6 +33,7 @@ internal static class CommandHelp
             new("/diagnostics <report-id> [errors|warnings|failed|skipped|passed|all] [page]", "Inspect structured build diagnostics and test outcomes"),
             new("/artifact <id|process:#number> [read <cursor>|search <text>]", "Read, page or search a retained artifact; process:#15 opens that process log"), new("/exit", "Exit; saved work can be resumed with smith resume")]),
         new("tools", "Tools, workers, and recovery", [
+            new("/audio status", "Inspect local Whisper and YAMNet; install explicitly with smith audio setup"),
             new("/tools", "List tools, including image_read, workspace_map, http_request and web research"), new("/changes", "Inspect checkpointed file changes"),
             new("/undo <checkpoint-id>", "Undo a file change if current contents still match"),
             new("/processes", "List owned processes"), new("/stop <process-id|#number>", "Stop a process tree"),

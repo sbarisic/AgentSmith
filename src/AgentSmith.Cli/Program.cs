@@ -21,6 +21,7 @@ public static partial class Program
         var root = new RootCommand("AgentSmith: ChatGPT and local-model project assistant\n" + string.Join('\n', helpRegistry.Definitions.Concat(WorkerCoordinator.DelegationDefinitions).GroupBy(t => t.Capability).Select(g => $"{g.Key} tools: {string.Join(", ", g.Select(t => t.Name == "agent_finish" ? "agent_finish (worker only)" : t.Name))}")));
         root.Options.Add(dataOption); root.Options.Add(jsonOption); root.Options.Add(noColor);
         MemoryCommands(root, dataOption, jsonOption, noColor);
+        AudioCommands(root, dataOption, jsonOption, noColor);
         var provider = new Option<ModelProvider>("--provider") { Description = "chatgpt, lmstudio (Responses), or local (Chat Completions).", Recursive = true, DefaultValueFactory = _ => ModelProvider.ChatGpt };
         var endpoint = new Option<string?>("--endpoint") { Description = "Loopback HTTP endpoint; local defaults to http://127.0.0.1:8080/v1, LM Studio to port 1234.", Recursive = true };
         var outputBudget = new Option<int>("--max-output-tokens") { Recursive = true, DefaultValueFactory = _ => 0, Description = "Output reserve; default ChatGPT 16384, local 8192." };

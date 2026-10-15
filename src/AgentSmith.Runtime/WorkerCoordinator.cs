@@ -13,7 +13,7 @@ public sealed class WorkerCoordinator(ISessionStore store, IWorkerStore workers,
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<string, (CancellationTokenSource Source, Task Task)> live = new();
     private readonly CancellationTokenSource lifetime = new();
-    private static readonly HashSet<string> ChildReads = ["audio_listen", "image_read", "workspace_map", "http_request", "web_search", "web_read", "workspace_list", "file_read", "text_search", "git_status", "git_diff", "git_log", "git_show", "artifact_list", "artifact_read", "artifact_search", "memory_search", "memory_read", "plan_list", "plan_fetch", "csharp_symbols", "csharp_status", "csharp_query", "diagnostics_read"];
+    private static readonly HashSet<string> ChildReads = ["audio_listen", "audio_transcribe", "audio_classify", "image_read", "workspace_map", "http_request", "web_search", "web_read", "workspace_list", "file_read", "text_search", "git_status", "git_diff", "git_log", "git_show", "artifact_list", "artifact_read", "artifact_search", "memory_search", "memory_read", "plan_list", "plan_fetch", "csharp_symbols", "csharp_status", "csharp_query", "diagnostics_read"];
     private static ToolDefinition Define(string name, string description, params (string Name, string Type)[] fields)
     {
         var properties = new JsonObject();

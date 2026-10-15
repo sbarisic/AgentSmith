@@ -73,7 +73,7 @@ internal sealed partial class CliApp
 
         if (name == "/cancel") { CancelActive(); return; }
         if (name == "/exit") { exitRequested = true; CancelActive(); Store.HoldQueue(session.Id, "CLI exit"); return; }
-        if (name is "/web-search" or "/model" or "/models" or "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/worker-budget" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/diagnostics" or "/tasks" or "/plans" or "/plan" or "/processes" or "/changes")
+        if (name is "/audio" or "/web-search" or "/model" or "/models" or "/steer" or "/steering" or "/mode" or "/workflow" or "/report" or "/reports" or "/attach" or "/limits" or "/worker-limits" or "/worker-budget" or "/delegation" or "/memory" or "/agents" or "/agent" or "/queue" or "/display" or "/details" or "/help" or "/usage" or "/status" or "/context" or "/tools" or "/diagnostics" or "/tasks" or "/plans" or "/plan" or "/processes" or "/changes")
         {
             // Queue storage is independent; other busy reads use a committed snapshot, never the runner's mutable session.
             await HandleCommand(line, Store.Get(session.Id) ?? throw new UserFacingException("Conversation is unavailable.")); return;
@@ -140,6 +140,7 @@ internal sealed partial class CliApp
         if (SteeringCommand(name, args, session)) return true;
         if (name == "/attach") { if (input.ResumeConfirmation) throw new UserFacingException("Continue the saved work first, then attach an image in the chat composer."); if (args.Length == 0) throw new UserFacingException("Usage: /attach <image path>"); AttachFile(session, args); return true; }
         if (PolicyCommand(name, args, session)) return true;
+        if (name == "/audio") { if (args.Trim() != "status") throw new UserFacingException("Usage: /audio status. Setup is an explicit terminal command: smith audio setup."); AudioStatus(); return true; }
         if (name == "/memory") { MemoryCommand(args, session); return true; }
         if (await AgentCommand(name, args, session)) return true;
         switch (name)
