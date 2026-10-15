@@ -18,7 +18,7 @@ Existing `audio_read` views and durable component reuse do not require new infer
 - One service per Windows user and canonical Smith data directory. All clients using that directory share it. A different data directory deliberately creates a separate service/model pool; status must make this visible.
 - One active audio job across connected clients, with a bounded FIFO queue. Initial limit: 32 waiting jobs total and four per connected client, with explicit queue-full errors. Worker requests use their parent process's connection and quota.
 - Load models lazily. Unload the Python helper after five idle minutes, while keeping the lightweight service available for future requests. Never unload an active job.
-- Preserve the 25 MiB source limit, 120-second clip limit and five-minute end-to-end request deadline, including snapshot preparation, connection and queue time.
+- Preserve the 25 MiB source limit, 120-second clip limit and five-minute end-to-end request deadline for individual inference requests, including snapshot preparation, connection and queue time. The completed-recording workflow below orchestrates bounded chunks for longer calls rather than truncating them to these limits.
 - Keep the service independent of the chat provider. No API key, account or network audio inference is required.
 - First release is an explicitly started background process, without elevation, Windows Service Control Manager installation or automatic login startup. Remote access, GPUs, multiple inference slots and cross-user sharing are outside this scope.
 
@@ -116,3 +116,61 @@ Status: proposed; not implemented.
 - [ ] Verify empty-prompt Ctrl+C, repeated presses, return to the prompt after cancellation, nonempty drafts, pending questions/reviews, and explicit `/exit` with saved-state recovery. Terminal closure, process termination and input-stream loss remain external interruptions and must retain existing cleanup/recovery behavior without spinning on EOF.
 
 Acceptance: pressing Ctrl+C at an empty interactive prompt leaves Smith ready for the next message; `/exit` closes the chat cleanly. Cancelling active work returns control to the same chat.
+
+## User-controlled sound output capture with NAudio
+
+Status: proposed; not implemented.
+
+### Goal and capture scope
+
+Let the user explicitly start and stop recording Windows sound output, such as a Teams call, then ask Smith to transcribe and analyze the entire completed recording locally. Do not perform inference on that recording while capture is active or infer permission to record from a calendar event, running application or model suggestion.
+
+- [ ] Add a pinned, compatible stable NAudio dependency through central package management. Use its supported WASAPI loopback recording API for the selected Windows playback endpoint. Verify the API against the pinned release: upstream now documents `WasapiRecorder` as the replacement for the legacy `WasapiLoopbackCapture` API. References: [NAudio recording](https://github.com/naudio/NAudio/blob/main/Docs/WasapiRecorder.md) and [loopback capture](https://github.com/naudio/NAudio/blob/main/Docs/WasapiLoopbackCapture.md).
+- [ ] Enumerate playback devices and let the user select the endpoint used by Teams or another application. Display its name before capture and throughout recording. Endpoint capture can include other applications and notifications playing through that endpoint; do not describe it as Teams-only capture.
+- [ ] Make clear that sound output capture records what plays through the selected output. It does not inherently include the user's microphone or local speech. Microphone mixing and per-application isolation are separate future extensions; do not silently enable microphone capture or promise that an output-only recording contains both sides of a call.
+- [ ] Keep recording under explicit user control, with visible recording state, elapsed time, captured size and the selected endpoint. Starting and stopping capture are user commands, not model-callable tools. Worker agents cannot start or stop recording.
+
+### Proposed controls and ownership
+
+| Command | Behavior |
+| --- | --- |
+| `/audio devices` | List available output endpoints and identify the current default. |
+| `/audio capture start [device-id]` | Start a recording owned by this conversation using the explicitly selected endpoint, or the displayed current default. Return a capture ID. |
+| `/audio capture status [capture-id]` | Show Recording, Finalizing, Completed, Interrupted or Failed state, duration, size and any gaps/errors. |
+| `/audio capture stop [capture-id]` | Stop acquiring audio, drain pending buffers, finalize all files and return the completed recording ID. Safe to repeat; it must not create duplicate recordings. |
+| `/audio capture analyze <capture-id>` | Analyze a finalized recording after the user requests it; default to transcription with anonymous speaker evidence. Offer combined sound classification as an explicit option. |
+
+Provide equivalent `smith audio capture ...` commands for inspecting and stopping captures when the original chat is unavailable. Resolve ambiguity explicitly; never stop a different recording merely because it is the newest. Model analysis uses a dedicated read-only `audio_analyze_capture` tool for an authorized completed recording, plus existing focused evidence readers for follow-ups. A user may also explicitly request analysis when stopping; it starts only after finalization succeeds.
+
+- [ ] Host capture in the shared Smith service, independently of the inference helper and queue. Initially allow one active capture per service and reject a second start clearly. Other already-completed audio jobs may run, but must not block capture callbacks or cause silent dropped audio.
+- [ ] Record ownership and capture lifecycle in service-owned metadata without opening conversation databases. Clients register references under existing conversation ownership/grant rules; possession of a capture ID alone does not grant a model access. User CLI management remains available to the same Windows user.
+- [ ] A chat exit or disconnect does not silently stop a user-started service recording. Show the active recording and the command to stop it when exiting; allow explicit stopping from another CLI. Restarting the service never automatically restarts capture.
+- [ ] Graceful service stop finalizes an active recording and reports that capture ended. Device removal, service crash, forced stop, disk exhaustion and system suspend produce explicit interruption/gap states; preserve recoverable completed audio and never label an incomplete recording as complete. Do not silently switch devices when the default changes.
+
+### Storage and finalization
+
+- [ ] Stream capture to bounded, numbered files in a private recording directory instead of retaining the meeting in RAM or relying on one ever-growing WAV. Use a bounded producer/consumer buffer; report dropped samples or discontinuities. Rotate files below format/size limits while preserving exact frame offsets and format metadata.
+- [ ] Track monotonic recording time, sample positions, silence and gaps. A lack of loopback callbacks during silence must not compress the meeting timeline. Finalize headers and flush all pending writes before transitioning to Completed; wait for the recording-stop lifecycle to finish.
+- [ ] Create a durable manifest containing capture ID, owner, endpoint identity, start/stop times, total duration, ordered chunks, sample formats, hashes and coverage/gap information. Validate leases, containment and links for recording directories and crash cleanup.
+- [ ] Retain intentionally captured audio locally so completed recordings can be analyzed or retried later. Keep it separate from disposable inference snapshots and prevent the existing temporary-audio cleanup from deleting recordings. Show location/size and provide explicit user export/deletion controls. Do not put recordings in Git or automatically upload them to the chat provider.
+- [ ] Check available disk capacity before and during capture. Document a configurable recording storage budget; approaching it must be visible, and reaching it must finalize what was captured with an explicit limit/interruption outcome rather than silently discarding or overwriting audio. Ordinary duration is controlled by the user's start/stop actions, not the inference clip limit.
+
+### Analyze the entire completed recording
+
+- [ ] Refuse analysis while Recording or Finalizing. Allow an explicit request to analyze recoverable Interrupted recordings, with missing coverage preserved in the result; never claim this covers the entire original call.
+- [ ] Add a recording-level orchestrator that validates the manifest and schedules every captured interval through the shared inference service in chunks within the existing 25 MiB/120-second limits. Include bounded overlap at chunk boundaries, with overlap included in the per-request limit. Never treat duration zero as permission to analyze only the first 120 seconds of a meeting.
+- [ ] Preserve the five-minute deadline for each individual inference request. Give the overall recording analysis its own visible progress, cancellation and configurable execution budget; exhausting it pauses with completed coverage retained. Do not apply the five-minute single-call timeout to an entire multi-hour meeting or silently remove execution limits.
+- [ ] Persist per-chunk receipts, hashes, engine/settings fingerprints and analysis outcomes. On explicit resume, reuse successful chunks; uncertain interrupted chunks require an explicit retry. Do not replay completed work or duplicate final artifacts.
+- [ ] Merge transcripts in recording-relative timestamp order, resolving overlap using word timing and overlap evidence rather than blindly deleting repeated phrases. Preserve intentional repetition, silence and segment provenance. Expose a full paginated transcript, processed/total duration and any failed or missing intervals.
+- [ ] Keep anonymous speaker labels scoped to their chunk unless a separately validated within-recording reconciliation step establishes continuity. Never merge unrelated `Speaker 1` labels from different chunks as if they were one person. Report unknown/overlapping attribution and speaker-count uncertainty honestly.
+- [ ] Return a recording summary and linked component artifacts. Full transcription is retained even when it exceeds a single tool/context page; Smith can retrieve it through focused paginated views. Optional sound analysis runs YAMNet over the captured audio and retains source-relative timelines. Audio stays local; returned text and labels may enter the configured chat provider context.
+
+### Verification and delivery
+
+- [ ] Deterministic tests cover explicit start/stop, duplicate commands, ownership, active-recording analysis rejection, buffer draining, chunk rotation, silent periods, gaps, device loss, disk limits, service/client shutdown and crash recovery.
+- [ ] Long-recording tests exceed both 120 seconds and 25 MiB and verify complete interval coverage, correct offsets, no missing/duplicated boundary words, bounded memory, explicit partial failures and resume without repeated successful inference.
+- [ ] Test repeated phrases at chunk boundaries, changing speakers, overlap and chunk-local speaker labels. Compare transcription to checked references and report recognition limitations; complete processing does not guarantee perfect recognition.
+- [ ] Perform a user-started/user-stopped live Windows capture from a selected output endpoint, including speech, silence and other sound. Verify recording indicators, captured duration, finalized playback and subsequent local transcription. Test Teams or a comparable call with known reference material and document whether the user's own voice is present in the selected output.
+- [ ] Update help, README, model instructions and service status; run relevant NAudio, lifecycle, CLI and full Release tests. Record real-machine results separately before publishing the capture feature.
+
+Acceptance: the user starts capture, stops it when finished, and Smith can subsequently transcribe all retained audio across the completed recording, with timestamps, bounded resource use and explicit coverage limitations. Recording never starts autonomously, and analysis never begins before audio finalization.
