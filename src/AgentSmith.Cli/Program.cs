@@ -87,7 +87,7 @@ public static partial class Program
             var images = new Option<string[]>("--image") { Description = "Attach an image file; repeat up to four times.", AllowMultipleArgumentsPerToken = true };
             command.Options.Add(contextBudget); command.Options.Add(maxSteps); command.Options.Add(maxMinutes); command.Options.Add(delegation); command.Options.Add(images);
             command.Options.Add(workerNames);
-            var workflow = new Option<string?>("--workflow") { Description = "work, plan, document, review or memorize. Memorize remains source-read-only until explicitly left." };
+            var workflow = new Option<string?>("--workflow") { Description = "work, plan, document, review or memorize. Memorize is source-read-only and returns to Work on successful completion." };
             command.Options.Add(workflow);
             var plan = new Option<bool>("--plan") { Description = "Investigate and prepare a plan; implementation requires an explicit review decision." };
             var workspace = new Option<string?>("--workspace") { Description = "Project directory; defaults to the current directory." };
@@ -441,15 +441,21 @@ internal sealed partial class CliApp : IDisposable
             case "/tasks": Write("plan.display", new { plan = Planning.Active(session) }); break;
             case "/artifacts": Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), "artifact_list", new System.Text.Json.Nodes.JsonObject()).Content }); break;
             case "/artifact":
-                var artifactParts = args.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-                if (artifactParts.Length == 0 || artifactParts.Length > 1 && (artifactParts.Length != 3 || artifactParts[1] is not ("search" or "read"))) throw new UserFacingException("Usage: /artifact <id|process:#number> [read <cursor>|search <text>]");
+                var artifactParts = args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (artifactParts.Length == 0) throw new UserFacingException("Usage: /artifact <id> [read <cursor>|search <text>|audio <view> [cursor]]");
                 var artifactId = ArtifactCommands.ResolveId(Context(session), artifactParts[0]);
+                var audioView = artifactParts.Length >= 2 && artifactParts[1] == "audio";
+                var defaultAudio = artifactParts.Length == 1 && ArtifactAccess.IsAudio(Context(session), artifactId);
+                if (audioView && artifactParts.Length is not (3 or 4)) throw new UserFacingException("Usage: /artifact <id> audio <view> [cursor]");
                 var artifactCursor = 0;
-                if (artifactParts.Length == 3 && artifactParts[1] == "read" && (!int.TryParse(artifactParts[2], out artifactCursor) || artifactCursor < 0)) throw new UserFacingException("Artifact cursor must be a nonnegative integer.");
-                var searchingArtifact = artifactParts.Length == 3 && artifactParts[1] == "search";
+                var cursorText = audioView && artifactParts.Length == 4 ? artifactParts[3] : !audioView && artifactParts.Length == 3 && artifactParts[1] == "read" ? artifactParts[2] : "0";
+                if (!int.TryParse(cursorText, out artifactCursor) || artifactCursor < 0) throw new UserFacingException("Artifact cursor must be nonnegative.");
+                var searchingArtifact = !audioView && artifactParts.Length >= 3 && artifactParts[1] == "search";
+                if (!audioView && artifactParts.Length > 1 && !searchingArtifact && !(artifactParts.Length == 3 && artifactParts[1] == "read")) throw new UserFacingException("Usage: /artifact <id> [read <cursor>|search <text>|audio <view> [cursor]]");
                 var artifactArgs = new System.Text.Json.Nodes.JsonObject { ["artifactId"] = artifactId, ["cursor"] = artifactCursor, ["maxCharacters"] = 4000 };
-                if (searchingArtifact) artifactArgs["query"] = artifactParts[2];
-                Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), searchingArtifact ? "artifact_search" : "artifact_read", artifactArgs).Content }); break;
+                if (audioView || defaultAudio) artifactArgs["view"] = audioView ? artifactParts[2] : "summary";
+                if (searchingArtifact) artifactArgs["query"] = string.Join(' ', artifactParts.Skip(2));
+                Write("artifact.result", new { content = ArtifactAccess.Execute(Context(session), audioView || defaultAudio ? "audio_read" : searchingArtifact ? "artifact_search" : "artifact_read", artifactArgs).Content }); break;
             case "/tools":
                 Write("tools", Agents.Definitions.Where(t => t.Name != "agent_finish").Select(t => new { t.Name, t.Description, capability = t.Capability.ToString(), enabled = Agents.Available(session).Any(d => d.Name == t.Name), t.HasEffects, effect = t.Effect.ToString() })); break;
             case "/mode":

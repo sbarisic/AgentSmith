@@ -8,7 +8,7 @@ internal sealed partial class CliApp
     {
         if (args.Length == 0)
         {
-            Write("mode", new { workflow = session.Workflow.ToString(), message = $"Workflow: {session.Workflow} · Permissions: {session.Mode}\nWorkflows: /mode work|plan|document|review|memorize\nPermissions: /mode inspect|edit|execute\nSelect a workflow, then type your task; or start immediately with /plan <task>, /document <task>, /review, or /memorize.\nWorkflow restrictions and approved-plan permissions still apply. Leave Memorize explicitly with /mode work." });
+            Write("mode", new { workflow = session.Workflow.ToString(), message = $"Workflow: {session.Workflow} · Permissions: {session.Mode}\nWorkflows: /mode work|plan|document|review|memorize\nPermissions: /mode inspect|edit|execute\nSelect a workflow, then type your task; or start immediately with /plan <task>, /document <task>, /review, or /memorize.\nWorkflow restrictions and approved-plan permissions still apply. Memorize returns to Work on successful completion; use /mode work to leave unfinished work." });
             return true;
         }
         var parts = args.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries);

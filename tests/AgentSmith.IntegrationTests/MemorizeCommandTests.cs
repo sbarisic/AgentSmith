@@ -15,8 +15,7 @@ public sealed class MemorizeCommandTests
         var session = new Session { Workflow = CliApp.ParseWorkflow(value, false) };
         Assert.Equal(WorkflowMode.Memorize, session.Workflow);
         Assert.Equal("memory", WorkflowPolicy.Begin(session, "Inspect this repository").TargetKind);
-        Assert.Contains("Finalization stays in Memorize", WorkflowTools.Instructions(session));
-        Assert.DoesNotContain("Finalization returns to Work", WorkflowTools.Instructions(session));
+        Assert.Contains("Finalization returns to Work, preserving permissions", WorkflowTools.Instructions(session));
         Assert.Throws<UserFacingException>(() => CliApp.ParseWorkflow(value, true));
     }
 
@@ -36,6 +35,48 @@ public sealed class MemorizeCommandTests
     [InlineData("arbitrary task")]
     public void InvalidTargetsAreRejected(string args) =>
         Assert.Throws<UserFacingException>(() => CliApp.ParseMemorizeTarget(args));
+
+    [Fact]
+    public async Task CompletedReportStatusFromWorkDoesNotStartAnotherTaskButExplicitMemorizeDoes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-memorize-followup-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var app = new CliApp(Path.Combine(root, "data"), true, true);
+            var session = new Session { Workspace = root, Mode = PermissionMode.Inspect };
+            app.Store.Save(session, new("created", session.Id, null, new { }));
+            await app.HandleCommand("/memorize", session);
+            var ctx = app.Context(session);
+            var update = new ToolCall { Id = "update", Name = "workflow_update", Arguments = Json.Serialize(new
+            {
+                expectedRevision = 0, summary = "Bounded scan complete.", coverage = "Partial source coverage.",
+                limitations = new[] { "Evidence limit reached." }, evidence = Array.Empty<string>(), findings = Array.Empty<ReviewFinding>()
+            }) };
+            update.Prepared = app.Registry.Prepare(ctx, update);
+            await app.Registry.ExecuteAsync(ctx, update);
+            var finish = new ToolCall { Id = "finish", Name = "workflow_finish", Arguments = "{\"expectedRevision\":1}" };
+            finish.Prepared = app.Registry.Prepare(ctx, finish);
+            await app.Registry.ExecuteAsync(ctx, finish);
+            session = app.Store.Get(session.Id)!;
+            Assert.Equal(WorkflowMode.Work, session.Workflow);
+            var report = Assert.Single(session.Reports);
+            Assert.Equal("Completed", report.State);
+            await app.HandleCommand("/memorize status", session);
+            await app.HandleCommand("/mode memorize status", session);
+            await app.HandleCommand($"/report {report.Id}", session);
+            Assert.Single(session.Reports);
+            Assert.Equal(WorkflowMode.Work, session.Workflow);
+            await app.HandleCommand("/memorize --full", session);
+            Assert.Equal(WorkflowMode.Memorize, session.Workflow);
+            Assert.Equal(2, session.Reports.Count);
+            Assert.Equal("Completed", report.State);
+            Assert.Equal("InProgress", WorkflowPolicy.Active(session)!.State);
+            Assert.Equal("memory-full", WorkflowPolicy.Active(session)!.TargetKind);
+            Assert.Equal(PermissionMode.Inspect, session.Mode);
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
 
     [Theory]
     [InlineData("/memorize --full", "memory-full")]

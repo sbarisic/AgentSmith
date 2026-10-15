@@ -74,7 +74,7 @@ Steering presentation uses additive `SteeringNotice` metadata: message/run/targe
 
 Worker records persist nullable failure details, request counts/limits, and applied checkpoint counts in their existing JSON storage. Terminal events and `/agent` share these records. Missing metadata in older records remains unknown. Exact-path reservation errors identify the attempted file and bounded assignments without expanding access. SQLite failures use primary result codes, not exception-message parsing, and preserve uncertainty about unsaved effects. No schema migration or live-data backfill is required.
 
-Automated coverage includes these changes. Current delivery evidence and remaining live-verification limits are recorded in CLI_IMPLEMENTATION_PLAN.md.
+Automated coverage includes these changes. Current delivery evidence and remaining live-verification limits are recorded in the retired CLI implementation record in Git history.
 
 ## Durable steering architecture
 
@@ -104,7 +104,7 @@ After the user closed the agent and authorized building, the Release suite passe
 
 ## Image, workspace, and HTTP tool architecture
 
-Delivery verification: 360 Release tests passed; the self-contained Windows build and published help/resume/tool-availability smoke checks succeeded. Live Bonsai parent, worker and HTTP acceptance passed within the limitations in CLI_IMPLEMENTATION_PLAN.md. Live ChatGPT acceptance is incomplete because account/state access failed.
+Delivery verification: 360 Release tests passed; the self-contained Windows build and published help/resume/tool-availability smoke checks succeeded. Live Bonsai parent, worker and HTTP acceptance passed within the limitations in the retired CLI implementation record in Git history. Live ChatGPT acceptance is incomplete because account/state access failed.
 
 `image_read` imports a decoded PNG snapshot with source path/hash and originating run/call identity. Shared Windows decoding serves file tools and clipboard input. Existing attachment rows and aggregate JSON hold additive provenance fields; no new database schema is needed. Completed calls retain image IDs. The model-facing projection appends labeled image evidence after the complete response/tool-output group, without adding a new user turn to saved history. Responses and Chat Completions receive their existing image content forms. Context accounting includes projected images; compaction retains attachment references as historical evidence. Recovery reuses committed imports even when the source image has been deleted.
 
@@ -144,7 +144,7 @@ Status: the CLI supports LM Studio, model-specific workers, inspection, checkpoi
 
 Created: 2026-10-09
 
-Updated: 2026-10-09. LM Studio and bounded model-specific workers extend the locally published continuous-conversation foundation. The previous continuous-conversation release passed 131 tests plus live ChatGPT and native-terminal acceptance. Current worker/provider verification passed 158 automated tests and live ChatGPT/Bonsai acceptance; the self-contained Windows build has been refreshed. Measurements, model limitations, and observed outcomes are recorded in the [current delivery record](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-lm-studio-and-model-specific-subagents). The completed changes and documentation are included in the user-requested local source commit; no remote push or public publication is included.
+Updated: 2026-10-09. LM Studio and bounded model-specific workers extend the locally published continuous-conversation foundation. The previous continuous-conversation release passed 131 tests plus live ChatGPT and native-terminal acceptance. Current worker/provider verification passed 158 automated tests and live ChatGPT/Bonsai acceptance; the self-contained Windows build has been refreshed. Measurements, model limitations, and observed outcomes are recorded in the historical delivery record (in Git history). The completed changes and documentation are included in the user-requested local source commit; no remote push or public publication is included.
 
 ## Clipboard, budgets, and delegation architecture (2026-10-10)
 
@@ -158,7 +158,7 @@ Delegation is a persisted proactive/manual policy over already-enabled profiles.
 
 Release verification passed 231 tests; 39 targeted cases were rerun after the final prompt/pause adjustments. Live image sharing, reopened image queue dispatch, a 34-request task, model-aware context/compaction, delegated coding with parent-run tests, unrelated-file preservation and undo passed. Forced delegation of a tiny fixture increased cloud input; efficient task choice remains important. The Windows publish folder was refreshed. Physical Alt+V/Escape coverage and full account-route context capacity remain unverified.
 
-See [the current delivery record](CLI_IMPLEMENTATION_PLAN.md#clipboard-input-larger-tasks-and-local-delegation) for measured acceptance and limitations. Earlier dated release records below describe their original limits.
+See the historical delivery record (in Git history) for measured acceptance and limitations. Earlier dated release records below describe their original limits.
 
 ## Current architecture: model providers and bounded workers
 
@@ -170,7 +170,7 @@ The `Local` provider adds an explicit Chat Completions transport for Bonsai 2/ll
 
 The local adapter projects stored response items into system/user/assistant/tool messages, grouping each assistant's calls before their correlated results. It buffers fragmented function names, arguments and IDs, validates the complete call set, normalizes usage, and keeps reasoning in local continuation items rather than visible answers. A successful finish reason and `[DONE]` are both required; interrupted, malformed, reasoning-only and output-limited responses cannot dispatch tools. Empty tool collections omit schemas for compaction. Account credentials never enter local requests, and unknown providers fail closed.
 
-The Bonsai 2 endpoint update passed 176 Release tests and was published locally. The live local-only tool round trip completed in 9.3 seconds. A three-round Bonsai 2 worker applied a checkpointed file fix, which its ChatGPT parent independently verified; a read-only worker also completed. Loaded server capacity was 32,768 tokens with one inference slot; the current budget uses loaded capacity and serializes this endpoint without changing the two-worker admission ceiling. See the [endpoint acceptance record](CLI_IMPLEMENTATION_PLAN.md#bonsai-2-chat-completions-endpoint) for observed worker results and fixture limitations.
+The Bonsai 2 endpoint update passed 176 Release tests and was published locally. The live local-only tool round trip completed in 9.3 seconds. A three-round Bonsai 2 worker applied a checkpointed file fix, which its ChatGPT parent independently verified; a read-only worker also completed. Loaded server capacity was 32,768 tokens with one inference slot; the current budget uses loaded capacity and serializes this endpoint without changing the two-worker admission ceiling. See the endpoint acceptance record (in Git history) for observed worker results and fixture limitations.
 
 `ModelConnection` identifies ChatGPT or LM Studio, the local endpoint, output budget and loaded context metadata. The CLI model factory serves normal inference, resume, queued runs and compaction. Local inference uses flat Responses function tools and locally assembled history; provider continuation items do not cross session/provider boundaries. Reasoning is not answer text. Incomplete streams, output exhaustion and reasoning-only completion execute no proposed calls.
 
@@ -188,7 +188,7 @@ Live evidence includes two Bonsai file fixes, structured build/test verification
 
 ## Previous milestone: Plan, Track, and Verify
 
-The implementation supports ChatGPT account OAuth and a separate loopback LM Studio adapter. It includes streamed text, a serial C# model/tool loop, a capability registry, Inspect/Edit/Execute modes, checkpointed file tools, curated Git inspection, owned process sessions, durable questions, SQLite conversations, resume, cancellation, and protected Windows credentials. New conversations default to Execute; legacy conversations migrate to Inspect. See [README](README.md) for usage and verification and [CLI implementation plan](CLI_IMPLEMENTATION_PLAN.md) for delivery status.
+The implementation supports ChatGPT account OAuth and a separate loopback LM Studio adapter. It includes streamed text, a serial C# model/tool loop, a capability registry, Inspect/Edit/Execute modes, checkpointed file tools, curated Git inspection, owned process sessions, durable questions, SQLite conversations, resume, cancellation, and protected Windows credentials. New conversations default to Execute; legacy conversations migrate to Inspect. See [README](README.md) for usage and verification and CLI implementation plan (in Git history) for delivery status.
 
 Plan is a workflow, not a fourth permission level. It permits investigation and internal task updates but blocks workspace/process effects. A persisted Implement/Revise/Keep planning decision waits for explicit input; implementation additionally requires Edit or Execute selection. Routine progress preserves approved scope, while scope changes return to review. Schema v3 adds plans, revisions, receipts, artifacts, and verification results without changing existing permissions. .NET builds use an MSBuild logger and VSTest runs use retained TRX reports.
 
@@ -196,7 +196,7 @@ Plan preconditions are checked during tool preparation, before recording executi
 
 API-key access, desktop UI, extensions, and automatic publishing remain deferred; LM Studio and bounded worker delegation are implemented. Automatic compaction, readable activity, Escape cancellation, and queued follow-ups are implemented in the continuous-conversation milestone. The provider-neutral `IModelClient` remains the extension point. File-tool undo checks recorded result hashes and preserves newer work. Execute runs as the Windows user, not in an OS sandbox; its process trees die with the CLI. Checkpoints do not cover process side effects. There is no public publication or automatic commit step.
 
-The [continuous-conversation milestone](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-readable-continuous-conversations) is the detailed delivery and acceptance specification. The [README](README.md#continuous-conversations) describes commands and current limits. The architecture additions below describe the implemented boundaries.
+The continuous-conversation milestone (in Git history) is the detailed delivery and acceptance specification. The [README](README.md#continuous-conversations) describes commands and current limits. The architecture additions below describe the implemented boundaries.
 
 ## 1. The idea
 
@@ -618,4 +618,4 @@ Review capture resolves refs through fixed Git argument arrays with helper execu
 
 Explicit report export is a user-only operation under the task-tree mutation lock. It validates a new workspace Markdown destination and existing reservations, then uses the normal mutation journal and checkpoint path. It does not enable model writes in Review/Inspect. Schema v8 stores report records and revision rows transactionally with session state and receipts, preceded by a consistent v7 backup.
 
-Observed delivery: 250 Release tests passed, with targeted checks repeated after final refinements. Live ChatGPT/Bonsai acceptance exercised read-only review, checkpointed documentation editing, report export, committed-progress recovery into a fresh CLI/store, compilation, and worker checkpoint undo. Source and unrelated edits were preserved. The first documentation worker exhausted its output budget without executing incomplete calls; a smaller assignment succeeded. The local Windows build includes these workflows and the green, compact terminal display. Full evidence and restart-test limits are recorded in CLI_IMPLEMENTATION_PLAN.md.
+Observed delivery: 250 Release tests passed, with targeted checks repeated after final refinements. Live ChatGPT/Bonsai acceptance exercised read-only review, checkpointed documentation editing, report export, committed-progress recovery into a fresh CLI/store, compilation, and worker checkpoint undo. Source and unrelated edits were preserved. The first documentation worker exhausted its output budget without executing incomplete calls; a smaller assignment succeeded. The local Windows build includes these workflows and the green, compact terminal display. Full evidence and restart-test limits are recorded in the retired CLI implementation record in Git history.

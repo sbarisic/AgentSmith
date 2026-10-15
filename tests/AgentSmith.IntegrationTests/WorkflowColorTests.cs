@@ -5,6 +5,17 @@ namespace AgentSmith.IntegrationTests;
 
 public sealed class WorkflowColorTests
 {
+    [Fact]
+    public void CompletionShowsResultingWorkflow()
+    {
+        using var output = new StringWriter();
+        var renderer = new TerminalRenderer(output, false);
+        renderer.Render("workflow.finished", new { id = "report", artifactId = "artifact", workflow = "Work", summary = "Partial coverage recorded." });
+        Assert.Contains("Report saved", output.ToString());
+        Assert.Contains("Workflow: Work", output.ToString());
+        Assert.Contains("Partial coverage recorded.", output.ToString());
+    }
+
     [Theory]
     [InlineData("Work", "92")]
     [InlineData("Plan", "96")]

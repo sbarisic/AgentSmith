@@ -3,6 +3,8 @@ import importlib.util
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 import wave
 import socket
 import numpy as np
@@ -78,6 +80,36 @@ class AudioDecodingTests(unittest.TestCase):
         result = helper.run(dict(protocol=1,operation="selftest",models=str(self.root)))
         self.assertEqual(result["transcription"]["status"], "failed")
         self.assertEqual(result["classification"]["status"], "failed")
+
+    def test_whisper_models_are_reused_and_word_times_are_source_relative(self):
+        helper.MODELS.clear()
+        word = SimpleNamespace(start=.2, end=.8, word=" Hello")
+        segment = SimpleNamespace(start=.2, end=.8, text="Hello", words=[word])
+        model = mock.Mock()
+        model.transcribe.side_effect = lambda *a, **kw: (iter([segment]), SimpleNamespace(language="en", language_probability=.99))
+        with mock.patch("faster_whisper.WhisperModel", return_value=model) as factory:
+            first = helper.transcribe(np.ones(16000, dtype=np.float32)*.1, self.root, 10, "auto")
+            helper.transcribe(np.ones(16000, dtype=np.float32)*.1, self.root, 0, "auto")
+            self.assertEqual(factory.call_count, 1)
+            self.assertAlmostEqual(first["segments"][0]["words"][0]["startSeconds"], 10.2)
+            self.assertTrue(model.transcribe.call_args.kwargs["word_timestamps"])
+        helper.MODELS.clear()
+
+    def test_speaker_labels_follow_first_occurrence_and_models_are_reused(self):
+        helper.MODELS.clear()
+        model = mock.Mock()
+        model.process.return_value.sort_by_start_time.return_value = [
+            SimpleNamespace(start=0, end=.3, speaker=17), SimpleNamespace(start=.3, end=.6, speaker=2),
+            SimpleNamespace(start=.6, end=1, speaker=17)]
+        with mock.patch("sherpa_onnx.OfflineSpeakerDiarizationConfig") as config, mock.patch("sherpa_onnx.OfflineSpeakerDiarization", return_value=model) as factory:
+            config.return_value.validate.return_value = True
+            first = helper.diarize(np.ones(16000, dtype=np.float32)*.1, self.root, 10)
+            helper.diarize(np.ones(16000, dtype=np.float32)*.1, self.root, 0)
+            self.assertEqual(factory.call_count, 1)
+            self.assertEqual(first["speakerCount"], 2)
+            self.assertEqual([t["speaker"] for t in first["turns"]], ["Speaker 1", "Speaker 2", "Speaker 1"])
+            self.assertAlmostEqual(first["turns"][1]["startSeconds"], 10.3)
+        helper.MODELS.clear()
 
 if __name__ == "__main__":
     unittest.main()

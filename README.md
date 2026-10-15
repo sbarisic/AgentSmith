@@ -2,15 +2,19 @@
 
 AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, Review, and Memorize workflows share permission checks and saved task state.
 
+Future work is tracked in [plan.md](plan.md), starting with a shared background audio service for multiple Smith instances. This service is planned, not implemented.
+
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
 
 ## Repository memorization
 
 `/memorize` starts bounded source inspection and reconciliation of repository-local development knowledge. `/memorize --full` requests a bounded full rescan; `/memorize --path src` restricts inspection to a workspace-relative path. `/mode memorize` and startup `--workflow memorize` select the workflow. This describes the local implementation, not a published release.
 
-Memorize is source-read-only: it allows dedicated memory/index/report state updates, not source edits, project evaluation, process/build/test execution or HTTP writes. Workers may inspect assigned sources; the parent reconciles and commits after collecting them. Resolve active work and recovery before switching workflows. Completion stays in Memorize; use `/workflow work` or `/mode work` to leave explicitly. Leaving an unfinished report does not mark it complete.
+Memorize is source-read-only: it allows dedicated memory/index/report state updates, not source edits, project evaluation, process/build/test execution or HTTP writes. Workers may inspect assigned sources; the parent reconciles and commits after collecting them. Resolve active work and recovery before switching workflows. Successful completion returns to Work with the existing permission level. Follow-up questions do not start another Memorize report; use `/memorize` to start another scan. Use `/workflow work` or `/mode work` to leave unfinished work explicitly. Leaving an unfinished report does not mark it complete.
 
 Use `/memorize status` for the latest Memorize report in this conversation, `/reports` to list reports, and `/report <id>` for saved evidence and limitations. Status does not scan, refresh or request model inference. Report export is blocked while in Memorize.
+
+Completion follow-up fix (2026-10-15): returning to Work is saved with the completed report and receipt, including recovery support for older receipts. This prevents a follow-up summary question from creating another Memorize report. All 814 Release tests passed, including scripted follow-up, reload, queue, permission and interrupted-finalization regressions; the Windows publish was refreshed and startup smoke-tested. These checks do not claim a new live-model memorization run.
 
 ### Storage, retrieval and privacy
 
@@ -44,19 +48,21 @@ Type `/` for local command and finite-argument suggestions. Up/Down selects sugg
 
 ## Local audio transcription and sound recognition
 
-Run `smith audio setup` once on Windows x64 to download a private Python 3.11 runtime, hash-locked packages, Whisper multilingual small and Google YAMNet. Use `smith audio status` or `/audio status` to inspect readiness. Pass the same `--data-dir <directory>` you use for Smith when selecting a custom data directory. Setup leaves system Python and PATH unchanged, and retains the previous working installation if an update fails. The Microsoft Visual C++ 2015–2022 x64 Redistributable is required; setup reports missing DLLs with installation guidance.
+Run `smith audio setup` once on Windows x64 to download a private Python 3.11 runtime, hash-locked packages, Whisper multilingual small, Google YAMNet and sherpa-onnx speaker models. All downloads are public and require no account or token. Use `smith audio status` or `/audio status` to inspect readiness. Pass the same `--data-dir <directory>` you use for Smith when selecting a custom data directory. Setup leaves system Python and PATH unchanged, and retains the previous working installation if an update fails. The Microsoft Visual C++ 2015–2022 x64 Redistributable is required; setup reports missing DLLs with installation guidance.
 
 After setup, inference is local, CPU-only and offline, with no API key. Tools are advertised only when their engines are ready:
 
-- `audio_transcribe(path, startSeconds, durationSeconds, language)` returns timestamped speech using Whisper small INT8 with voice activity filtering. Use `auto` for language detection or a supported Whisper language code, such as `en` or `hr`.
+- `audio_transcribe(path, startSeconds, durationSeconds, language)` returns timestamped speech using Whisper small INT8 with voice activity filtering and anonymous speaker separation. Use `auto` for language detection or a supported Whisper language code, such as `en` or `hr`.
+- `audio_diarize(path, startSeconds, durationSeconds)` estimates anonymous speaker turns without transcription. Labels such as Speaker 1 apply only to that analysis; they do not identify people or match voices across recordings.
+- `audio_read(artifactId, view, cursor, maxCharacters)` reads saved `summary`, `transcript`, `speakers`, `timeline`, `scores` or `metadata` views without inference, with 4,000-character pages.
 - `audio_classify(path, startSeconds, durationSeconds)` returns YAMNet's sound categories, aggregate scores and top-five labels for each analysis window.
-- `audio_listen(path, question, startSeconds, durationSeconds)` runs both. The question helps Smith interpret the evidence; it is never sent to Whisper as a prompt. A successful component is retained if the other fails.
+- `audio_listen(path, question, startSeconds, durationSeconds)` runs transcription, classification and speaker separation. The question helps Smith interpret the evidence; it is never sent to Whisper as a prompt. A successful component is retained if another fails.
 
-Example: `Transcribe tests/test01_20s.wav and identify the sounds in the background.` Transcription identifies words; classification identifies likely sound categories; Smith interprets their results. YAMNet's 521 categories do not provide arbitrary audio question answering, calibrated certainty or precise event boundaries. Whisper can miss or misrecognize speech. No speech is reported explicitly. This release excludes translation, speaker identification, microphone capture, CLAP and long-recording workflows.
+Example: `Transcribe tests/test01_20s.wav and identify the sounds in the background.` Transcription identifies words; classification identifies likely sound categories; Smith interprets their results. YAMNet's 521 categories do not provide arbitrary audio question answering, calibrated certainty or precise event boundaries. Whisper can miss or misrecognize speech. No speech is reported explicitly. Speaker separation uses FP32 pyannote segmentation 3.0 and NeMo TitaNet small through sherpa-onnx 1.13.8, with automatic clustering (threshold 0.5; minimum speech 0.3 s, silence 0.5 s). Word attribution requires majority time coverage by one speaker and no overlap from another; ambiguous words remain labeled as such. Short and overlapping speech can be misassigned. This release excludes translation, real-person identification, microphone capture, CLAP and long-recording workflows.
 
-WAV and MP3 share the same range rules: whole-second nonnegative start, duration 0..120 seconds, with zero selecting up to 120 seconds. Source files are limited to 25 MiB. PyAV decodes a private snapshot, downmixes to mono and resamples to 16 kHz; timestamps are relative to the original recording, including MP3 encoder-delay correction. Workspace exclusions and link/traversal checks apply. Smith does not play audio or fetch audio URLs. One job runs at a time per Smith process, including workers, with visible waiting/decoding/transcribing/classifying stages and a five-minute deadline including waiting. Cancellation and process exit terminate the contained helper.
+WAV and MP3 share the same range rules: whole-second nonnegative start, duration 0..120 seconds, with zero selecting up to 120 seconds. Source files are limited to 25 MiB. PyAV decodes a private snapshot, downmixes to mono and resamples to 16 kHz; timestamps are relative to the original recording, including MP3 encoder-delay correction. Workspace exclusions and link/traversal checks apply. Smith does not play audio or fetch audio URLs. One job runs at a time per Smith process, including workers, with visible waiting/decoding/transcribing/classifying stages and a five-minute deadline including waiting. Models load lazily in one contained helper shared by parent and workers, and unload after five idle minutes. Cancellation of active inference and process exit terminate it; cancelling a queued request leaves active work intact. Old installed helpers remain usable until explicit setup upgrades them.
 
-Compact evidence appears in chat; `/artifact <id>` exposes full segments, the class map, all aggregate scores, per-window labels, source and normalized-clip hashes, ranges, engine/model versions, timings and component outcomes. Raw audio is deleted after processing; abandoned snapshots from a killed process are cleaned on the next local audio call. Successful receipts recover without repeating inference. Interrupted calls without a receipt require a fresh request. Historical cloud-audio artifacts remain readable.
+Compact evidence appears in chat; `/artifact <id>` shows an audio summary and `/artifact <id> audio <view> [cursor]` opens a focused view. Explicit `/artifact <id> read <cursor>` still reads original raw evidence, including the class map. Mean label display uses a 0.05 threshold; timelines merge consecutive windows at 0.20 and show approximate intervals, not exact events or confidence. Summary timelines show up to ten intervals; omitted labels do not establish absence. Unfiltered scores remain available. Artifacts retain source and clip hashes, ranges, engine/model versions, timings and component outcomes. Fresh requests validate and hash current input, then reuse matching successful components from owned or explicitly granted artifacts; changed input, ranges, settings or installed fingerprints invalidate reuse. Interpretation questions do not change inference keys. Reuse survives reload, preserves original evidence times, and never uses an unrestricted cross-conversation cache. Raw audio is deleted after processing; abandoned snapshots from a killed process are cleaned on the next local audio call. Successful receipts recover without repeating inference. Interrupted calls without a receipt require a fresh request. Historical cloud-audio artifacts remain readable.
 
 Audio stays local, but returned transcript text and labels can enter your independently configured chat provider's context. Spoken instructions and model output are untrusted evidence, never authorization. Setup is an explicit terminal command, not a tool the model can invoke automatically. The internal fixed helper does not grant permission to execute project commands.
 
@@ -100,7 +106,7 @@ Build/test summaries now prioritize compiler errors and failed tests. Repeated c
 
 The model's `diagnostics_read` tool also supports path/text filters and cursor paging, including explicitly shared worker reports. Existing saved reports are normalized when read; raw artifacts are preserved. Report completeness, process exit status and verification success are separate. Missing locations or target metadata remain unavailable rather than inferred. Use current build/test evidence to verify current code.
 
-Automated and local acceptance outcomes, including unavailable live-provider checks, are recorded in [CLI_IMPLEMENTATION_PLAN.md](CLI_IMPLEMENTATION_PLAN.md).
+Automated and local acceptance outcomes, including unavailable live-provider checks, are recorded in the retired CLI implementation record (in Git history).
 
 ## Model selection and chat defaults
 
@@ -137,7 +143,7 @@ Compaction summarizes oversized historical groups through bounded, provenance-li
 
 For a session already paused with the old oversized-group error: reopen with `smith resume`, run `/compact`, and type `continue` after compaction succeeds. Saved edits are not rolled back. A repetition pause instead calls for inspecting `/status` and `/agents`, optionally giving `/steer <direction>`, and explicitly continuing.
 
-Delivered locally on 2026-10-10 with **430 passing Release tests** and a refreshed self-contained Windows x64 build, including the activity and error-display changes below. Published help and isolated JSON status checks passed. Live provider reproduction and physical terminal visual acceptance were not repeated. Full delivery evidence is recorded in CLI_IMPLEMENTATION_PLAN.md. Earlier verification records describe the revisions tested at that time.
+Delivered locally on 2026-10-10 with **430 passing Release tests** and a refreshed self-contained Windows x64 build, including the activity and error-display changes below. Published help and isolated JSON status checks passed. Live provider reproduction and physical terminal visual acceptance were not repeated. Full delivery evidence is recorded in the retired CLI implementation record in Git history. Earlier verification records describe the revisions tested at that time.
 
 Steering/worker display: worker activity uses `› Spawn Agent #n`, `› Wait for Agent #n`, and `› Message Agent #n`. Saved steering shows its recipient, sender (You or Parent agent), and a quoted, redacted preview. Subsequent delivery notices reference the same message without repeating its body in compact mode. `/steering` lists previews up to 1,000 characters and full message IDs for removal; verbose activity also shows the expanded bounded preview. These presentation changes do not alter delivery or execution.
 
@@ -182,7 +188,7 @@ An in-flight response or started tool finishes normally. At the next safe bounda
 
 Steering never answers a question, approves a plan, restarts a worker, or resumes paused work. Saved messages remain tied to their original run after cancellation, failure or restart. Use the existing explicit continuation/decision controls. Messages held behind a committed finalization or abandoned run remain visible and cannot leak into a new task. Original task and incorporated steering stay in context through compaction.
 
-Delivery and observed verification are recorded in [the implementation record](CLI_IMPLEMENTATION_PLAN.md#live-steering-and-worker-messaging--2026-10-10).
+Delivery and observed verification are recorded in the implementation record (in Git history).
 
 ## Direct web images and longer worker waits
 
@@ -241,7 +247,7 @@ Previous basic-search verification: a separate PowerShell HTTP probe returned te
 
 ## Clipboard, context, and larger tasks
 
-The locally published 2026-10-10 milestone adds Alt+V text/image input, model-aware context budgets, longer execution batches, and proactive local delegation. Release verification passed 231 tests. Live ChatGPT/Bonsai image sharing, structured tests, checkpoint undo, queued-image reopening, compaction and a 34-request task passed. Forced delegation increased cloud usage on the tiny comparison fixture; no fixed savings is claimed. Delivery evidence and remaining live checks are recorded in [the implementation record](CLI_IMPLEMENTATION_PLAN.md#clipboard-input-larger-tasks-and-local-delegation).
+The locally published 2026-10-10 milestone adds Alt+V text/image input, model-aware context budgets, longer execution batches, and proactive local delegation. Release verification passed 231 tests. Live ChatGPT/Bonsai image sharing, structured tests, checkpoint undo, queued-image reopening, compaction and a 34-request task passed. Forced delegation increased cloud usage on the tiny comparison fixture; no fixed savings is claimed. Delivery evidence and remaining live checks are recorded in the implementation record (in Git history).
 
 ```powershell
 smith chat --model gpt-6.1-sol --workers bonsai-edit,bonsai-review --context-budget balanced --max-steps 150 --max-minutes 60
@@ -286,11 +292,11 @@ Each entry has a title up to 120 characters, a body up to 2,000 characters and a
 
 `forget` removes active retrieval and search results, not original conversations, revision records or backups. Historical material already present in a conversation remains history. Known credential patterns and terminal controls are rejected before memory storage; detection cannot recognize every possible secret. Recognized credentials in proposed memory-call arguments are also removed before those calls enter saved protocol history. Memory read failures warn and allow work to continue without retrieved memory.
 
-The v6 migration makes a SQLite-consistent v5 backup and starts with an empty library. The [memory delivery record](CLI_IMPLEMENTATION_PLAN.md#automatic-shared-memory) records verification and live acceptance.
+The v6 migration makes a SQLite-consistent v5 backup and starts with an empty library. The memory delivery record (in Git history) records verification and live acceptance.
 
 Verified and locally published on 2026-10-09: **219 automated tests passed** plus live ChatGPT saving, cross-project recall, worker read-only access, corrections, forgetting and disabled-memory checks. Published command checks passed. The live worker used ChatGPT; local-provider memory inference was not separately exercised. The normal data directory starts with memory enabled and no imported fixture entries.
 
-The CLI also includes compact tool activity with argument summaries, automatic context compaction, Escape cancellation, and a durable FIFO prompt queue. A parent agent can delegate small tasks to explicitly enabled worker profiles using different models. See the [current delivery and acceptance record](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-lm-studio-and-model-specific-subagents).
+The CLI also includes compact tool activity with argument summaries, automatic context compaction, Escape cancellation, and a durable FIFO prompt queue. A parent agent can delegate small tasks to explicitly enabled worker profiles using different models. See the historical delivery and acceptance record (in Git history).
 
 ## Build and run
 
@@ -334,7 +340,7 @@ The configured `bonsai-edit` and `bonsai-review` profiles now use `E:\Projects\A
 
 The running server reported 32,768 loaded context tokens and one inference slot on 2026-10-09. AgentSmith can schedule two workers, but this server may service their requests serially. Its loaded context is distinct from the model's 262,144-token training capacity; the working budget uses the loaded value. The default output budget remains 8,192 tokens; a server context rejection pauses/fails the request without changing history or switching providers. The CLI now accepts image attachments when the selected model advertises vision support.
 
-The adapter preserves streamed tool-call IDs and arguments, sends results back as tool messages, keeps separate reasoning out of answer text, and requires a successful finish plus the stream terminator before dispatch. Resume, workers, and compaction use the same persisted provider selection. See the [Bonsai 2 delivery record](CLI_IMPLEMENTATION_PLAN.md#bonsai-2-chat-completions-endpoint).
+The adapter preserves streamed tool-call IDs and arguments, sends results back as tool messages, keeps separate reasoning out of answer text, and requires a successful finish plus the stream terminator before dispatch. Resume, workers, and compaction use the same persisted provider selection. See the Bonsai 2 delivery record (in Git history).
 
 The endpoint update passed 176 automated tests in Release. The Windows build was refreshed and its discovery/profile commands verified. A real local-only Bonsai 2 run read a file with `file_read` and quoted its contents in 9.3 seconds. A ChatGPT parent also delegated a checkpointed fix to Bonsai 2, collected its report, and independently verified the edited file; unrelated fixture files retained their hashes. A separate read-only worker completed successfully.
 
@@ -392,7 +398,7 @@ Verification on 2026-10-09: **158 automated tests passed**, and the self-contain
 - A local-only Bonsai conversation read and answered from a file. Plan delegation, explicit clarification routing, cancellation, and queue holds/FIFO release also passed.
 - Local compaction reduced supplied fixture-history context from 48,715 to 15,626 estimated characters while preserving source history.
 
-Earlier attempts on compact one-line code produced rejected patches and worker limits. Tool-use metadata does not guarantee model reliability. See the [acceptance record](CLI_IMPLEMENTATION_PLAN.md#observed-acceptance) for evidence and test limitations.
+Earlier attempts on compact one-line code produced rejected patches and worker limits. Tool-use metadata does not guarantee model reliability. See the acceptance record (in Git history) for evidence and test limitations.
 
 ## Commands
 
@@ -573,13 +579,13 @@ Conversations remain bound to their saved account registration and model. `auth 
 
 ## Verification
 
-Readable/Continuous Conversations validation on 2026-10-09: **131 tests passed** in Release. Live ChatGPT acceptance covered automatic compaction, FIFO follow-ups, explicit question/review barriers, editing with passing build/tests, artifact search, Escape cancellation, crash cleanup without replay, restart, and checkpoint undo. The self-contained Windows build in `artifacts/publish/win-x64` was refreshed and smoke-tested. Start a new `smith` process to use it. Detailed measurements and conversation IDs are in the [delivery record](CLI_IMPLEMENTATION_PLAN.md#final-verification-and-local-delivery--2026-10-09).
+Readable/Continuous Conversations validation on 2026-10-09: **131 tests passed** in Release. Live ChatGPT acceptance covered automatic compaction, FIFO follow-ups, explicit question/review barriers, editing with passing build/tests, artifact search, Escape cancellation, crash cleanup without replay, restart, and checkpoint undo. The self-contained Windows build in `artifacts/publish/win-x64` was refreshed and smoke-tested. Start a new `smith` process to use it. Detailed measurements and conversation IDs are in the delivery record (in Git history).
 
-Plan/Track/Verify validation on 2026-10-09: **111 tests passed** in Release. Live ChatGPT planning, clarification, revision, explicit implementation approval, structured build/test results (4/4 passed), artifact search, restart persistence, and checkpoint undo passed. The unrelated note and test-file hashes were preserved. See [implementation evidence](CLI_IMPLEMENTATION_PLAN.md) for conversation IDs, report details, and limits.
+Plan/Track/Verify validation on 2026-10-09: **111 tests passed** in Release. Live ChatGPT planning, clarification, revision, explicit implementation approval, structured build/test results (4/4 passed), artifact search, restart persistence, and checkpoint undo passed. The unrelated note and test-file hashes were preserved. See implementation evidence (in Git history) for conversation IDs, report details, and limits.
 
 Automated tests use synthetic tokens, scripted model responses, temporary workspaces, and separate CLI processes. They cover stream fragmentation/failure, callback and identity validation, DPAPI storage, tool correlation, pending questions across EOF/restart, cancellation, limits, junction rejection, conversation locks, and secret-free account output.
 
-Verification on 2026-10-09 includes live ChatGPT editing with `gpt-6.1-sol`: AgentSmith repaired a disposable C# project, ran its tests (4 passed, exit 0), inspected Git changes, and preserved an unrelated edit. A restarted CLI undid the checkpoint and restored the original file hash. Automated checks also exercise native stdin/stdout/stderr, an HTTP development server, timeout and process-tree cleanup after forcibly killing the owner, migration, mutation failure injection, and conflicting undo. Exact suite results and evidence are in [CLI_IMPLEMENTATION_PLAN.md](CLI_IMPLEMENTATION_PLAN.md). This establishes the tested account/model path, not every possible account configuration.
+Verification on 2026-10-09 includes live ChatGPT editing with `gpt-6.1-sol`: AgentSmith repaired a disposable C# project, ran its tests (4 passed, exit 0), inspected Git changes, and preserved an unrelated edit. A restarted CLI undid the checkpoint and restored the original file hash. Automated checks also exercise native stdin/stdout/stderr, an HTTP development server, timeout and process-tree cleanup after forcibly killing the owner, migration, mutation failure injection, and conflicting undo. Exact suite results and evidence are in the retired CLI implementation record (in Git history). This establishes the tested account/model path, not every possible account configuration.
 
 ## Continuous conversations
 
@@ -606,7 +612,7 @@ Compaction keeps the full source history, tool results, checkpoints, artifacts, 
 
 Controls and busy input require an interactive terminal for key handling. `--no-color` keeps cursor control where available; redirected output and `TERM=dumb` use append-only text. Physical Escape is not interpreted in redirected text; use `/cancel` there. The terminal renderer remains a lightweight scrolling UI, not a full-screen terminal emulator.
 
-See [current delivery evidence](CLI_IMPLEMENTATION_PLAN.md#delivered-milestone-lm-studio-and-model-specific-subagents) and [runtime architecture](DESIGN.md). This milestone updates the local Windows build without a commit. No remote push or public release is included.
+See historical delivery evidence (in Git history) and [runtime architecture](DESIGN.md). This milestone updates the local Windows build without a commit. No remote push or public release is included.
 
 ## Later roadmap
 
@@ -627,6 +633,6 @@ Both workflows retain progress, revisions, findings, evidence, and limitations i
 
 The parent must save and finish a report after collecting worker results. Successful completion returns to Work before queued follow-ups start, preserving permissions and plan approvals. Questions, cancellation, limits, recovery, and restart retain unfinished workflow state. `/workflow work` explicitly leaves a settled unfinished report as abandoned; resolve an active run first. Plan decisions must be resolved or explicitly left before entering these workflows.
 
-Schema v8 backs up v7 before adding report/revision storage. This release also includes green terminal styling, compact square message guides, and minute/second duration displays. Live verification outcomes are recorded in CLI_IMPLEMENTATION_PLAN.md.
+Schema v8 backs up v7 before adding report/revision storage. This release also includes green terminal styling, compact square message guides, and minute/second duration displays. Live verification outcomes are recorded in the retired CLI implementation record in Git history.
 
 Document/Review delivery verified on 2026-10-10: **250 automated tests passed**. Live ChatGPT/Bonsai review, documentation edits, saved-progress recovery, structured compilation, report export, unrelated-edit preservation, and worker checkpoint undo passed. One local documentation attempt exhausted its output budget; a smaller retry succeeded. The Windows publish folder is refreshed. The detailed acceptance record above distinguishes the injected restart check from a physical console crash test.

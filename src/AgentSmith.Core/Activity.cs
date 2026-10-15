@@ -35,7 +35,7 @@ public static partial class Activity
         var action = call.Name switch
         {
             "csharp_symbols" => "Find C# symbols", "csharp_load" => "Load C# project", "csharp_status" => "Inspect C# snapshot", "csharp_query" => "Navigate C#", "diagnostics_read" => "Read diagnostics",
-            "audio_listen" => "Listen to audio", "audio_transcribe" => "Transcribe local audio", "audio_classify" => "Classify local sounds", "image_read" => "View image", "workspace_map" => "Map workspace", "http_request" => "HTTP", "web_search" => "Search web", "web_read" => "Read web", "file_read" => "Read", "workspace_list" => "List", "text_search" => "Search", "file_create" => "Create",
+            "audio_read" => "Read audio evidence", "audio_diarize" => "Separate speakers", "audio_listen" => "Listen to audio", "audio_transcribe" => "Transcribe local audio", "audio_classify" => "Classify local sounds", "image_read" => "View image", "workspace_map" => "Map workspace", "http_request" => "HTTP", "web_search" => "Search web", "web_read" => "Read web", "file_read" => "Read", "workspace_list" => "List", "text_search" => "Search", "file_create" => "Create",
             "file_apply_patch" => "Edit", "file_move" => "Move", "file_delete" => "Delete", "process_start" => "Run",
             "process_poll" => "Poll", "process_wait" => "Wait", "process_input" => "Input", "process_stop" => "Stop", "dotnet_build" => "Build",
             "dotnet_test" => "Test", "user_ask" => "Ask", "plan_update" => "Update plan",
@@ -45,7 +45,8 @@ public static partial class Activity
         };
         switch (call.Name)
         {
-            case "audio_transcribe": case "audio_classify": case "audio_listen": options = S("startSeconds") + "s · " + (S("durationSeconds") == "0" ? "default range" : S("durationSeconds") + "s"); break;
+            case "audio_read": target = S("artifactId"); options = S("view"); break;
+            case "audio_diarize": case "audio_transcribe": case "audio_classify": case "audio_listen": options = S("startSeconds") + "s · " + (S("durationSeconds") == "0" ? "default range" : S("durationSeconds") + "s"); break;
             case "csharp_symbols": options = S("query"); break;
             case "csharp_load": target = session.NavigationSnapshots.FirstOrDefault(s => s.ProcessId == call.Prepared?.OperationId)?.Project ?? S("project"); break;
             case "csharp_status": target = S("snapshotId"); break;

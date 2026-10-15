@@ -78,14 +78,14 @@ internal static class LocalAudioProcess
             if (results.Length != 1 || messages.Any(m => m["protocol"]?.GetValue<int>() != 1 || m["type"]?.ToString() is not ("progress" or "result")))
                 throw new UserFacingException("Local audio helper returned an invalid or incomplete result.");
             var result = results[0]["result"]?.DeepClone().AsObject() ?? throw new UserFacingException("Local audio helper returned no result.");
-            Validate(result, request["operation"]!.ToString());
+            Validate(result, request["operation"]!.ToString(), request["components"]?.AsArray().Select(n => n!.ToString()).ToArray());
             return result;
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or FormatException or NullReferenceException or ArgumentException)
         { throw new UserFacingException("Local audio helper returned malformed evidence; no result was retained."); }
     }
 
-    internal static void Validate(JsonObject result, string operation)
+    internal static void Validate(JsonObject result, string operation, string[]? selected = null)
     {
         double Number(JsonNode? node, double min, double max)
         {
@@ -95,8 +95,12 @@ internal static class LocalAudioProcess
         }
         var start = Number(result["startSeconds"], 0, int.MaxValue);
         var duration = Number(result["durationSeconds"], double.Epsilon, 120);
-        foreach (var name in new[] { "transcription", "classification" })
+        foreach (var name in new[] { "transcription", "classification", "diarization" })
         {
+            if (selected is not null && !selected.Contains(name)) continue;
+            if (name == "diarization" && result[name] is null && operation != "audio_diarize" && selected is null) continue;
+            if (operation == "audio_diarize" && name != "diarization") continue;
+            if (operation == "audio_classify" && name == "diarization") continue;
             if (operation == "audio_transcribe" && name == "classification" || operation == "audio_classify" && name == "transcription") continue;
             var component = result[name] ?? throw new UserFacingException("Local audio helper omitted a component outcome.");
             if (component["status"]?.ToString() == "failed") continue;
@@ -109,7 +113,29 @@ internal static class LocalAudioProcess
                 {
                     var from = Number(segment!["startSeconds"], start, start + duration + .1);
                     Number(segment["endSeconds"], from, start + duration + .1);
+                    if (segment["words"] is JsonArray words)
+                    {
+                        if (words.Count > 4000) throw new UserFacingException("Too many transcript words.");
+                        foreach (var word in words)
+                        {
+                            var wordStart = Number(word!["startSeconds"], from, segment["endSeconds"]!.GetValue<double>());
+                            Number(word["endSeconds"], wordStart, segment["endSeconds"]!.GetValue<double>());
+                            if (word["text"]?.GetValue<string>() is not { Length: <= 16000 }) throw new UserFacingException("Invalid word text.");
+                        }
+                    }
                     if (segment["text"]?.GetValue<string>() is not { Length: <= 16000 }) throw new UserFacingException("Invalid transcript text.");
+                }
+            }
+            else if (name == "diarization")
+            {
+                var turns = component["turns"]!.AsArray();
+                if (turns.Count > 4000) throw new UserFacingException("Too many speaker turns.");
+                Number(component["speakerCount"], 0, 4000);
+                foreach (var turn in turns)
+                {
+                    var from = Number(turn!["startSeconds"], start, start + duration);
+                    Number(turn["endSeconds"], from, start + duration);
+                    if (turn["speaker"]?.GetValue<string>() is not { Length: > 0 and <= 80 }) throw new UserFacingException("Invalid speaker label.");
                 }
             }
             else

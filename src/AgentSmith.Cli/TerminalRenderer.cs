@@ -43,7 +43,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         switch (type)
         {
             case "audio.progress":
-                runningStatus = Text(data, "message"); MessageText("› " + runningStatus, "info"); break;
+                runningStatus = Text(data, "message"); if (Verbose) MessageText("› " + runningStatus, "info"); break;
             case "web.search.progress":
                 runningStatus = Text(data, "message") == "Web search completed" ? "Thinking" : "Searching web";
                 MessageText("› " + Text(data, "message"), "info"); break;
@@ -73,6 +73,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             case "workflow.updated": MessageText("Report " + Text(data, "id") + " · revision " + Text(data, "revision"), "accent"); break;
             case "workflow.finished":
                 MessageText("Report saved · " + Text(data, "id") + " · artifact " + Text(data, "artifactId"), "accent");
+                if (Text(data, "workflow") is { Length: > 0 } finishedWorkflow) MessageText("Workflow: " + finishedWorkflow, "accent");
                 Preview(Text(data, "summary"));
                 if (data.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
                     foreach (var finding in findings.EnumerateArray()) MessageText(Text(finding, "id") + " · " + Text(finding, "category") + " / " + Text(finding, "severity") + " · " + Text(finding, "title") + " · " + Text(finding, "path") + ":" + Text(finding, "line"), Text(finding, "category") == "defect" ? "warning" : "accent");
@@ -497,7 +498,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             MessageText("Artifact " + Text(data, "artifactId") + " · " + Text(data, "state"), "accent");
             if (data.TryGetProperty("text", out var text)) MessageText(text.GetString() ?? "");
             if (data.TryGetProperty("matches", out var matches)) foreach (var match in matches.EnumerateArray()) MessageText("[" + Text(match, "stream") + "] " + Text(match, "excerpt"));
-            if (Flag(data, "hasMore")) MessageText("Next page: /artifact " + Text(data, "artifactId") + " read " + Text(data, "cursor"), "dim");
+            if (Flag(data, "hasMore")) MessageText("Next page: /artifact " + Text(data, "artifactId") + (Text(data, "view") is { Length: > 0 } audioView ? " audio " + audioView + " " : " read ") + Text(data, "cursor"), "dim");
         }
     }
     private void Verification(JsonElement data)

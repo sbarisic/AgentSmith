@@ -18,7 +18,7 @@ public static class WorkflowTools
         """)!.AsObject();
         return [new("workflow_read", "Read the active Document/Review/Memorize report and baseline artifact IDs. Read artifacts with cursors for complete evidence.", JsonNode.Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")!.AsObject()),
             new("workflow_update", "Save the complete current report revision. expectedRevision from workflow_read. Preserve stable finding IDs. Document: summary describes edits/drafts/checks; findings may be empty. Review categories: defect or suggestion; severity: critical/high/medium/low/none; status: Open/Resolved/Dismissed. Evidence references: tool:<completed-call-id>, artifact:<id>, checkpoint:<id>, worker:<collected-id>. Do not invent evidence. Summary <=8000 chars, coverage <=4000, <=50 findings. Inspect reports cannot claim edits or tests without evidence.", schema, PermissionMode.Inspect, true, ToolEffect.SessionState),
-            new("workflow_finish", "Finalize the current saved report after all workers are collected. Requires nonempty coverage and a saved revision; use expectedRevision. Rechecks evidence drift and saves a Markdown artifact. Document/Review return to Work; Memorize remains source-read-only until the user explicitly leaves. No later calls in this response execute.", JsonNode.Parse("""{"type":"object","properties":{"expectedRevision":{"type":"integer"}},"required":["expectedRevision"],"additionalProperties":false}""")!.AsObject(), PermissionMode.Inspect, true, ToolEffect.SessionState)];
+            new("workflow_finish", "Finalize the current saved report after all workers are collected. Requires nonempty coverage and a saved revision; use expectedRevision. Rechecks evidence drift and saves a Markdown artifact. Document/Review/Memorize return to Work, preserving permissions. No later calls in this response execute.", JsonNode.Parse("""{"type":"object","properties":{"expectedRevision":{"type":"integer"}},"required":["expectedRevision"],"additionalProperties":false}""")!.AsObject(), PermissionMode.Inspect, true, ToolEffect.SessionState)];
     }
     public static string Instructions(Session s)
     {
@@ -31,7 +31,7 @@ public static class WorkflowTools
         if (s.ParentConversationId is not null) return instructions;
         var report = WorkflowPolicy.Active(s);
         return instructions + "\nUse workflow_read/update to retain progress and workflow_finish to finish. A prose answer does not finish this workflow. "
-            + (s.Workflow == WorkflowMode.Memorize ? "Finalization stays in Memorize; only the user's explicit /workflow work or /mode work returns to Work. " : "Finalization returns to Work, preserving permissions. ")
+            + "Finalization returns to Work, preserving permissions. "
             + "Record coverage and unverified portions honestly. Reports are separate from plans; do not update or approve plans here. Current approved scope remains authoritative.\nActive workflow record: " + Json.Serialize(report is null ? null : new { report.Id, report.Workflow, report.Task, report.TargetKind, report.Target, report.State, report.Revision, summary = report.Current?.Summary[..Math.Min(report.Current.Summary.Length, 3000)], findings = report.Current?.Findings.Count, artifacts = report.Baseline?.ArtifactIds });
     }
     public static async Task Start(ToolExecutionContext ctx, ProcessManager processes)
@@ -125,7 +125,9 @@ public static class WorkflowTools
         var finish = call.Name == "workflow_finish";
         var output = new ToolOutput(Json.Serialize(new { report.Id, report.Revision, report.State, report.ArtifactId, report.Drift, summary = report.Current!.Summary }), FinishRun: finish);
         ctx.Session.Receipts[call.Id] = new(output.Content, false, finish);
-        ctx.Save(finish ? "workflow.finished" : "workflow.updated", new { report.Id, report.Revision, report.State, report.ArtifactId, summary = report.Current!.Summary, findings = finish ? report.Current.Findings.Select(f => new { f.Id, f.Category, f.Severity, f.Title, f.Path, f.Line }).ToArray() : null, limitations = finish ? report.Current.Limitations.Concat(report.Baseline?.Limitations ?? []).Concat(report.Drift).Distinct().ToArray() : null });
+        // Save the workflow transition atomically with the report and completion receipt.
+        if (finish && ctx.Session.ParentConversationId is null) ctx.Session.Workflow = WorkflowMode.Work;
+        ctx.Save(finish ? "workflow.finished" : "workflow.updated", new { report.Id, report.Revision, report.State, report.ArtifactId, workflow = ctx.Session.Workflow.ToString(), summary = report.Current!.Summary, findings = finish ? report.Current.Findings.Select(f => new { f.Id, f.Category, f.Severity, f.Title, f.Path, f.Line }).ToArray() : null, limitations = finish ? report.Current.Limitations.Concat(report.Baseline?.Limitations ?? []).Concat(report.Drift).Distinct().ToArray() : null });
         return output;
     }
     private static void CheckCoverage(ToolExecutionContext ctx, WorkflowReport report)

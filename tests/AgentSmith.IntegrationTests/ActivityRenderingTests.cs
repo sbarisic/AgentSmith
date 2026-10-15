@@ -49,4 +49,16 @@ public sealed class ActivityRenderingTests
         renderer.Render("plan.updated", new { revision = 1, steps = new[] { new { id = "S1", status = "In progress", description = "Inspect entry point" } } });
         Assert.Contains("Read src/Program.cs", output.ToString()); Assert.Contains("Inspect entry point", output.ToString());
     }
+    [Fact]
+    public void AudioProgressUsesStatusAndDefaultOutputDoesNotDuplicateTranscript()
+    {
+        var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
+        renderer.Render("audio.progress", new { message = "Local audio · transcribing" });
+        Assert.Equal("Local audio · transcribing", renderer.RunningStatus); Assert.Empty(output.ToString());
+        renderer.Render("tool.completed", new { name = "audio_transcribe", content = Json.Serialize(new
+        { kind = "audio-analysis", path = "clip.wav", model = "Whisper", startSeconds = 0, durationSeconds = 23.9999375, summary = "Two estimated speakers.", analysis = "DUPLICATED TRANSCRIPT", artifactId = "audio-id" }) });
+        Assert.Contains("24.0s", output.ToString()); Assert.Contains("Two estimated speakers", output.ToString());
+        Assert.DoesNotContain("DUPLICATED TRANSCRIPT", output.ToString()); Assert.DoesNotContain('\u001b', output.ToString());
+    }
+
 }

@@ -19,7 +19,7 @@ internal sealed class WindowsChild : IDisposable
     {
         get
         {
-            if (!QueryInformationJobObject(job, 1, out var accounting, (uint)Marshal.SizeOf<BasicAccounting>(), IntPtr.Zero)) throw ErrorException();
+            if (!QueryInformationJobObject(job, 1, out BasicAccounting accounting, (uint)Marshal.SizeOf<BasicAccounting>(), IntPtr.Zero)) throw ErrorException();
             return accounting.ActiveProcesses == 0;
         }
     }
@@ -90,6 +90,16 @@ internal sealed class WindowsChild : IDisposable
         return result.Append('\\', slashes * 2).Append('"').ToString();
     }
     public void Stop() { if (job != IntPtr.Zero && !TerminateJobObject(job, 1)) throw ErrorException(); }
+    internal bool WaitForExit(int milliseconds) => WaitForSingleObject(process, (uint)milliseconds) == 0;
+    internal int Id => (int)GetProcessId(process);
+    internal long PeakJobMemoryBytes
+    {
+        get
+        {
+            if (!QueryInformationJobObject(job, 9, out ExtendedLimits limits, (uint)Marshal.SizeOf<ExtendedLimits>(), IntPtr.Zero)) throw ErrorException();
+            return (long)limits.PeakJobMemory;
+        }
+    }
     public void Dispose()
     {
         if (job != IntPtr.Zero) { CloseHandle(job); job = IntPtr.Zero; }
@@ -111,6 +121,7 @@ internal sealed class WindowsChild : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool QueryInformationJobObject(IntPtr job, int type, out BasicAccounting information, uint size, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool QueryInformationJobObject(IntPtr job, int type, out ExtendedLimits information, uint size, IntPtr returned);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string cwd, ref StartupEx startup, out ProcessInfo info);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref nuint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, nuint size, IntPtr previous, IntPtr returned);
@@ -119,5 +130,6 @@ internal sealed class WindowsChild : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint code);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+    [DllImport("kernel32.dll")] private static extern uint GetProcessId(IntPtr handle);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
 }

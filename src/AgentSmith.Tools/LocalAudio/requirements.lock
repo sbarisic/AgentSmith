@@ -1309,3 +1309,9 @@ wrapt==2.5.1 \
     --hash=sha256:fcccaa1484f7dd1091602970988ab741491f9f974013c844f70e45ac1196b80d \
     --hash=sha256:fd3f878a4aac3c262447ddf43c5f4c18fc67dfc3ba69c4fb1c7a4c4af96abe7e
     # via tensorflow-cpu
+
+sherpa-onnx==1.13.8 \
+    --hash=sha256:171e6fac715bae20e11829e8dbfc70ed990ede1b35e6332f8121b27691a002de
+
+sherpa-onnx-core==1.13.8 \
+    --hash=sha256:5579e80196d516e6dae23c8f629292ce3142ab8869925d32b94612fd86f93733

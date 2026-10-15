@@ -7,13 +7,14 @@ using AgentSmith.Core;
 
 namespace AgentSmith.Tools;
 
-public sealed record AudioReadiness(bool Transcription, bool Classification, string Location, string Message)
+public sealed record AudioReadiness(bool Transcription, bool Classification, string Location, string Message, bool Diarization = false)
 {
-    public bool Ready(string tool) => tool switch { "audio_transcribe" => Transcription, "audio_classify" => Classification, _ => Transcription && Classification };
+    public bool Ready(string tool) => tool switch { "audio_transcribe" => Transcription, "audio_classify" => Classification, "audio_diarize" => Diarization, _ => Transcription && Classification };
 }
 
 public static class LocalAudioInstallation
 {
+    public static string HelperState => LocalAudioService.State;
     public static string Bundle => Path.Combine(AppContext.BaseDirectory, "LocalAudio");
     private static string Fingerprint(string bundle) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(bundle, "downloads.json"))
         .Concat(File.ReadAllBytes(Path.Combine(bundle, "requirements.lock"))).Concat(File.ReadAllBytes(Path.Combine(bundle, "audio_helper.py"))).ToArray()));
@@ -35,10 +36,12 @@ public static class LocalAudioInstallation
             var runtime = File.Exists(Path.Combine(directory, "env", "Scripts", "python.exe")) && File.Exists(Path.Combine(directory, "helper", "audio_helper.py"));
             var whisper = runtime && new[] { "model.bin", "config.json", "tokenizer.json", "vocabulary.txt" }.All(n => File.Exists(Path.Combine(directory, "models", "whisper", n)));
             var yamnet = runtime && new[] { "saved_model.pb", "assets/yamnet_class_map.csv", "variables/variables.index", "variables/variables.data-00000-of-00001" }.All(n => File.Exists(Path.Combine(directory, "models", "yamnet", n)));
+            var diarization = runtime && new[] { "model.onnx", "nemo_en_titanet_small.onnx" }.All(n => File.Exists(Path.Combine(directory, "models", "diarization", n)));
             return new(whisper, yamnet, directory,
                 $"Whisper small multilingual / faster-whisper 1.2.1 / CPU INT8: {(whisper ? "ready" : "missing files")}\nYAMNet 1 / TensorFlow CPU 2.20.0 / 521 classes: {(yamnet ? "ready" : "missing files")}\nLocation: {directory}" +
                 (whisper && yamnet ? "\nInference is local and offline. Returned text and labels may enter your chat provider's context." : "\nRun smith audio setup.") +
-                (update ? "\nA newer bundled helper is available; run smith audio setup. The previous installation remains usable." : ""));
+                (update ? "\nA newer bundled helper is available; run smith audio setup. The previous installation remains usable." : "") +
+                $"\nSpeaker separation / sherpa-onnx 1.13.8: {(diarization ? "ready" : "unavailable; run smith audio setup")}", diarization);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException)
         { return new(false, false, root, "Local audio is unavailable. Run smith audio setup. " + ex.Message); }
@@ -123,10 +126,16 @@ public static class LocalAudioInstallation
             await command(uv, ["--no-config", "venv", "--no-python-downloads", "--python", Path.Combine(directory, "runtime", "python", "python.exe"), Path.Combine(directory, "env")], directory, environment, cancellation);
             progress("Installing hash-locked Windows dependencies");
             await command(uv, ["--no-config", "pip", "sync", Path.Combine(helper, "requirements.lock"), "--python", Path.Combine(directory, "env", "Scripts", "python.exe"), "--require-hashes", "--only-binary", ":all:", "--index-url", "https://pypi.org/simple"], directory, environment, cancellation);
-            progress("Running offline self-tests for both engines");
+            if (files.TryGetValue("segmentation.tar.bz2", out var segmentation))
+            {
+                var speakers = Path.Combine(models, "diarization"); Directory.CreateDirectory(speakers);
+                File.Copy(files["diarization/nemo_en_titanet_small.onnx"], Path.Combine(speakers, "nemo_en_titanet_small.onnx"));
+                await command(Path.Combine(directory, "env", "Scripts", "python.exe"), ["-I", Path.Combine(helper, "audio_helper.py"), "--install-segmentation", segmentation, speakers], directory, LocalAudioService.OfflineEnvironment, cancellation);
+            }
+            progress("Running offline self-tests for installed engines");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation); timeout.CancelAfter(TimeSpan.FromMinutes(5));
             var result = await infer(directory, new() { ["protocol"] = 1, ["operation"] = "selftest", ["models"] = models }, progress, timeout.Token);
-            if (result["transcription"]?["status"]?.ToString() != "succeeded" || result["classification"]?["status"]?.ToString() != "succeeded")
+            if (result["transcription"]?["status"]?.ToString() != "succeeded" || result["classification"]?["status"]?.ToString() != "succeeded" || manifest["diarization"] is not null && result["diarization"]?["status"]?.ToString() != "succeeded")
                 throw new IOException("Audio self-test failed: " + result.ToJsonString()[..Math.Min(1800, result.ToJsonString().Length)]);
             await File.WriteAllTextAsync(Path.Combine(directory, "ready.json"), Json.Serialize(new { fingerprint = Fingerprint(bundle), installedAt = DateTimeOffset.UtcNow }), cancellation);
             // Generation paths never move: venv and SavedModel asset paths remain valid.

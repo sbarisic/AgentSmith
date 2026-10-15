@@ -91,6 +91,21 @@ public static class ArtifactAccess
     {
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Id == id) ?? throw new UserFacingException("Artifact is not registered to this conversation.");
         var loaded = Load(ctx, artifact);
+        if (name == "audio_read")
+        {
+            if (artifact.Kind != "audio-analysis") throw new UserFacingException("Artifact is not audio evidence.");
+            var view = args["view"]!.GetValue<string>();
+            var rendered = AudioViews.Render(ParseAudio(loaded.Text), view);
+            var cursor = args["cursor"]!.GetValue<int>(); var limit = args["maxCharacters"]!.GetValue<int>();
+            if (cursor < 0 || cursor > rendered.Length || limit is < 1 or > 4000) throw new UserFacingException("Audio cursor must be within the selected view; maxCharacters is 1..4000.");
+            if (cursor > 0 && cursor < rendered.Length && char.IsLowSurrogate(rendered[cursor])) throw new UserFacingException("Cursor splits a Unicode character.");
+            var count = Math.Min(limit, rendered.Length - cursor);
+            if (count > 0 && char.IsHighSurrogate(rendered[cursor + count - 1])) count--;
+            if (count == 0 && cursor < rendered.Length) throw new UserFacingException("Increase maxCharacters to read a complete Unicode character.");
+            return new(Json.Serialize(new { artifactId = id, view, state = loaded.State, loaded.Truncated,
+                text = rendered.Substring(cursor, count), cursor = cursor + count, hasMore = cursor + count < rendered.Length,
+                outcomes = AudioViews.Outcomes(ParseAudio(loaded.Text)) }));
+        }
         if (name == "artifact_read")
         {
             var cursor = args["cursor"]!.GetValue<int>(); var limit = args["maxCharacters"]!.GetValue<int>();
@@ -118,5 +133,29 @@ public static class ArtifactAccess
             if (more) break;
         }
         return new(Json.Serialize(new { artifactId = id, state = loaded.State, loaded.Truncated, matches, more }));
+    }
+
+    private static JsonObject ParseAudio(string text)
+    {
+        try { return JsonNode.Parse(text) as JsonObject ?? new() { ["analysis"] = text }; }
+        catch (System.Text.Json.JsonException) { return new() { ["analysis"] = text }; }
+    }
+
+    public static bool IsAudio(ToolExecutionContext ctx, string id) => ReadAudio(ctx, id) is not null;
+
+    internal static JsonObject? ReadAudio(ToolExecutionContext ctx, string id)
+    {
+        if (!ctx.Session.Artifacts.Any(a => a.Id == id))
+        {
+            var grant = ctx.Session.ArtifactGrants.SingleOrDefault(g => g.ArtifactId == id);
+            if (grant is null || ctx.Session.ParentConversationId != grant.SourceConversationId) return null;
+            var parent = ctx.Store.Get(grant.SourceConversationId);
+            if (parent is null) return null;
+            ctx = ctx with { Session = parent, Emit = null };
+        }
+        var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Id == id && a.Kind == "audio-analysis");
+        if (artifact is null) return null;
+        var loaded = Load(ctx, artifact);
+        return loaded.State == "available" ? ParseAudio(loaded.Text) : null;
     }
 }

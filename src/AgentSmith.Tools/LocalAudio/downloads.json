@@ -47,6 +47,34 @@
       "url": "https://tfhub.dev/google/yamnet/1?tf-hub-format=compressed",
       "sha256": "b80da2a1a56926fb0767205051a200dd7b3beaf3ea1ea126c42a53943996e5e0",
       "size": 14242921
+    },
+    {
+      "path": "segmentation.tar.bz2",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+      "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+      "size": 6958444
+    },
+    {
+      "path": "diarization/nemo_en_titanet_small.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+      "sha256": "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+      "size": 40257283
     }
-  ]
+  ],
+  "helperProtocol": 2,
+  "diarization": {
+    "engine": "sherpa-onnx 1.13.8",
+    "segmentation": "pyannote/segmentation-3.0 FP32",
+    "embedding": "nemo_en_titanet_small.onnx",
+    "threshold": 0.5,
+    "minDurationOn": 0.3,
+    "minDurationOff": 0.5,
+    "source": "https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/models.html",
+    "licenses": {
+      "segmentation": "MIT; included in the pinned segmentation archive",
+      "sherpa-onnx": "Apache-2.0",
+      "embedding": "NeMo Toolkit Apache-2.0, per NVIDIA TitaNet-S model card",
+      "embeddingModelCard": "https://catalog.ngc.nvidia.com/orgs/nvidia/nemo/models/titanet_small"
+    }
+  }
 }

@@ -8,7 +8,7 @@ public static partial class Program
 {
     private static void AudioCommands(RootCommand root, Option<string?> data, Option<bool> json, Option<bool> noColor)
     {
-        var command = new Command("audio", "Manage local Whisper small INT8 and YAMNet (Windows x64 CPU). Setup explicitly downloads a private runtime and models; inference stays offline.");
+        var command = new Command("audio", "Manage local Whisper small INT8, YAMNet and anonymous speaker separation (Windows x64 CPU). Setup explicitly downloads a private runtime and models; inference stays offline.");
         var action = new Argument<string>("action") { Description = "setup or status" }; command.Arguments.Add(action); root.Subcommands.Add(command);
         command.SetAction(p => Execute(p.GetValue(data), p.GetValue(json), p.GetValue(noColor), async app =>
         {
@@ -36,7 +36,7 @@ internal sealed partial class CliApp
     {
         var status = LocalAudioInstallation.Status(Store.DataDirectory);
         var error = Path.Combine(Store.DataDirectory, "audio", "last-error.txt");
-        Write("audio.status", new { status.Transcription, status.Classification, status.Location,
-            message = status.Message + (File.Exists(error) ? "\nLast setup error: " + File.ReadAllText(error) : "") });
+        Write("audio.status", new { status.Transcription, status.Classification, status.Diarization, status.Location, helper = LocalAudioInstallation.HelperState,
+            message = status.Message + "\nHelper: " + LocalAudioInstallation.HelperState + (File.Exists(error) ? "\nLast setup error: " + File.ReadAllText(error) : "") });
     }
 }
