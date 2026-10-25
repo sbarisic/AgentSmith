@@ -80,6 +80,20 @@ public sealed class AudioTests
         saved.Receipts.Clear(); Assert.Contains("not replayed", f.Tools.Recover(ctx, call)!.Content); Assert.Equal(1, f.Backend.Calls);
     }
 
+    [Fact]
+    public async Task SpeakerEmbeddingsNeverEnterShortAudioConversationArtifacts()
+    {
+        using var f = new Fixture(); f.Backend.Speakers = true;
+        f.Backend.Work = (_, _) =>
+        {
+            var result = Result();
+            result["diarization"] = new JsonObject { ["status"] = "succeeded", ["turns"] = new JsonArray(), ["embeddings"] = new JsonArray(new JsonObject { ["vector"] = new JsonArray(1, 0) }) };
+            return Task.FromResult(result);
+        };
+        await f.Tools.ExecuteAsync(f.Context(), f.Call());
+        Assert.DoesNotContain("embeddings", File.ReadAllText(Assert.Single(f.Session.Artifacts).Path));
+    }
+
     [Theory]
     [InlineData("../outside.wav")] [InlineData(".git/a.wav")] [InlineData("https://example.com/a.wav")]
     [InlineData("tone.txt")] [InlineData("bin/a.wav")]
@@ -119,7 +133,7 @@ public sealed class AudioTests
     }
 
     [Fact]
-    public async Task CancellationCleansSnapshotAndReleasesGlobalSlot()
+    public async Task CancellationCleansSnapshotAndAllowsFreshRequest()
     {
         using var f = new Fixture(); using var cancel = new CancellationTokenSource();
         f.Backend.Work = async (_, ct) => { cancel.Cancel(); await Task.Delay(10000, ct); return Result(); };
@@ -130,7 +144,7 @@ public sealed class AudioTests
     }
 
     [Fact]
-    public async Task ParentAndWorkerRegistriesSerializeAudio()
+    public async Task ParentAndWorkerRegistriesSubmitIndependentlyToBackend()
     {
         using var parent = new Fixture(); using var worker = new Fixture(); worker.Session.ParentConversationId = parent.Session.Id;
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -138,7 +152,8 @@ public sealed class AudioTests
         parent.Backend.Work = async (_, ct) => { entered.SetResult(); await release.Task.WaitAsync(ct); return Result(); };
         var first = parent.Tools.ExecuteAsync(parent.Context(), parent.Call()); await entered.Task;
         var second = worker.Tools.ExecuteAsync(worker.Context(), worker.Call());
-        Assert.Equal(0, worker.Backend.Calls); release.SetResult(); await Task.WhenAll(first, second);
+        await second.WaitAsync(TimeSpan.FromSeconds(5)); Assert.False(first.IsCompleted);
+        release.SetResult(); await first;
         Assert.Equal(1, worker.Backend.Calls);
     }
 

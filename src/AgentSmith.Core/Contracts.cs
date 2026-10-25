@@ -16,6 +16,12 @@ public enum WorkflowMode { Work, Plan, Document, Review, Memorize }
 public enum ToolEffect { ReadOnly, SessionState, Workspace, Process, MemoryState, Network }
 public sealed class Session
 {
+    public string? SelectedCaptureId { get; set; }
+    public string? SelectedAnalysisId { get; set; }
+    public Dictionary<string, string> AnalysisOperations { get; set; } = [];
+    public Dictionary<string, string> AnalysisArtifacts { get; set; } = [];
+    public RecordingChoice? RecordingChoice { get; set; }
+    public HashSet<string> InterruptedRecordingConsents { get; set; } = [];
     public List<NavigationSnapshot> NavigationSnapshots { get; set; } = [];
     public string[] NavigationSnapshotIds { get; set; } = [];
     public Dictionary<int, WorkflowMode> MessageWorkflows { get; set; } = [];
@@ -55,6 +61,12 @@ public sealed class Session
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<JsonObject> History { get; set; } = [];
     public List<Run> Runs { get; set; } = [];
+}
+public sealed class RecordingChoice
+{
+    public string QuestionId { get; set; } = "";
+    public Dictionary<string, string> Choices { get; set; } = [];
+    public bool InterruptedConsent { get; set; }
 }
 public sealed class Run
 {

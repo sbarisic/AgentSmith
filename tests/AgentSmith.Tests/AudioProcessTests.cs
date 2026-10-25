@@ -12,7 +12,7 @@ public sealed class AudioProcessTests
         using var root = new TestDirectory();
         using var live = new AudioTemporary(root.Path); File.WriteAllText(Path.Combine(live.Directory, "input.wav"), "live");
         var abandoned = Path.Combine(root.Path, "audio", "jobs", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(abandoned); File.WriteAllText(Path.Combine(abandoned, "input.wav"), "abandoned");
+        Directory.CreateDirectory(abandoned); File.WriteAllText(Path.Combine(abandoned, "lease"), ""); File.WriteAllText(Path.Combine(abandoned, "input.wav"), "abandoned");
         using var next = new AudioTemporary(root.Path);
         Assert.False(Directory.Exists(abandoned)); Assert.True(File.Exists(Path.Combine(live.Directory, "input.wav")));
     }

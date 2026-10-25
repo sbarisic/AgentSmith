@@ -28,7 +28,7 @@ internal static class CommandCompletion
         new("/artifacts", "List retained logs and verification reports"),
         new("/diagnostics", "Inspect structured build errors and test failures"),
         new("/artifact", "Read or search a retained artifact"),
-        new("/exit", "Exit; saved work can be resumed"),
+        new("/exit", "Exit explicitly; Ctrl+C never closes the chat"),
         new("/tools", "List tools and availability"),
         new("/changes", "Inspect checkpointed file changes"),
         new("/undo", "Undo a matching checkpointed file change"),
@@ -56,13 +56,14 @@ internal static class CommandCompletion
         new("/worker-limits", "Show or change parallel worker limits"),
         new("/worker-budget", "Show or change the budget for new workers"),
         new("/web-search", "Select native, basic, or disabled web search"),
-        new("/audio", "Inspect local Whisper and YAMNet readiness"),
+        new("/audio", "Inspect engines or explicitly record Windows output"),
         new("/memory", "Browse repository/global memories, manage shared memory, or toggle retrieval")
     ]);
 
     private static readonly Argument[] Arguments =
     [
-        new("/audio", 1, null, [new("status", "Inspect local audio installation")]),
+        new("/audio", 1, null, [new("recordings", "Select a saved recording"), new("summarize", "Summarize the selected recording"), new("transcript", "Read the selected transcript"), new("coverage", "Read selected coverage"), new("status", "Inspect local audio installation"), new("devices", "List playback endpoints"), new("capture", "Manage user-controlled recordings"), new("analyze", "Transcribe and summarize an entire capture or WAV/MP3"), new("analysis", "Inspect, resume, read, export or attach saved analysis")]),
+        new("/audio", 2, "capture", [new("start", "Start output recording"), new("list", "List retained recordings"), new("status", "Inspect recording"), new("stop", "Finalize recording"), new("export", "Export recording files"), new("delete", "Delete an inactive recording")]),
         new("/help", 1, null, [new("workflows", "Workflows and permissions"), new("session", "Conversation and saved results"), new("tools", "Tools, workers, and recovery"), new("queue", "Input, cancellation, and follow-ups"), new("settings", "Display, context, and memory"), new("all", "All command help")]),
         new("/mode", 1, null, [new("work", "Work workflow"), new("plan", "Plan workflow"), new("planning", "Alias for plan"), new("document", "Document workflow"), new("documentation", "Alias for document"), new("review", "Read-only Review workflow"), new("memorize", "Source-read-only repository memory workflow"), new("inspect", "Inspect permissions"), new("edit", "Edit permissions"), new("execute", "Execute permissions")]),
         new("/workflow", 1, null, [new("work", "Return to Work")]),

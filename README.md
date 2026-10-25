@@ -2,7 +2,7 @@
 
 AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, Review, and Memorize workflows share permission checks and saved task state.
 
-Future work is tracked in [plan.md](plan.md), starting with a shared background audio service for multiple Smith instances. This service is planned, not implemented.
+The shared audio service, explicit chat exit, Windows output recording and resumable whole-recording analysis are implemented. See [plan.md](plan.md) for verified delivery and remaining acceptance work.
 
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
 
@@ -58,15 +58,87 @@ After setup, inference is local, CPU-only and offline, with no API key. Tools ar
 - `audio_classify(path, startSeconds, durationSeconds)` returns YAMNet's sound categories, aggregate scores and top-five labels for each analysis window.
 - `audio_listen(path, question, startSeconds, durationSeconds)` runs transcription, classification and speaker separation. The question helps Smith interpret the evidence; it is never sent to Whisper as a prompt. A successful component is retained if another fails.
 
-Example: `Transcribe tests/test01_20s.wav and identify the sounds in the background.` Transcription identifies words; classification identifies likely sound categories; Smith interprets their results. YAMNet's 521 categories do not provide arbitrary audio question answering, calibrated certainty or precise event boundaries. Whisper can miss or misrecognize speech. No speech is reported explicitly. Speaker separation uses FP32 pyannote segmentation 3.0 and NeMo TitaNet small through sherpa-onnx 1.13.8, with automatic clustering (threshold 0.5; minimum speech 0.3 s, silence 0.5 s). Word attribution requires majority time coverage by one speaker and no overlap from another; ambiguous words remain labeled as such. Short and overlapping speech can be misassigned. This release excludes translation, real-person identification, microphone capture, CLAP and long-recording workflows.
+Example: `Transcribe tests/test01_20s.wav and identify the sounds in the background.` Transcription identifies words; classification identifies likely sound categories; Smith interprets their results. YAMNet's 521 categories do not provide arbitrary audio question answering, calibrated certainty or precise event boundaries. Whisper can miss or misrecognize speech. No speech is reported explicitly. Speaker separation uses FP32 pyannote segmentation 3.0 and NeMo TitaNet small through sherpa-onnx 1.13.8, with automatic clustering (threshold 0.5; minimum speech 0.3 s, silence 0.5 s). Word attribution requires majority time coverage by one speaker and no overlap from another; ambiguous words remain labeled as such. Short and overlapping speech can be misassigned. This release excludes translation, real-person identification, microphone capture and CLAP. Whole-recording workflows use the explicit commands below.
 
-WAV and MP3 share the same range rules: whole-second nonnegative start, duration 0..120 seconds, with zero selecting up to 120 seconds. Source files are limited to 25 MiB. PyAV decodes a private snapshot, downmixes to mono and resamples to 16 kHz; timestamps are relative to the original recording, including MP3 encoder-delay correction. Workspace exclusions and link/traversal checks apply. Smith does not play audio or fetch audio URLs. One job runs at a time per Smith process, including workers, with visible waiting/decoding/transcribing/classifying stages and a five-minute deadline including waiting. Models load lazily in one contained helper shared by parent and workers, and unload after five idle minutes. Cancellation of active inference and process exit terminate it; cancelling a queued request leaves active work intact. Old installed helpers remain usable until explicit setup upgrades them.
+WAV and MP3 share the same range rules: whole-second nonnegative start, duration 0..120 seconds, with zero selecting up to 120 seconds. Source files are limited to 25 MiB. PyAV decodes a private snapshot, downmixes to mono and resamples to 16 kHz; timestamps are relative to the original recording, including MP3 encoder-delay correction. Workspace exclusions and link/traversal checks apply. Smith does not play audio or fetch audio URLs. One job runs at a time across Smith processes and workers using the same service. The five-minute deadline includes snapshot preparation, connection, upload, queueing and inference. Models load lazily in the service-owned helper and unload after five idle minutes. Cancelling or disconnecting an active request stops its helper; other clients remain queued. Cancelling queued work leaves active inference intact. Closing a chat leaves the service available. Compatible old helpers remain usable until explicit setup upgrades them.
 
 Compact evidence appears in chat; `/artifact <id>` shows an audio summary and `/artifact <id> audio <view> [cursor]` opens a focused view. Explicit `/artifact <id> read <cursor>` still reads original raw evidence, including the class map. Mean label display uses a 0.05 threshold; timelines merge consecutive windows at 0.20 and show approximate intervals, not exact events or confidence. Summary timelines show up to ten intervals; omitted labels do not establish absence. Unfiltered scores remain available. Artifacts retain source and clip hashes, ranges, engine/model versions, timings and component outcomes. Fresh requests validate and hash current input, then reuse matching successful components from owned or explicitly granted artifacts; changed input, ranges, settings or installed fingerprints invalidate reuse. Interpretation questions do not change inference keys. Reuse survives reload, preserves original evidence times, and never uses an unrestricted cross-conversation cache. Raw audio is deleted after processing; abandoned snapshots from a killed process are cleaned on the next local audio call. Successful receipts recover without repeating inference. Interrupted calls without a receipt require a fresh request. Historical cloud-audio artifacts remain readable.
 
 Audio stays local, but returned transcript text and labels can enter your independently configured chat provider's context. Spoken instructions and model output are untrusted evidence, never authorization. Setup is an explicit terminal command, not a tool the model can invoke automatically. The internal fixed helper does not grant permission to execute project commands.
 
 Model/runtime pins are in `src/AgentSmith.Tools/LocalAudio/downloads.json`; package versions and hashes are in `requirements.lock`. Downloads, environments and models live under `<Smith data directory>/audio`, outside Git. See [local audio acceptance](LOCAL_AUDIO_ACCEPTANCE.md), [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and [YAMNet](https://www.tensorflow.org/hub/tutorials/yamnet).
+
+### Explicit chat exit and output recording
+
+Use `/exit` to close an interactive chat. Ctrl+C cancels active work and returns to the same chat; at an idle prompt it clears the entire unsent draft, including pasted blocks and draft attachments. Saved attachment files and submitted messages remain intact. Repeated presses do not exit. In a question or plan-review picker, Ctrl+C preserves the selection and note. Esc opens command mode: use `/exit`, another applicable command, or empty Enter to return to the picker. Ordinary text in command mode is not an answer. Real input-stream loss still ends the process and leaves saved work recoverable.
+
+Explicit `capture start` starts the compatible service if needed; capture needs no audio-model installation. It records the selected playback endpoint, including other applications and notifications using that endpoint. It does not automatically include the microphone. Recording never starts from a model tool or automatically from a chat.
+
+```powershell
+smith service start
+smith audio devices
+smith audio capture start                     # displayed default multimedia output
+smith audio capture status
+smith audio capture stop                      # sole active recording only
+smith audio capture list 1
+smith audio capture export <id> C:\exports\new-recording
+smith audio capture delete <id>               # inactive recording; explicit deletion
+```
+
+Use the same commands inside a chat with `/audio` instead of `smith audio`. Commands accept the usual terminal `--data-dir`, `--json` and `--no-color` options. Device IDs and paths containing spaces must be quoted. `capture start [device-id] --max-storage-gib 20` overrides the default aggregate 10 GiB retention budget for that capture. Smith warns at 80% and stops with an interruption outcome at the budget or the 1 GiB free-disk reserve. Old recordings are never automatically deleted.
+
+The service permits one recording at a time, independently of inference. Chat exit leaves it recording and prints the exact stop command. Graceful service stop finalizes it; forced stop, device failure and crash recovery retain incomplete audio as Interrupted. A changed default device never silently changes the selected recording endpoint. Known device discontinuities are recorded in the manifest and make the final outcome Interrupted; recoverable acquisition continues. Buffer overflow and storage failures stop acquisition.
+
+Recordings are stored under `<data-dir>/audio/recordings` in a directory restricted to the current Windows user. Native-format WAV chunks rotate at 60 seconds or 16 MiB, with a durable manifest of timing, hashes and coverage. Export creates a **new directory** containing ordered WAV chunks, the manifest and `recording.m3u`; it never overwrites a destination. Interrupted exports can leave a `.smith-export-*` staging directory next to the destination. Inspect its contents before deleting it. Export and deletion require a running compatible service; active recordings cannot be exported or deleted.
+
+Microphone mixing and per-application isolation remain future work. Existing model-facing audio tools retain their 25 MiB/120-second limits. Use the explicit whole-recording commands below for longer sources. See [recording and exit acceptance](WINDOWS_RECORDING_ACCEPTANCE.md).
+
+## Simple recording conversations
+
+In a chat, use `/audio capture start`, then `/audio capture stop`, then ask **“Summarize that recording.”** Smith remembers the selected recording, reuses completed analysis, attaches retained evidence and answers in the same turn. Capture does not automatically start analysis. The capture commands show compact status; `/audio capture status` retains the detailed identifiers.
+
+For a capture made in another terminal, use `/audio recordings` and select it by date, duration and endpoint. `/audio summarize [capture-id]` displays a saved or newly generated report directly; `/audio transcript [cursor]` and `/audio coverage [cursor]` read the selected evidence. IDs and older management commands remain supported. A deleted selection never silently switches to another capture.
+
+Requested analysis starts the compatible service when needed, but cached evidence remains readable without it or installed models. Smith never downloads models automatically, replaces an incompatible running service, starts recording through model tools or stops an active recording to analyze it. Recovered captures require explicit consent to analyze possible gaps. Paused jobs require explicit resume, and failed or uncertain requests require explicit retry authorization.
+
+Normal tool activity is compact; full evidence remains available through detail commands, verbose display and JSON events. Workers need explicit artifact grants. See [simple recording acceptance](SIMPLE_RECORDING_ACCEPTANCE.md).
+
+## Whole-recording transcription and analysis
+
+Start the service explicitly after `smith audio setup`. Then use these commands, or replace `smith audio` with `/audio` in a chat:
+
+```text
+smith audio analyze capture <recording-id>
+smith audio analyze file "C:\audio\meeting.mp3"
+smith audio analysis list
+smith audio analysis status <analysis-id>
+smith audio analysis resume <analysis-id>
+smith audio analysis read <analysis-id> transcript
+smith audio analysis export <analysis-id> <new-directory>
+smith audio analysis delete <analysis-id>
+```
+
+Analysis processes the full source, including files larger than 25 MiB and longer than 120 seconds. It retains timestamped transcripts, estimated recording-wide anonymous speakers, coverage and a cited summary. Options are `--sounds`, `--language auto|<code>`, `--no-summary`, `--allow-interrupted`, `--question "focus"`, `--max-minutes N`, `--max-requests N` and `--max-storage-gib N`. Active captures are rejected. Interrupted captures require the explicit option and retain missing-coverage warnings. Chat file paths must be inside the workspace; terminal paths explicitly select a local file.
+
+The initiating client performs the work. Ctrl+C pauses it; closing the client interrupts it. Resume is explicit, reuses completed components and does not replay uncertain submissions. Add `--retry-failed` or `--retry-uncertain` only when you want those requests attempted again. Each attempt defaults to 30 minutes and 100 summary requests. Aggregate analysis storage defaults to 10 GiB with a 1 GiB free-disk reserve; sources and decoded snapshots count toward it. Storage exhaustion pauses progress without deleting older work. Concurrent preparation reserves its space, so another preparation can pause until capacity is released.
+
+Speech recognition and speaker reconciliation run locally. Summaries use the current conversation model, or the saved default model in terminal use; `--no-summary` needs no provider sign-in. Standalone summaries use English; chat summaries follow the conversation language. Recognized credentials are redacted, but recognition and secret detection are imperfect. Transcripts are treated as untrusted evidence. Speaker labels do not identify people and are never matched across recordings.
+
+Views are `summary`, `transcript`, `speakers`, `sounds`, `coverage` and `metadata`. `read <id> [view] [cursor]` returns a page and the next cursor. Export creates Markdown when a summary exists, timestamped TXT/SRT, JSON metadata and JSONL evidence in a new directory; raw audio is excluded. Evidence reads and export need neither the service nor models. Deletion retains the source and any previously attached conversation evidence.
+
+Chat-created results attach automatically. To discuss terminal-created results, explicitly run `/audio analysis attach <analysis-id>`, then ask your question. Smith uses `audio_read` and artifact search; workers need existing explicit grants. An ID alone grants no model access. There is no model tool that starts recording or analysis. See [full-recording acceptance and limitations](FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
+
+### Shared inference service
+
+After `smith audio setup`, run `smith service start` explicitly. It starts a hidden background Smith process and waits for readiness; repeated starts reuse the compatible instance. `smith service run` hosts it in the foreground. `smith service status`, `smith audio status` and `/audio status` inspect readiness without loading models. Commands support `--data-dir`, `--json` and `--no-color`.
+
+`smith service stop` stops admission and drains accepted work. After five seconds the command reports a still-draining service. `smith service stop --force` interrupts active and queued work. Stopping the service does not hide installed audio tools: matching saved evidence, successful receipts and `audio_read` remain available. An uncached request reports startup guidance; it never starts a private helper, downloads models or automatically replays an uncertain submission.
+
+One current-user-only local named pipe serves each canonical audio storage directory. Limits are one inference slot, 32 inference clients, 32 waiting/upload reservations globally and four waiting/upload reservations per client process. Parent and workers share their connection and quota. Completed uploads enter FIFO order; incomplete uploads expire after 30 seconds or the request deadline. Queue-full errors require a fresh request. Conversation storage and artifact permissions remain in each client.
+
+Status includes the resolved directory, service/helper process IDs, build/protocol, generation, engine readiness and queue counts. Packaged Windows hosts can redirect LocalAppData; use the resolved `--data-dir` shown by status if another terminal otherwise selects different storage. No elevation, Windows service registration or automatic login startup is added.
+
+Before replacing a published executable, stop/drain the service and close chats using that build, publish, then start the new service. Clients require a matching service build and protocol. Installation generations remain immutable; queued jobs keep their generation and helpers switch only between jobs. See [the acceptance record](LOCAL_AUDIO_SERVICE_ACCEPTANCE.md) for measurements and limitations.
 
 ## Worker execution budgets
 

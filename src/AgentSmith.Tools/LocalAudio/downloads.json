@@ -1,5 +1,6 @@
 {
   "protocol": 1,
+  "recordingAnalysis": 1,
   "python": "3.11.14",
   "uv": "0.9.5",
   "whisperRevision": "536b0662742c02347bc0e980a01041f333bce120",

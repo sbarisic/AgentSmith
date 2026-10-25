@@ -75,7 +75,11 @@ public sealed class WorkerTests
         while (f.Store.Get(worker.ChildId)!.Runs.Count == 0) await Task.Delay(10, deadline.Token);
         var message = await f.Invoke("agent_message", new { agentId = worker.Id, text = "Focus on the parser; do not edit." }, id: "send-once");
         var repeat = await f.Invoke("agent_message", new { agentId = worker.Id, text = "Focus on the parser; do not edit." }, id: "send-once");
-        Assert.Equal(message.Content, repeat.Content);
+        // The worker can incorporate the message between reads; identity, not delivery state, is idempotent.
+        var originalReceipt = JsonNode.Parse(message.Content)!; var repeatedReceipt = JsonNode.Parse(repeat.Content)!;
+        Assert.Equal(originalReceipt["messageId"]!.ToString(), repeatedReceipt["messageId"]!.ToString());
+        Assert.Equal(originalReceipt["targetId"]!.ToString(), repeatedReceipt["targetId"]!.ToString());
+        Assert.Contains(repeatedReceipt["state"]!.ToString(), new[] { "Pending", "Incorporated" });
         var saved = Assert.Single(f.Store.Steering(f.Parent.Id)); Assert.Equal("parent", saved.Sender); Assert.Equal(worker.ChildId, saved.ConversationId);
         var child = f.Store.Get(worker.ChildId)!;
         Assert.DoesNotContain(f.Agents.Available(child), t => t.Name == "agent_message");

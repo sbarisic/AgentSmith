@@ -21,7 +21,7 @@ public static class ArtifactAccess
     }
     public static ArtifactRecord Register(ToolExecutionContext ctx, string path, string kind, string? processId = null)
     {
-        if (kind is not ("audio-analysis" or "workspace-map" or "http-response" or "web-page" or "workflow-report" or "review-evidence" or "tool-result" or "process-log" or "build-diagnostics" or "test-report" or "verification" or "agent-report" or "agent-transcript")) throw new UserFacingException("Unsupported artifact kind.");
+        if (kind is not ("recording-analysis" or "audio-analysis" or "workspace-map" or "http-response" or "web-page" or "workflow-report" or "review-evidence" or "tool-result" or "process-log" or "build-diagnostics" or "test-report" or "verification" or "agent-report" or "agent-transcript")) throw new UserFacingException("Unsupported artifact kind.");
         var full = Validate(ctx, path);
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Path.Equals(full, StringComparison.OrdinalIgnoreCase));
         if (artifact is not null) return artifact;
@@ -90,6 +90,7 @@ public static class ArtifactAccess
     private static ToolOutput ReadRegistered(ToolExecutionContext ctx, string name, JsonNode args, string id)
     {
         var artifact = ctx.Session.Artifacts.SingleOrDefault(a => a.Id == id) ?? throw new UserFacingException("Artifact is not registered to this conversation.");
+        if (artifact.Kind == "recording-analysis") return ReadRecording(ctx, artifact, name, args);
         var loaded = Load(ctx, artifact);
         if (name == "audio_read")
         {
@@ -141,7 +142,48 @@ public static class ArtifactAccess
         catch (System.Text.Json.JsonException) { return new() { ["analysis"] = text }; }
     }
 
-    public static bool IsAudio(ToolExecutionContext ctx, string id) => ReadAudio(ctx, id) is not null;
+    private static ToolOutput ReadRecording(ToolExecutionContext ctx, ArtifactRecord artifact, string name, JsonNode args)
+    {
+        var manifestPath = Validate(ctx, artifact.Path);
+        var manifest = RecordingAnalysisStore.ReadJson<JsonObject>(manifestPath);
+        if (manifest["version"]?.GetValue<int>() != 1 || manifest["kind"]?.ToString() != "recording-analysis") throw new UserFacingException("Unsupported recording artifact.");
+        var directory = Path.GetDirectoryName(manifestPath)!;
+        var allowed = new HashSet<string>(["job.json", "coverage.json", "summary.md", "transcript.jsonl", "speakers.jsonl", "sounds.jsonl"]);
+        foreach (var file in manifest["files"]!.AsArray())
+        {
+            var filename = file!["name"]!.ToString();
+            if (!allowed.Remove(filename)) throw new UserFacingException("Invalid recording artifact file.");
+            var path = Validate(ctx, Path.Combine(directory, filename));
+            if (RecordingAnalysisStore.Hash(path) != file["hash"]!.ToString()) throw new UserFacingException("Recording evidence changed since attachment.");
+        }
+        if (allowed.Overlaps(["job.json", "coverage.json", "transcript.jsonl", "speakers.jsonl", "sounds.jsonl"]) ||
+            allowed.Any(filename => File.Exists(Path.Combine(directory, filename))))
+            throw new UserFacingException("Recording artifact has missing or unregistered evidence files.");
+        if (name is "audio_read" or "artifact_read")
+        {
+            var result = RecordingAnalysis.ReadView(directory, name == "audio_read" ? args["view"]!.ToString() : "summary", args["cursor"]!.GetValue<int>(), args["maxCharacters"]!.GetValue<int>());
+            result["artifactId"] = artifact.Id; result["state"] = "available"; return new(result.ToJsonString());
+        }
+        var query = args["query"]!.ToString();
+        if (query.Length is < 1 or > 512) throw new UserFacingException("Search text must contain 1..512 characters.");
+        var matches = new JsonArray(); var more = false;
+        foreach (var row in RecordingAnalysis.Rows(Path.Combine(directory, "transcript.jsonl")))
+        {
+            var text = row["text"]!.ToString(); var at = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) continue;
+            if (matches.Count >= 50) { more = true; break; }
+            matches.Add(new JsonObject { ["id"] = row["id"]!.DeepClone(), ["startSeconds"] = row["startSeconds"]!.DeepClone(), ["excerpt"] = text.Substring(Math.Max(0, at - 60), Math.Min(240, text.Length - Math.Max(0, at - 60))) });
+        }
+        return new(new JsonObject { ["artifactId"] = artifact.Id, ["matches"] = matches, ["more"] = more }.ToJsonString());
+    }
+
+    public static bool IsAudio(ToolExecutionContext ctx, string id)
+    {
+        if (ctx.Session.Artifacts.Any(a => a.Id == id && a.Kind == "recording-analysis")) return true;
+        var grant = ctx.Session.ArtifactGrants.SingleOrDefault(g => g.ArtifactId == id);
+        if (grant is not null && ctx.Session.ParentConversationId == grant.SourceConversationId && ctx.Store.Get(grant.SourceConversationId)?.Artifacts.Any(a => a.Id == id && a.Kind == "recording-analysis") == true) return true;
+        return ReadAudio(ctx, id) is not null;
+    }
 
     internal static JsonObject? ReadAudio(ToolExecutionContext ctx, string id)
     {

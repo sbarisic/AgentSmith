@@ -1,176 +1,116 @@
-# Future plan: AgentSmith improvements
+# AgentSmith implementation status and future work
 
-Status: proposed; not implemented. Created 15 October 2026.
+Updated 15 October 2026. The shared local audio service, explicit chat exit, Windows output recording and whole-recording analysis are implemented. Verified behavior and remaining acceptance limits are recorded below.
 
-## Goal
+## Shared local audio service: delivered
 
-Run one background Smith service that performs local audio inference for multiple Smith CLI instances and their workers. Clients share loaded Whisper, YAMNet and speaker-separation models instead of each loading its own copies. Preserve offline inference, tool permissions, conversation isolation, artifacts and receipt recovery.
+One explicitly managed background Smith process serves each Windows user and canonical audio storage directory. Chats and workers share one queue and one loaded helper. Conversation storage, permissions, artifact reuse and receipts remain client-owned. The service never opens conversation databases or creates a global evidence cache.
 
-## Current behavior
+Use `smith audio setup`, then `smith service start`. `smith service run` supports foreground diagnostics; `service status`, `audio status` and `/audio status` inspect readiness without loading models. `service stop` drains accepted work; `service stop --force` interrupts it. Commands support the existing data-directory and JSON options. No elevation or automatic startup registration is added.
 
-`AudioTool` and `LocalAudioService` serialize audio work within one Smith process. Parent and worker requests share that process's Python helper. Separate Smith processes have independent queues, helpers and model allocations. Model files are shared on disk when processes use the same data directory. Each helper unloads after five idle minutes.
+Current limits are one inference slot, 32 inference clients, 32 waiting/upload reservations, four waiting/upload reservations per client, 64 KiB protocol frames, 25 MiB sources and 120-second clips. The five-minute request deadline includes preparation, transport and queue time. Incomplete uploads expire after at most 30 seconds. Models unload after five idle minutes while the service stays available.
 
-Existing `audio_read` views and durable component reuse do not require new inference. Keep these operations in the client. The service shares computation and loaded models; it does not become a global conversation or evidence cache.
+Installed audio tools remain available when the service is stopped. Matching durable evidence and receipts need no connection. Short-audio requests requiring new inference report startup guidance. Requested whole-recording analysis starts the compatible service when needed. Neither path starts private helpers or automatically replays uncertain work. Source bytes are validated and streamed into leased temporary service directories; the service reconstructs its own paths. Immutable generation IDs/fingerprints remain pinned to each request.
 
-## Proposed defaults and scope
+### Completed implementation and verification
 
-- Windows x64, CPU inference, current pinned audio engines and explicit `smith audio setup` installation.
-- One service per Windows user and canonical Smith data directory. All clients using that directory share it. A different data directory deliberately creates a separate service/model pool; status must make this visible.
-- One active audio job across connected clients, with a bounded FIFO queue. Initial limit: 32 waiting jobs total and four per connected client, with explicit queue-full errors. Worker requests use their parent process's connection and quota.
-- Load models lazily. Unload the Python helper after five idle minutes, while keeping the lightweight service available for future requests. Never unload an active job.
-- Preserve the 25 MiB source limit, 120-second clip limit and five-minute end-to-end request deadline for individual inference requests, including snapshot preparation, connection and queue time. The completed-recording workflow below orchestrates bounded chunks for longer calls rather than truncating them to these limits.
-- Keep the service independent of the chat provider. No API key, account or network audio inference is required.
-- First release is an explicitly started background process, without elevation, Windows Service Control Manager installation or automatic login startup. Remote access, GPUs, multiple inference slots and cross-user sharing are outside this scope.
+- [x] Lifecycle commands, detached process ownership, canonical identity including Windows package redirection, singleton lease, restricted local named pipe and matching identity/build/protocol handshake.
+- [x] Bounded admission, FIFO dispatch, progress, complete request deadlines, cancellation/disconnect handling and graceful/forced shutdown.
+- [x] Service-owned helper, lazy loading, real five-minute idle release and helper-tree cleanup after service failure.
+- [x] Client integration, shared parent/worker connection, pre-service component reuse, preserved artifacts/permissions/receipts and historical helper/artifact compatibility.
+- [x] Installation readiness, immutable generation validation, fingerprint mismatch rejection and real helper switching between pinned generations of the same engines.
+- [x] Protocol, queue, cancellation, upload, cleanup and recovery tests; independent-process start/exit/isolation and 32-client/32-reservation limit checks.
+- [x] Real inference with three independent clients, a spawned worker and parent, cold/warm/queue/memory measurements and offline cache reuse after reload with the service stopped.
+- [x] Full Release verification: 542 unit/runtime/real-model tests and 324 integration tests passed without failures or skips; eight Python helper tests passed.
+- [x] Self-contained Windows publication to the existing PATH folder, fresh published-service/CLI smoke, updated help/README/design and service left available.
 
-## User interface and lifecycle
+Measurements, commands and evidence are in [LOCAL_AUDIO_SERVICE_ACCEPTANCE.md](LOCAL_AUDIO_SERVICE_ACCEPTANCE.md). Sampled peak private memory for three clients decreased from 3.465 GiB with independent helpers to 1.512 GiB with the shared service; throughput and latency remain workload-dependent.
 
-Proposed commands:
+### Additional acceptance not yet performed
 
-| Command | Behavior |
-| --- | --- |
-| `smith service start` | Start a hidden background instance, wait for a readiness handshake, and return its status. Starting an existing compatible instance is idempotent. |
-| `smith service run` | Run the same host in the foreground for diagnostics. |
-| `smith service status` | Show service identity, data directory, protocol/build, installation generation, engine readiness, helper state, active work and queue counts. |
-| `smith service stop` | Stop admitting work, drain already accepted jobs within their deadlines, unload the helper and exit. Return a clear draining state if shutdown is still in progress. |
-| `smith service stop --force` | Explicitly interrupt active and queued work and stop immediately. Notify affected clients. |
+- [ ] Interactive access attempts from a separate Windows account. The current-user-only kernel DACL was inspected, and remote UNC pipe access was rejected with access denied.
+- [ ] OS-enforced firewall isolation of audio inference. Existing offline settings, helper socket blocking and file-only decoding remain verified.
+- [ ] Accuracy/compatibility acceptance for a future upgrade to different model releases. Current tests cover pinned generations of the same engines, legacy helper protocol handling and incompatible fingerprints.
 
-Support the existing `--data-dir` and structured JSON conventions. Extend `smith audio status` and `/audio status` with connection, queue and shared-helper information.
+These additional checks do not add recording, microphone capture, remote service access, GPUs or automatic startup to this release.
 
-In this service release, audio tools connect to the service by default. If it is unavailable, show `smith service start` guidance; never silently launch a private model helper as fallback. Model-callable tools cannot install models or start/stop the service. Saved audio evidence remains readable while the service is stopped.
+## Explicit chat exit: delivered
 
-The service survives individual CLI exits. Its Python child remains inside the existing kill-on-close Windows job owned by the service. Explicit shutdown or service failure terminates that child. Launch the background Smith host with its own lifetime, independent of a requesting chat's child-process job; verify this with a real parent-exit test.
+- [x] Idle Ctrl+C clears the entire unsent draft (text, pasted blocks and attachment references); repeated presses keep the chat open; active cancellation returns to the same chat and holds queued work.
+- [x] Interactive chat/resume own Ctrl+C instead of System.CommandLine's invocation termination handler. Standalone command cancellation remains separate.
+- [x] Ctrl+C stays in question/review pickers. Esc enters command mode, ordinary text is not submitted, and empty Enter restores the same selection/note and prior composer draft.
+- [x] `/exit` uses common cancellation/queue hold and reports ongoing recording. Actual redirected EOF retains cleanup/recovery behavior.
+- [x] Keyboard/integration regressions and real Windows-console checks cover repeated Ctrl+C, idle draft clearing, preserved active/picker drafts, question command-mode return and explicit exit. Help and completion guidance updated.
 
-## Local transport and access boundaries
+## Windows output recording: delivered (capture first)
 
-- Use a local Windows named pipe, restricted to the current Windows user, with remote pipe clients rejected. Derive the endpoint from user identity and canonical data-directory identity. Do not expose a TCP listener.
-- Use an OS-backed singleton lock to arbitrate concurrent starts. Validate endpoint ownership and handshake identity; a PID file alone does not establish ownership or liveness.
-- Define a separate, versioned client/service protocol with request IDs and bounded frames. Messages cover handshake, submission, upload, queue/progress, component outcomes, completion, cancellation and errors. Keep this independent of the existing Python helper protocol and audio artifact schema.
-- Bound connections, in-flight uploads, metadata, total audio bytes and result size. Apply admission control before accepting audio uploads. Reject unsupported versions and malformed or oversized input explicitly.
-- Preserve workspace path, exclusion, link, file-handle and permission validation in the client. Snapshot and hash the validated input before submission; send its bounded bytes, not an arbitrary filesystem path for the service to open.
-- Stream the snapshot into a service-owned private job directory, verify its length/hash and validate operation, clip range, language and component settings again. Only invoke the fixed managed helper. Neither paths nor requests authorize arbitrary commands or scripts.
-- Bind each request and cancellation handle to its connection. A client cannot retrieve another client's results or cancel another client's jobs. Keep conversation data and source contents out of service status and routine logs.
-- Named-pipe user isolation is not a sandbox against malicious programs running as that same Windows user. Existing conversation ownership and artifact grants remain enforced by each Smith client.
+Recording and file management use NAudio.Wasapi 3.1.0 in the shared service, independent of the inference queue and installed models. Whole-recording analysis is a separate, explicitly started client workflow described below.
 
-## Scheduling, cancellation and recovery
+- [x] Matching `/audio` and `smith audio` commands: devices, capture start, list, status, stop, export and delete. Terminal controls bypass conversations/accounts. Chat records a metadata reference without granting model access.
+- [x] One explicit capture per service, fixed output endpoint, retained start-operation identity, no automatic replay or restart, and no model-facing capture controls.
+- [x] Current-user recording directory, exclusive leases, 16 MiB bounded audio buffer, numbered native WAVs, durable manifest and recovery of complete retained frames.
+- [x] Rotation at 60 seconds or 16 MiB, timestamp/sample-position accounting, inferred-silence labels and explicit discontinuity/interruption outcomes.
+- [x] Configurable 10 GiB aggregate retention budget, 80% warning, 1 GiB disk reserve, no automatic deletion, streamed export to a new directory and exclusion between export/delete.
+- [x] Chat exit leaves capture active; another client can stop it. Graceful shutdown finalizes; forced shutdown and service crash retain Interrupted audio. Service/audio status and composer show capture state.
+- [x] Fake-backend and transport checks, actual process shutdown/crash recovery, real console behavior and real inference while capture is active.
+- [x] Controlled output capture exceeded 120 seconds and 25 MiB: 140.38 seconds, 53,908,000 bytes, four WAVs, no reported gaps. Hashes/frame offsets and exported playback verified. Sampled service private-memory peak: 26.4 MiB without models.
+- [x] Full Release suite with real models: 555 unit/runtime and 324 integration tests, zero failures/skips; eight Python helper tests. Final targeted regressions and published-console checks also passed.
+- [x] Self-contained local Windows publication, updated help/README/design and service available with no recording active. No Git commit, push or automatic startup registration.
 
-1. Admit requests using the global/per-client limits, then process accepted jobs in FIFO order. Emit waiting progress only for jobs that actually wait, with queue position and elapsed queue time.
-2. Carry the caller's remaining deadline into the service. Queueing and transport must not reset the five-minute budget. Drop expired jobs before inference and enforce cancellation on active work.
-3. Cancelling or disconnecting a queued client removes only its jobs. Cancelling or disconnecting the active client terminates the helper if needed; the next queued request starts a fresh helper. Other clients remain queued and receive updated progress.
-4. Helper crashes or invalid output fail the active request explicitly. The service may start a fresh helper for a different queued request, but never automatically replay interrupted inference.
-5. A service crash makes outstanding client requests interrupted. A fresh service does not replay an old queue. Successful client receipts remain authoritative; receipt-less interruptions require a fresh user request.
-6. Reject duplicate request IDs on a connection. Do not reconnect and resubmit automatically after an uncertain submission or result-delivery failure.
-7. Delete uploaded/decoded audio after success, failure, cancellation or disconnect. Clean abandoned service job directories on startup using exclusive leases and bounded cleanup, without touching active work or unrelated files.
+Commands, evidence, final regression counts and measurement limits: [WINDOWS_RECORDING_ACCEPTANCE.md](WINDOWS_RECORDING_ACCEPTANCE.md).
 
-## Installation, updates and evidence
+### Additional recording acceptance not yet performed
 
-- Continue using explicit staged `smith audio setup`, checksums, self-tests and the atomic installation-generation pointer. Service startup never downloads dependencies or weights.
-- Each admitted request identifies the required model/settings fingerprint. Pin that generation for the request; do not switch it while running. Reject unavailable/incompatible generations with actionable setup/reconnect guidance.
-- On a generation change, finish active work before unloading the old helper and switching. Handle queued generation mismatches explicitly rather than silently changing their model provenance. Retain generations needed by active work.
-- Establish a client/service compatibility handshake. Refuse incompatible builds/protocols without private-helper fallback. Document stopping/draining the service before replacing a locked Windows executable and starting it again after publication.
-- Clients perform authorized durable component lookup before submission and send only missing components. Preserve original inference timestamps and provenance links when combining reused and new evidence.
-- The service returns structured results; clients validate them, align transcript words to speaker turns, redact as appropriate, save artifacts and commit successful-call receipts using existing behavior. The service never opens conversation databases or writes conversation artifacts.
-- Preserve existing audio tool schemas, read-only permissions, worker access, historical artifacts and focused views. Record service/helper/protocol versions, engine fingerprints, queue/upload/decode/load/inference timings and total client time separately.
+- [ ] Physical endpoint unplug/replug, a real system suspend/resume and actual disk exhaustion. Failure paths have deterministic coverage; these disruptive machine tests remain unverified.
+- [ ] Live capture on endpoints other than this machine's 48 kHz stereo float speaker output, including unusual multichannel formats.
+- [ ] Multi-hour capture endurance and a deliberately stalled multi-gigabyte export. Bounded buffering, rotation, export hashes and lease exclusion are tested at smaller scales.
 
-## Implementation order
+Microphone mixing and per-application isolation remain separate future extensions. Output capture alone does not inherently include the user's microphone.
 
-- [ ] **Transport and lifecycle:** add service commands, singleton identity, secure named-pipe transport, bounded protocol and detached host lifecycle. Exercise these with a fake inference backend first.
-- [ ] **Shared scheduler:** implement bounded admission, FIFO dispatch, progress, deadlines, disconnect handling and graceful/forced shutdown. Move helper ownership into the service while reusing existing containment and idle expiry.
-- [ ] **Tool integration:** replace direct helper calls with the service client, retain local artifact reuse/receipts, transfer validated snapshots and route parent/worker requests through the shared queue.
-- [ ] **Installation compatibility and presentation:** handle engine readiness, generations and version negotiation; update `/audio status`, help, model instructions and README. Document startup and release-update behavior.
-- [ ] **Acceptance and delivery:** verify the criteria below, record measurements in a new acceptance document, run the full Release suite, publish to the existing PATH folder, and smoke-test a fresh service with multiple fresh Smith clients.
+## Whole-recording transcription and analysis: delivered with acceptance limits
 
-## Verification and acceptance criteria
+`smith audio analyze capture <id>` and `smith audio analyze file <path>` start a client-owned job. Replace `smith audio` with `/audio` in chat. Analysis starts only on user request. In chat, “summarize that recording” uses the parent-only analysis tool, automatically attaches evidence and reuses existing results. Capture start and requested analysis may start the service; status and cached reads do not. The client snapshots and decodes the complete source, then submits 110-second cores with up to five seconds of context on each side. The shared service retains its one-slot queue, 120-second/25 MiB request limits and five-minute request deadline.
 
-### Deterministic and process tests
+Job metadata, source fingerprints, pinned decoder/model generations, partitioned evidence and summary checkpoints live separately under `audio/analyses`. Each attempt defaults to 30 minutes, 100 summary requests and a 10 GiB aggregate storage budget, preserving a 1 GiB disk reserve. Cancellation or client exit pauses/interruption-retains work. Resume is explicit; failed and uncertain requests require separate retry flags. A temporary preparation reservation can pause another analysis; completed evidence is retained.
 
-- Concurrent starts yield exactly one service per user/data directory; different directories remain isolated and clearly identified.
-- Closing the launching CLI leaves the service alive; service exit/crash kills its helper tree. Idle expiry releases models without stopping the service or interrupting active work.
-- Multiple clients and parent/worker requests share one serialized inference slot. Queue limits, queue positions and per-client limits behave predictably.
-- Queued cancellation leaves active work intact. Active cancellation, disconnect, timeout and helper failure release resources and allow other clients to progress without replaying interrupted work.
-- Deadlines include connection, upload and queue time. Service stop drains bounded work; forced stop reports explicit interruption to every affected client.
-- Reject unauthorized endpoint access, remote connections, malformed/oversized frames, invalid uploads, bad hashes, invalid ranges and incompatible protocol/generation requests.
-- A client cannot cancel or read another client's work. No raw audio survives normal cleanup; crash cleanup respects leases.
-- Existing artifact ownership/grants, component reuse, partial results, saved receipts, restart recovery, historical records and offline behavior remain intact. A durable cache hit does not contact or require the service.
+Speaker reconciliation uses local TitaNet embeddings, chronological matching and a versioned threshold/margin. Labels are anonymous and recording-scoped. Summaries use the configured provider with tools disabled, evidence batching, resumable hierarchical reduction and segment/timestamp citations. `--no-summary` requires no provider authentication. Reads and exports do not need the service or models. Explicit immutable attachment grants conversation access; workers still require grants.
 
-### Real-machine acceptance
+- [x] Matching analyze and analysis list/status/resume/read/export/delete commands, chat attachment, progress, configurable budgets and explicit retry controls.
+- [x] Streaming source preparation, WAV/MP3 support, source-handle validation, manifest/hash/range checks, native capture format validation and explicit Interrupted-source handling.
+- [x] Complete chunk plans, per-component receipts, exclusive execution/storage leases, mutation detection, durable commits and no automatic replay of uncertain submissions.
+- [x] Timestamped transcript assembly, overlap evidence/uncertainty, unique processed coverage, optional sound windows and bounded paginated reads/search/export.
+- [x] Versioned speaker reconciliation measured on a three-voice fixture: no measured false merges or splits and 0.73% unknown coverage. One voice was held out; broader accuracy remains unverified below.
+- [x] Real GPT-6-Astra cited summaries, deterministic multi-batch summary budget/resume checks, citation validation and provider-failure evidence retention. GPT-6-Astra saved as the user-selected default.
+- [x] Artifact attachment, stranger/worker grant checks, embedding exclusion, retained attachment reads after job deletion and service-free evidence export.
+- [x] Real 380-second WAV/MP3 and variable-bitrate MP3 analysis, original 140-second/four-WAV capture import, Interrupted capture with sound analysis, and 7,203-second sparse-source coverage.
+- [x] Actual client-crash recovery, unchanged completed receipts, explicit uncertain retry and a real Windows-console Ctrl+C pause.
+- [x] Full Release suites: 572 unit/runtime/real-model and 327 integration tests passed, zero failures/skips; five decoder and eight Python helper tests passed. Final format/pagination checks passed separately.
+- [x] Self-contained local publication and fresh-process evidence reads/export, VBR transcription/summary, cached resume and chat attachment. No commit or push.
 
-- Launch at least three independent Smith clients against one service. Submit audio concurrently and confirm one helper/model pool, correct queueing and successful isolated results.
-- Measure total memory across service/helper/clients, cold and warm latency, queue delay and throughput. Compare with the previous independent-helper behavior; report observed figures rather than assuming linear savings.
-- Use the existing checked transcript and sound/speaker fixtures. Preserve the transcription accuracy threshold and report diarization/overlap limitations separately.
-- Verify five-minute idle model release, client exit, service restart, active cancellation and installation-generation changes.
-- Run with audio credentials absent and application-level network blocking. Where available, also test OS-enforced network isolation and distinguish those results.
-- Record test results, measured memory/latency, compatibility decisions and remaining limitations separately from historical acceptance records.
+Commands, IDs, timings, memory/storage measurements, discovered races and limitations are in [FULL_RECORDING_ANALYSIS_ACCEPTANCE.md](FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
 
-## Completion definition
+### Additional analysis acceptance not yet completed
 
-Several Smith instances can submit local audio work to one explicitly managed background service, with one loaded model pool, bounded scheduling, independent client cancellation and unchanged conversation evidence boundaries. Stopping a chat does not stop unrelated audio work; stopping the service releases its models and reports affected requests honestly.
+- [ ] Broad, manually annotated held-out speaker and recognition evaluation, including similar voices, short speech, simultaneous speakers and languages without whitespace boundaries. Current fixture accuracy must not be generalized.
+- [ ] Multi-hour continuous speech and live-provider summaries exceeding one context window. The two-hour fixture is sparse; large hierarchical summaries currently have deterministic-provider acceptance.
+- [ ] Exhaustive cancellation/service-crash injection at every preparation, inference, assembly and summary commit boundary; real disk exhaustion and power-loss testing. Existing process/fake-backend checks cover selected transitions.
+- [ ] OS-enforced decoder network isolation and adversarial filesystem replacement races. Current containment checks, fixed decoding and socket blocking are not an OS sandbox.
 
-## Explicit chat exit
+Live transcription, microphone mixing, per-application capture and cross-recording voice identification remain proposed work outside this delivery.
 
-Status: proposed; not implemented.
 
-- [ ] Make Ctrl+C at an empty, idle input prompt do nothing: keep the chat open, preserve session state and leave the prompt ready for input. Repeated Ctrl+C must not escalate to exiting.
-- [ ] Require an explicit `/exit` command for normal user-requested chat closure. Ctrl+C must never serve as a chat-exit shortcut, including after cancelling work or returning from a question/review prompt.
-- [ ] Preserve cancellation of active work without closing the chat. Preserve existing nonempty-draft handling where compatible with the explicit-exit requirement; never submit or discard a draft merely to exit.
-- [ ] Apply the behavior consistently to new and resumed interactive chats. Update help and keyboard guidance to explain `/exit` and distinguish cancellation from exiting.
-- [ ] Verify empty-prompt Ctrl+C, repeated presses, return to the prompt after cancellation, nonempty drafts, pending questions/reviews, and explicit `/exit` with saved-state recovery. Terminal closure, process termination and input-stream loss remain external interruptions and must retain existing cleanup/recovery behavior without spinning on EOF.
+## Simple recording conversations and draft clearing: delivered
 
-Acceptance: pressing Ctrl+C at an empty interactive prompt leaves Smith ready for the next message; `/exit` closes the chat cleanly. Cancelling active work returns control to the same chat.
+Acceptance: [commands, results, measurements and limitations](SIMPLE_RECORDING_ACCEPTANCE.md).
 
-## User-controlled sound output capture with NAudio
+- [x] Capture start/stop retain the chat selection; busy selection persists independently and is restored safely after work or restart.
+- [x] `/audio recordings`, `/audio summarize [capture-id]`, `/audio transcript [cursor]` and `/audio coverage [cursor]`; numbered fallback and existing commands retained.
+- [x] Parent-only requested analysis, explicit selection/Interrupted consent, automatic attachment, immutable evidence grants and completed-result reuse before service/model checks.
+- [x] Compatible service startup for capture start and requested chat analysis; no recording/model installation from tools, automatic analysis on stop, or uncertain-request replay.
+- [x] Compact normal tool output, direct saved-report display, retained JSON/details, timestamp rounding and hidden segment identifiers in normal direct views.
+- [x] Idle Ctrl+C clears the full unsent draft; active cancellation and picker state remain protected. Real Windows-console checks passed against the published executable.
+- [x] Full Release suites: 572 unit/runtime/real-model and 341 integration tests passed; final 15-test focused run adds a synthetic capture-to-summary transport test. Thirteen Python regressions passed.
+- [x] GPT-6-Astra natural-language acceptance, explicit interrupted-job resume, full 140.3845625-second coverage, and published service-off summary reuse with zero parent model requests.
+- [x] Existing local Windows publication updated; both same-user service directories verified compatible with no active capture. No commit, push or startup registration.
 
-Status: proposed; not implemented.
-
-### Goal and capture scope
-
-Let the user explicitly start and stop recording Windows sound output, such as a Teams call, then ask Smith to transcribe and analyze the entire completed recording locally. Do not perform inference on that recording while capture is active or infer permission to record from a calendar event, running application or model suggestion.
-
-- [ ] Add a pinned, compatible stable NAudio dependency through central package management. Use its supported WASAPI loopback recording API for the selected Windows playback endpoint. Verify the API against the pinned release: upstream now documents `WasapiRecorder` as the replacement for the legacy `WasapiLoopbackCapture` API. References: [NAudio recording](https://github.com/naudio/NAudio/blob/main/Docs/WasapiRecorder.md) and [loopback capture](https://github.com/naudio/NAudio/blob/main/Docs/WasapiLoopbackCapture.md).
-- [ ] Enumerate playback devices and let the user select the endpoint used by Teams or another application. Display its name before capture and throughout recording. Endpoint capture can include other applications and notifications playing through that endpoint; do not describe it as Teams-only capture.
-- [ ] Make clear that sound output capture records what plays through the selected output. It does not inherently include the user's microphone or local speech. Microphone mixing and per-application isolation are separate future extensions; do not silently enable microphone capture or promise that an output-only recording contains both sides of a call.
-- [ ] Keep recording under explicit user control, with visible recording state, elapsed time, captured size and the selected endpoint. Starting and stopping capture are user commands, not model-callable tools. Worker agents cannot start or stop recording.
-
-### Proposed controls and ownership
-
-| Command | Behavior |
-| --- | --- |
-| `/audio devices` | List available output endpoints and identify the current default. |
-| `/audio capture start [device-id]` | Start a recording owned by this conversation using the explicitly selected endpoint, or the displayed current default. Return a capture ID. |
-| `/audio capture status [capture-id]` | Show Recording, Finalizing, Completed, Interrupted or Failed state, duration, size and any gaps/errors. |
-| `/audio capture stop [capture-id]` | Stop acquiring audio, drain pending buffers, finalize all files and return the completed recording ID. Safe to repeat; it must not create duplicate recordings. |
-| `/audio capture analyze <capture-id>` | Analyze a finalized recording after the user requests it; default to transcription with anonymous speaker evidence. Offer combined sound classification as an explicit option. |
-
-Provide equivalent `smith audio capture ...` commands for inspecting and stopping captures when the original chat is unavailable. Resolve ambiguity explicitly; never stop a different recording merely because it is the newest. Model analysis uses a dedicated read-only `audio_analyze_capture` tool for an authorized completed recording, plus existing focused evidence readers for follow-ups. A user may also explicitly request analysis when stopping; it starts only after finalization succeeds.
-
-- [ ] Host capture in the shared Smith service, independently of the inference helper and queue. Initially allow one active capture per service and reject a second start clearly. Other already-completed audio jobs may run, but must not block capture callbacks or cause silent dropped audio.
-- [ ] Record ownership and capture lifecycle in service-owned metadata without opening conversation databases. Clients register references under existing conversation ownership/grant rules; possession of a capture ID alone does not grant a model access. User CLI management remains available to the same Windows user.
-- [ ] A chat exit or disconnect does not silently stop a user-started service recording. Show the active recording and the command to stop it when exiting; allow explicit stopping from another CLI. Restarting the service never automatically restarts capture.
-- [ ] Graceful service stop finalizes an active recording and reports that capture ended. Device removal, service crash, forced stop, disk exhaustion and system suspend produce explicit interruption/gap states; preserve recoverable completed audio and never label an incomplete recording as complete. Do not silently switch devices when the default changes.
-
-### Storage and finalization
-
-- [ ] Stream capture to bounded, numbered files in a private recording directory instead of retaining the meeting in RAM or relying on one ever-growing WAV. Use a bounded producer/consumer buffer; report dropped samples or discontinuities. Rotate files below format/size limits while preserving exact frame offsets and format metadata.
-- [ ] Track monotonic recording time, sample positions, silence and gaps. A lack of loopback callbacks during silence must not compress the meeting timeline. Finalize headers and flush all pending writes before transitioning to Completed; wait for the recording-stop lifecycle to finish.
-- [ ] Create a durable manifest containing capture ID, owner, endpoint identity, start/stop times, total duration, ordered chunks, sample formats, hashes and coverage/gap information. Validate leases, containment and links for recording directories and crash cleanup.
-- [ ] Retain intentionally captured audio locally so completed recordings can be analyzed or retried later. Keep it separate from disposable inference snapshots and prevent the existing temporary-audio cleanup from deleting recordings. Show location/size and provide explicit user export/deletion controls. Do not put recordings in Git or automatically upload them to the chat provider.
-- [ ] Check available disk capacity before and during capture. Document a configurable recording storage budget; approaching it must be visible, and reaching it must finalize what was captured with an explicit limit/interruption outcome rather than silently discarding or overwriting audio. Ordinary duration is controlled by the user's start/stop actions, not the inference clip limit.
-
-### Analyze the entire completed recording
-
-- [ ] Refuse analysis while Recording or Finalizing. Allow an explicit request to analyze recoverable Interrupted recordings, with missing coverage preserved in the result; never claim this covers the entire original call.
-- [ ] Add a recording-level orchestrator that validates the manifest and schedules every captured interval through the shared inference service in chunks within the existing 25 MiB/120-second limits. Include bounded overlap at chunk boundaries, with overlap included in the per-request limit. Never treat duration zero as permission to analyze only the first 120 seconds of a meeting.
-- [ ] Preserve the five-minute deadline for each individual inference request. Give the overall recording analysis its own visible progress, cancellation and configurable execution budget; exhausting it pauses with completed coverage retained. Do not apply the five-minute single-call timeout to an entire multi-hour meeting or silently remove execution limits.
-- [ ] Persist per-chunk receipts, hashes, engine/settings fingerprints and analysis outcomes. On explicit resume, reuse successful chunks; uncertain interrupted chunks require an explicit retry. Do not replay completed work or duplicate final artifacts.
-- [ ] Merge transcripts in recording-relative timestamp order, resolving overlap using word timing and overlap evidence rather than blindly deleting repeated phrases. Preserve intentional repetition, silence and segment provenance. Expose a full paginated transcript, processed/total duration and any failed or missing intervals.
-- [ ] Keep anonymous speaker labels scoped to their chunk unless a separately validated within-recording reconciliation step establishes continuity. Never merge unrelated `Speaker 1` labels from different chunks as if they were one person. Report unknown/overlapping attribution and speaker-count uncertainty honestly.
-- [ ] Return a recording summary and linked component artifacts. Full transcription is retained even when it exceeds a single tool/context page; Smith can retrieve it through focused paginated views. Optional sound analysis runs YAMNet over the captured audio and retains source-relative timelines. Audio stays local; returned text and labels may enter the configured chat provider context.
-
-### Verification and delivery
-
-- [ ] Deterministic tests cover explicit start/stop, duplicate commands, ownership, active-recording analysis rejection, buffer draining, chunk rotation, silent periods, gaps, device loss, disk limits, service/client shutdown and crash recovery.
-- [ ] Long-recording tests exceed both 120 seconds and 25 MiB and verify complete interval coverage, correct offsets, no missing/duplicated boundary words, bounded memory, explicit partial failures and resume without repeated successful inference.
-- [ ] Test repeated phrases at chunk boundaries, changing speakers, overlap and chunk-local speaker labels. Compare transcription to checked references and report recognition limitations; complete processing does not guarantee perfect recognition.
-- [ ] Perform a user-started/user-stopped live Windows capture from a selected output endpoint, including speech, silence and other sound. Verify recording indicators, captured duration, finalized playback and subsequent local transcription. Test Teams or a comparable call with known reference material and document whether the user's own voice is present in the selected output.
-- [ ] Update help, README, model instructions and service status; run relevant NAudio, lifecycle, CLI and full Release tests. Record real-machine results separately before publishing the capture feature.
-
-Acceptance: the user starts capture, stops it when finished, and Smith can subsequently transcribe all retained audio across the completed recording, with timestamps, bounded resource use and explicit coverage limitations. Recording never starts autonomously, and analysis never begins before audio finalization.
+Broader recognition/speaker evaluation, live transcription, microphone mixing and per-application capture remain proposed work as listed above.

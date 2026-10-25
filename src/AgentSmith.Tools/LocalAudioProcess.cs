@@ -63,6 +63,7 @@ internal static class LocalAudioProcess
         finally
         {
             child.Stop();
+            child.WaitForExit(5000);
             try { await Task.WhenAll(stdout, stderr); } catch { /* Preserve the initiating failure. */ }
         }
     }
@@ -131,6 +132,18 @@ internal static class LocalAudioProcess
                 var turns = component["turns"]!.AsArray();
                 if (turns.Count > 4000) throw new UserFacingException("Too many speaker turns.");
                 Number(component["speakerCount"], 0, 4000);
+                if (component["embeddings"] is JsonArray embeddings)
+                {
+                    if (embeddings.Count > 120) throw new UserFacingException("Too many speaker embeddings.");
+                    foreach (var embedding in embeddings)
+                    {
+                        if (embedding?["speaker"]?.GetValue<string>() is not { Length: > 0 and <= 80 } || embedding["vector"] is not JsonArray vector || vector.Count is < 16 or > 1024)
+                            throw new UserFacingException("Invalid speaker embedding.");
+                        Number(embedding["seconds"], 1, 120);
+                        double norm = 0; foreach (var value in vector) { var n = Number(value, -1, 1); norm += n * n; }
+                        if (Math.Abs(norm - 1) > .01) throw new UserFacingException("Unnormalized speaker embedding.");
+                    }
+                }
                 foreach (var turn in turns)
                 {
                     var from = Number(turn!["startSeconds"], start, start + duration);

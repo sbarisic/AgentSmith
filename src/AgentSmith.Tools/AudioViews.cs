@@ -10,7 +10,11 @@ public static class AudioViews
 {
     public static readonly string[] Components = ["transcription", "classification", "diarization"];
     public static JsonObject Outcomes(JsonObject doc) => new(Components.Select(c => new KeyValuePair<string, JsonNode?>(c, doc[c]?["status"]?.DeepClone())));
-    public static string Time(double seconds) => $"{(int)(seconds / 60):00}:{seconds % 60:00.0}";
+    public static string Time(double seconds)
+    {
+        var tenths = (long)Math.Round(Math.Max(0, seconds) * 10, MidpointRounding.AwayFromZero);
+        return $"{tenths / 600:00}:{tenths % 600 / 10:00}.{tenths % 10}";
+    }
     private static double N(JsonNode? n) => n?.GetValue<double>() ?? 0;
     private static IEnumerable<JsonNode> Rows(JsonNode? node) => node is JsonArray a ? a.OfType<JsonNode>() : [];
     public sealed record Interval(string Label, double Start, double End, double Peak);

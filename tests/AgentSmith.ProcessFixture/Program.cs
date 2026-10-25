@@ -9,6 +9,7 @@ public static class Program
 {
     public static async Task Main(string[] args)
     {
+        if (args[0].StartsWith("--audio-", StringComparison.Ordinal)) { await AudioFixture.Run(args); return; }
         var root = args[0];
         var store = new SessionStore(Path.Combine(root, "state"));
         var session = new Session { Workspace = root }; var run = new Run(); session.Runs.Add(run);

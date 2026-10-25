@@ -46,7 +46,6 @@ public sealed class QuestionPromptTests
 
     [Theory]
     [InlineData(ConsoleKey.Escape, false)]
-    [InlineData(ConsoleKey.C, true)]
     [InlineData(ConsoleKey.D, true)]
     [InlineData(ConsoleKey.Z, true)]
     public void LeavingNeverSubmitsPartialInput(ConsoleKey key, bool control)
@@ -57,6 +56,18 @@ public sealed class QuestionPromptTests
         input.Handle(Key(key, control: control));
         Assert.True(input.Closed);
         Assert.Null(input.Answer);
+    }
+
+    [Fact]
+    public void ControlCPreservesPendingSelectionAndNote()
+    {
+        var input = new QuestionInput(["one", "two"]);
+        input.Handle(Key(ConsoleKey.Enter)); Type(input, "unfinished");
+        for (var i = 0; i < 5; i++) input.Handle(Key(ConsoleKey.C, control: true));
+        Assert.False(input.Closed); Assert.Null(input.Answer); Assert.Equal("unfinished", input.Note); Assert.Equal(0, input.Selected);
+        input.Handle(Key(ConsoleKey.Escape)); Assert.True(input.Closed);
+        input.Reopen(); Assert.False(input.Closed); Assert.Equal("unfinished", input.Note);
+        input.Handle(Key(ConsoleKey.Enter)); Assert.Equal("one\n\nNote: unfinished", input.Answer);
     }
 
     [Fact]

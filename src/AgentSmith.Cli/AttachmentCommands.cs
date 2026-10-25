@@ -29,7 +29,7 @@ internal sealed partial class CliApp
             var text = await ReadInput(ct, attentionKey);
             while (text?.TrimStart().StartsWith('/') == true)
             {
-                if (text.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return null;
+                if (text.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) { await RequestExit(session); return null; }
                 await HandleCommand(text, session);
                 if (session.Runs.LastOrDefault()?.State == RunState.Cancelled) return null;
                 text = await ReadInput(ct, attentionKey);
@@ -40,6 +40,7 @@ internal sealed partial class CliApp
     }
     internal void SetConversation(Session session)
     {
+        if (activeRun is null) ApplyCaptureSelection(session);
         currentConversation = session.Id;
         input.SetContext(session);
         input.SetHistory(session);

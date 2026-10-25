@@ -4,28 +4,30 @@ using AgentSmith.Core;
 
 namespace AgentSmith.Tools;
 
-/// <summary>Process-wide, serialized, job-contained inference host. No audio buffers survive requests.</summary>
-internal static class LocalAudioService
+/// <summary>Service-owned, serialized, job-contained inference host. No audio buffers survive requests.</summary>
+internal sealed class LocalAudioHost : IDisposable
 {
-    private static readonly SemaphoreSlim Gate = new(1, 1);
-    private static readonly object Sync = new();
-    private static WindowsChild? child;
-    private static string? generation;
-    private static int owners;
-    private static int errorBytes;
-    private static Task? errors;
-    private static bool active;
-    internal static TimeSpan IdleTimeout = TimeSpan.FromMinutes(5);
-    private static readonly Timer Idle = new(_ => Expire(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    private readonly SemaphoreSlim Gate = new(1, 1);
+    private readonly object Sync = new();
+    private WindowsChild? child;
+    private string? generation;
+    private int errorBytes;
+    private Task? errors;
+    private bool active;
+    internal TimeSpan IdleTimeout = TimeSpan.FromMinutes(5);
+    private readonly Timer Idle;
+    internal LocalAudioHost() { Idle = new(_ => Expire(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan); }
+    public void Dispose() { lock (Sync) { Stop(); Idle.Dispose(); } }
+    internal int? ProcessId { get { lock (Sync) return child is null || child.Exited ? null : child.Id; } }
     internal static readonly IReadOnlyDictionary<string, string> OfflineEnvironment = new Dictionary<string, string>
     {
         ["HF_HUB_OFFLINE"] = "1", ["TRANSFORMERS_OFFLINE"] = "1", ["HF_HUB_DISABLE_TELEMETRY"] = "1",
         ["OPENAI_API_KEY"] = "", ["SMITH_AUDIO_MODEL"] = "", ["PYTHONNOUSERSITE"] = "1"
     };
-    internal static Func<string, WindowsChild> Launch = directory => WindowsChild.Start(Path.Combine(directory, "env", "Scripts", "python.exe"),
+    internal Func<string, WindowsChild> Launch = directory => WindowsChild.Start(Path.Combine(directory, "env", "Scripts", "python.exe"),
         ["-I", "-u", Path.Combine(directory, "helper", "audio_helper.py"), "--server"], directory, OfflineEnvironment);
-    internal static string State { get { lock (Sync) return child is null ? "unloaded" : active ? "processing" : "warm (unloads after five idle minutes)"; } }
-    internal static long PeakCommittedBytes
+    internal string State { get { lock (Sync) return child is null ? "unloaded" : active ? "processing" : "warm (unloads after five idle minutes)"; } }
+    internal long PeakCommittedBytes
     {
         get
         {
@@ -36,9 +38,7 @@ internal static class LocalAudioService
             }
         }
     }
-    internal static void Acquire() { lock (Sync) owners++; }
-    internal static void Release() { lock (Sync) { if (--owners == 0 && !active) Stop(); } }
-    private static void Expire()
+    private void Expire()
     {
         lock (Sync)
         {
@@ -46,7 +46,7 @@ internal static class LocalAudioService
             catch (IOException) { /* Stop still disposes the containment job in its finally block. */ }
         }
     }
-    private static void Stop()
+    private void Stop()
     {
         Idle.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         if (child is { } process)
@@ -55,7 +55,7 @@ internal static class LocalAudioService
             finally { process.Dispose(); child = null; generation = null; }
         }
     }
-    internal static async Task<JsonObject> Infer(string directory, JsonObject request, Action<string> progress, CancellationToken cancellation)
+    internal async Task<JsonObject> Infer(string directory, JsonObject request, Action<string> progress, CancellationToken cancellation)
     {
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "helper", "downloads.json")));
         if (manifest?["helperProtocol"]?.GetValue<int>() != 2)
@@ -129,8 +129,7 @@ internal static class LocalAudioService
             lock (Sync)
             {
                 active = false;
-                if (owners == 0) Stop();
-                else if (child is not null) Idle.Change(IdleTimeout, Timeout.InfiniteTimeSpan);
+                if (child is not null) Idle.Change(IdleTimeout, Timeout.InfiniteTimeSpan);
             }
             Gate.Release();
         }

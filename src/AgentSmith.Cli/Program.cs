@@ -22,6 +22,7 @@ public static partial class Program
         root.Options.Add(dataOption); root.Options.Add(jsonOption); root.Options.Add(noColor);
         MemoryCommands(root, dataOption, jsonOption, noColor);
         AudioCommands(root, dataOption, jsonOption, noColor);
+        ServiceCommands(root, dataOption, jsonOption);
         var provider = new Option<ModelProvider>("--provider") { Description = "chatgpt, lmstudio (Responses), or local (Chat Completions).", Recursive = true, DefaultValueFactory = _ => ModelProvider.ChatGpt };
         var endpoint = new Option<string?>("--endpoint") { Description = "Loopback HTTP endpoint; local defaults to http://127.0.0.1:8080/v1, LM Studio to port 1234.", Recursive = true };
         var outputBudget = new Option<int>("--max-output-tokens") { Recursive = true, DefaultValueFactory = _ => 0, Description = "Output reserve; default ChatGPT 16384, local 8192." };
@@ -152,11 +153,16 @@ public static partial class Program
                 }
                 else
                 {
-                    app.Write("resume.confirmation", new { state = last.State.ToString(), last.Reason, message = "Type continue to resume, cancel to abandon, or leave blank to keep this run unchanged." });
-                    var input = await app.ReadResumeDecision(session, ct);
-                    if (input == "cancel") AgentRunner.Abandon(session, app.Store);
-                    else if (input == "continue") await app.Run(session, null, null, ct);
-                    else if (last.State != RunState.Cancelled) return 3;
+                    app.Write("resume.confirmation", new { state = last.State.ToString(), last.Reason, message = "Type continue to resume, cancel to abandon, or /exit to leave this run pending." });
+                    while (true)
+                    {
+                        var input = await app.ReadResumeDecision(session, ct);
+                        if (input == "cancel") { AgentRunner.Abandon(session, app.Store); break; }
+                        if (input == "continue") { await app.Run(session, null, null, ct); break; }
+                        if (last.State == RunState.Cancelled) break;
+                        if (input is null) return 3; // Explicit exit or actual EOF.
+                        app.Write("resume.confirmation", new { message = "Saved work remains pending. Type continue, cancel, or /exit." });
+                    }
                     if (last.State == RunState.RecoveryRequired) return 5;
                     if (last.State == RunState.Paused) return 4;
                 }
@@ -180,7 +186,11 @@ public static partial class Program
             var run = app.Store.List().SelectMany(s => s.Runs).SingleOrDefault(r => r.Id == p.GetValue(runArgument)) ?? throw new UserFacingException("Run not found.");
             app.Write("run.inspection", run); return Task.FromResult(0);
         }).GetAwaiter().GetResult());
-        return await root.Parse(args).InvokeAsync();
+        var parsed = root.Parse(args);
+        // Interactive chats own Ctrl+C. System.CommandLine otherwise cancels the
+        // invocation (and exits after its termination timeout) even when our handler suppresses it.
+        return await parsed.InvokeAsync(parsed.CommandResult.Command.Name is "chat" or "resume" or "analyze" or "analysis"
+            ? new InvocationConfiguration { ProcessTerminationTimeout = null } : null);
     }
     private static async Task<int> Execute(string? directory, bool json, bool noColor, Func<CliApp, Task<int>> action)
     {
@@ -233,13 +243,17 @@ internal sealed partial class CliApp : IDisposable
         terminal = new TerminalRenderer(Console.Out, color, width);
         input = new ConsoleInput(!json && !Console.IsInputRedirected && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb", reader, color);
         attention = InputAttention.Create(!json && reader is null && !Console.IsInputRedirected && !Console.IsOutputRedirected);
-        var root = Path.GetFullPath(directory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentSmith"));
+        var root = SmithPaths.DataDirectory(directory);
         Vault = new(root, new WindowsSecretProtector());
         Auth = new(http, Vault, new IdentityValidator()); Store = new(root);
         Registry = new(Store);
+        Registry.Recordings.StartService = Program.EnsureAudioService;
+        Registry.Recordings.Summarize = SummarizeRecording;
         Agents = new(Store, Store, Registry, ModelClient);
-        cancelHandler = (_, e) => { if (activeRun is not null) { e.Cancel = true; CancelActive(); } };
+        cancelHandler = (_, e) => { if (continuous && e.SpecialKey == ConsoleSpecialKey.ControlC || !continuous && activeRun is not null) { e.Cancel = true; if (activeRun is not null) CancelActive(); else input.SignalControlC(); } };
         Console.CancelKeyPress += cancelHandler;
+        input.PollStatus = RefreshRecording;
+        input.IdleDraftCleared = () => { pasteLines.Clear(); pasteActive = false; input.EditingEnabled = true; };
     }
     public void Write(string type, object payload, string? conversationId = null, string? runId = null)
     {
@@ -255,6 +269,7 @@ internal sealed partial class CliApp : IDisposable
         attention.WaitFor(attentionKey);
         var editing = input.EditingEnabled;
         input.EditingEnabled = attentionKey == "composer" && !pasteActive;
+        input.AllowIdleClear = attentionKey is "composer" or "paste" || attentionKey.StartsWith("question-commands:", StringComparison.Ordinal);
         try { return await input.ReadLineAsync(ct); }
         finally { input.EditingEnabled = editing; }
     }
@@ -309,14 +324,14 @@ internal sealed partial class CliApp : IDisposable
             Write("question.pending", new { question.Id, question.Text, question.Choices });
             ct.ThrowIfCancellationRequested();
             attention.WaitFor("question:" + question.Id);
-            var answer = interactiveQuestions ? await QuestionPrompt.ReadAsync(question, color, ct, input.ReadKeyAsync, PasteNote) : await ReadInput(ct, "question:" + question.Id);
+            var answer = interactiveQuestions ? await ReadDecision(question, session, ct) : await ReadInput(ct, "question:" + question.Id);
             if (answer is null) return false;
             if (string.IsNullOrWhiteSpace(answer)) continue;
             if (!input.Interactive && (decisionRequiresAddress || Store.Queue(session.Id).Items.Count > 0))
             {
                 var prefix = "/answer " + question.Id + " ";
                 if (answer.StartsWith(prefix, StringComparison.Ordinal)) answer = answer[prefix.Length..];
-                else { if (answer.StartsWith('/')) await HandleCommand(answer, session, answering: true); else Write("error", new { message = "Use /answer " + question.Id + " <text>; queued input cannot answer this question." }); continue; }
+                else { if (answer.StartsWith('/')) { if (await HandleCommand(answer, session, answering: true) == CommandAction.Exit) return false; } else Write("error", new { message = "Use /answer " + question.Id + " <text>; queued input cannot answer this question." }); continue; }
             }
             var command = interactiveQuestions ? CommandAction.Prompt : await HandleCommand(answer, session, answering: true);
             if (command == CommandAction.Exit) return false;
@@ -352,7 +367,8 @@ internal sealed partial class CliApp : IDisposable
                 var continuation = await ReadInput(ct, "plan-continuation:" + session.ActivePlanId);
                 if (continuation?.TrimStart().StartsWith('/') == true)
                 { if (await HandleCommand(continuation, session) == CommandAction.Exit) return 3; continue; }
-                if (continuation != "continue") return 3;
+                if (continuation is null) return 3;
+                if (continuation != "continue") { Write("resume.confirmation", new { message = "Decision remains pending. Type continue or /exit." }); continue; }
                 queuedPrompt = session.PendingPlanPrompt;
             }
             if (queuedPrompt is not null) { prompt = queuedPrompt; queuedPrompt = null; workflowPrompt = true; }
@@ -383,7 +399,8 @@ internal sealed partial class CliApp : IDisposable
                 Write("paste", new { message = "Enter lines; finish with /end on its own line. Slash-prefixed text here is sent literally." });
                 var lines = new List<string>();
                 string? line;
-                while ((line = await ReadInput(ct, "paste")) is not null && line != "/end") lines.Add(line);
+                while ((line = await ReadInput(ct, "paste")) is not null && line != "/end") { if (input.DraftCleared) break; lines.Add(line); }
+                if (input.DraftCleared) { prompt = null; nextPrompt = null; continue; }
                 if (line is null) return 0; // EOF does not submit an unfinished paste.
                 prompt = string.Join('\n', lines); nextPrompt = UserPrompt.Text(prompt); literalPaste = true; input.ClearSubmission();
             }
@@ -500,7 +517,7 @@ internal sealed partial class CliApp : IDisposable
                 else if (args.Length > 0) Error("Usage: /recover [abandon]");
                 else Write("recovery", new { message = Json.Serialize(new { workers = Store.Workers(session.Id).Where(w => w.ReservationsHeld || w.State == "Interrupted").Select(WorkerCoordinator.Summary), unresolvedCalls = session.Runs.SelectMany(r => r.Calls).Where(c => c.State == CallState.Started).Select(c => new { c.Id, c.Name }), mutations = session.Mutations.Where(m => m.State == "Prepared").Select(m => new { m.Id, m.Kind }), interruptedProcesses = session.Processes.Where(p => p.State == "Interrupted").Select(p => new { p.Id, p.Reason }) }) });
                 break;
-            case "/exit": return CommandAction.Exit;
+            case "/exit": await RequestExit(session); return CommandAction.Exit;
             case "/help":
                 Write("help", CommandHelp.Build(args)); break;
             case "/status":

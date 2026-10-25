@@ -10,6 +10,24 @@ namespace AgentSmith.IntegrationTests;
 
 public sealed class ContinuousChatTests
 {
+    [Fact]
+    public async Task EmptySavedPlanContinuationStaysOpenUntilExplicitExit()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "smith-pending-exit-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var input = new Input(); using var app = new CliApp(root, true, true, input);
+            var session = new Session { Workspace = root, PendingPlanPrompt = "saved continuation" };
+            app.Store.Save(session, new("created", session.Id, null, new { }));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var chat = app.Chat(session, null, true, timeout.Token);
+            input.Lines.Writer.TryWrite(""); input.Lines.Writer.TryWrite("leave pending");
+            await Task.Delay(150); Assert.False(chat.IsCompleted);
+            input.Lines.Writer.TryWrite("/exit"); Assert.Equal(3, await chat);
+            Assert.Equal("saved continuation", app.Store.Get(session.Id)!.PendingPlanPrompt);
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
     private sealed class Input(bool synchronouslyBlocking = false) : TextReader
     {
         public readonly Channel<string?> Lines = Channel.CreateUnbounded<string?>();

@@ -77,16 +77,17 @@ internal sealed partial class CliApp
             ct.ThrowIfCancellationRequested();
             var attentionKey = "plan-review:" + review.Id + ":" + review.Stage;
             attention.WaitFor(attentionKey);
-            var answer = !json && QuestionPrompt.IsInteractive ? await QuestionPrompt.ReadAsync(question, color, ct, input.ReadKeyAsync, PasteNote) : await ReadInput(ct, attentionKey);
-            if (answer is null || answer.Trim() == "/exit") return false;
+            var answer = !json && QuestionPrompt.IsInteractive ? await ReadDecision(question, session, ct) : await ReadInput(ct, attentionKey);
+            if (answer is null) return false;
+            if (answer.Trim() == "/exit") { await RequestExit(session); return false; }
             if (string.IsNullOrWhiteSpace(answer)) continue;
             if (!input.Interactive && (decisionRequiresAddress || Store.Queue(session.Id).Items.Count > 0))
             {
                 var prefix = "/review " + review.Id + " ";
                 if (answer.StartsWith(prefix, StringComparison.Ordinal)) answer = answer[prefix.Length..];
-                else { if (answer.StartsWith('/')) await HandleCommand(answer, session); else Write("error", new { message = "Use /review " + review.Id + " <decision>; queued input cannot approve a plan." }); continue; }
+                else { if (answer.StartsWith('/')) { if (await HandleCommand(answer, session) == CommandAction.Exit) return false; } else Write("error", new { message = "Use /review " + review.Id + " <decision>; queued input cannot approve a plan." }); continue; }
             }
-            if (answer.TrimStart().StartsWith('/')) { await HandleCommand(answer, session); continue; }
+            if (answer.TrimStart().StartsWith('/')) { if (await HandleCommand(answer, session) == CommandAction.Exit) return false; continue; }
             var pieces = answer.Split("\n\nNote: ", 2, StringSplitOptions.None); var choice = pieces[0].Trim(); var note = pieces.Length > 1 ? pieces[1] : "";
             try
             {

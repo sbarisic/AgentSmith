@@ -199,9 +199,39 @@ def diarize(waveform, root, start):
             begin, end = max(0, segment.start), min(len(waveform)/RATE, segment.end)
             if end > begin:
                 turns.append(dict(startSeconds=start+begin, endSeconds=start+end, speaker=name))
+    # Local-only, recording-scoped reconciliation evidence. Never a real-person identity.
+    embedding_key = (str(root), "speaker-embedding")
+    if embedding_key not in MODELS:
+        MODELS[embedding_key] = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=str(root / "diarization" / "nemo_en_titanet_small.onnx"), num_threads=4, provider="cpu"))
+    extractor = MODELS[embedding_key]
+    embeddings = []
+    for name in sorted(set(t["speaker"] for t in turns)):
+        spans = [t for t in turns if t["speaker"] == name and t["endSeconds"]-t["startSeconds"] >= 1.5
+                 and not any(other["speaker"] != name and other["startSeconds"] < t["endSeconds"]
+                             and other["endSeconds"] > t["startSeconds"] for other in turns)]
+        vectors = []
+        seconds = 0.0
+        for turn in sorted(spans, key=lambda t: t["endSeconds"]-t["startSeconds"], reverse=True)[:5]:
+            begin = round((turn["startSeconds"]-start)*RATE)
+            end = min(round((turn["endSeconds"]-start)*RATE), begin+10*RATE)
+            stream = extractor.create_stream()
+            stream.accept_waveform(sample_rate=RATE, waveform=np.ascontiguousarray(waveform[begin:end]))
+            stream.input_finished()
+            if extractor.is_ready(stream):
+                vector = np.asarray(extractor.compute(stream), dtype=np.float32)
+                norm = np.linalg.norm(vector)
+                if np.isfinite(vector).all() and norm > 0:
+                    vectors.append(vector / norm)
+                    seconds += (end-begin)/RATE
+        if vectors:
+            vector = np.mean(vectors, axis=0)
+            vector /= max(float(np.linalg.norm(vector)), 1e-12)
+            embeddings.append(dict(speaker=name, seconds=seconds, vector=vector.tolist()))
     return dict(status="succeeded", model="pyannote segmentation 3.0 FP32 + NeMo TitaNet small",
                 engineVersion=importlib.metadata.version("sherpa-onnx"), loadSeconds=load_seconds,
-                speakerCount=len({t["speaker"] for t in turns}), turns=turns,
+                speakerCount=len({t["speaker"] for t in turns}), turns=turns, embeddings=embeddings,
                 note="Estimated anonymous speakers local to this analysis. Short and overlapping speech may be misassigned.")
 
 

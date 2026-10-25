@@ -101,7 +101,7 @@ class AudioDecodingTests(unittest.TestCase):
         model.process.return_value.sort_by_start_time.return_value = [
             SimpleNamespace(start=0, end=.3, speaker=17), SimpleNamespace(start=.3, end=.6, speaker=2),
             SimpleNamespace(start=.6, end=1, speaker=17)]
-        with mock.patch("sherpa_onnx.OfflineSpeakerDiarizationConfig") as config, mock.patch("sherpa_onnx.OfflineSpeakerDiarization", return_value=model) as factory:
+        with mock.patch("sherpa_onnx.OfflineSpeakerDiarizationConfig") as config, mock.patch("sherpa_onnx.OfflineSpeakerDiarization", return_value=model) as factory, mock.patch("sherpa_onnx.SpeakerEmbeddingExtractor"):
             config.return_value.validate.return_value = True
             first = helper.diarize(np.ones(16000, dtype=np.float32)*.1, self.root, 10)
             helper.diarize(np.ones(16000, dtype=np.float32)*.1, self.root, 0)

@@ -25,12 +25,44 @@ public sealed class LocalAudioAcceptanceTests
     private sealed class InstalledBackend : ILocalAudioBackend, IDisposable
     {
         private readonly string dataDirectory;
+        private readonly LocalAudioBackend backend = new();
         public int Calls;
-        public InstalledBackend(string dataDirectory) { this.dataDirectory = dataDirectory; LocalAudioService.Acquire(); }
-        public void Dispose() => LocalAudioService.Release();
+        public InstalledBackend(string dataDirectory) { this.dataDirectory = dataDirectory;  }
+        public void Dispose() => backend.Dispose();
         public AudioReadiness Status(string _) => LocalAudioInstallation.Status(dataDirectory);
         public Task<JsonObject> Run(string installation, JsonObject request, Action<string> progress, CancellationToken cancellation)
-            { Calls++; return LocalAudioService.Infer(installation, request, progress, cancellation); }
+            { Calls++; return backend.Run(installation, request, progress, cancellation); }
+    }
+    [InstalledAudioFact]
+    public async Task RealSpawnedWorkerAndParentShareServiceHelper()
+    {
+        var fixtures = Path.GetFullPath(Environment.GetEnvironmentVariable("SMITH_AUDIO_ACCEPTANCE_FIXTURES")!);
+        var data = Environment.GetEnvironmentVariable("SMITH_AUDIO_ACCEPTANCE_DATA")!;
+        using var temporary = new TestDirectory(); var store = new SessionStore(temporary.Path);
+        using var tools = new ToolRegistry(store, audio: new AudioTool(new InstalledBackend(data)));
+        const string audio = """{"path":"test01_20s.wav","startSeconds":0,"durationSeconds":0,"language":"auto"}""";
+        using var coordinator = new WorkerCoordinator(store, store, tools, _ => new ScriptedModel(
+            [Done(Call("worker-audio", "audio_transcribe", audio))],
+            [Done(Call("finish", "agent_finish", Json.Serialize(new { status = "completed", summary = "Audio transcribed.",
+                limitations = "Model estimates.", evidence = new[] { "test01_20s.wav" }, clarification = "" })))]));
+        var parent = new Session { Workspace = fixtures, Mode = PermissionMode.Inspect,
+            EnabledWorkers = [new() { Name = "listener", Model = "scripted", Mode = PermissionMode.Inspect }] };
+        var run = new Run { State = RunState.Running }; parent.Runs.Add(run); store.Save(parent, new("created", parent.Id, run.Id, new { }));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        var ctx = new ToolExecutionContext(parent, run, store, deadline.Token);
+        var spawn = new ToolCall { Id = "spawn", Name = "agent_spawn", Arguments = Json.Serialize(new {
+            profile = "listener", task = "Transcribe test01_20s.wav while the parent independently inspects audio.", writePaths = Array.Empty<string>() }) };
+        spawn.Prepared = coordinator.Prepare(ctx, spawn); await coordinator.ExecuteAsync(ctx, spawn);
+        var call = new ToolCall { Id = "parent-audio", Name = "audio_transcribe", Arguments = audio };
+        call.Prepared = tools.Prepare(ctx, call);
+        var result = JsonNode.Parse((await tools.ExecuteAsync(ctx, call)).Content)!;
+        while (store.Workers(parent.Id).Any(w => w.Active)) await Task.Delay(50, deadline.Token);
+        var child = store.Get(store.Workers(parent.Id).Single().ChildId)!;
+        var childResult = JsonNode.Parse(child.Runs.SelectMany(r => r.Calls).Single(c => c.Name == "audio_transcribe").Result!)!;
+        Assert.Equal(result["service"]!["processId"]!.ToString(), childResult["service"]!["processId"]!.ToString());
+        Assert.Equal(result["service"]!["helperProcessId"]!.ToString(), childResult["service"]!["helperProcessId"]!.ToString());
+        Assert.NotEqual(result["artifactId"]!.ToString(), childResult["artifactId"]!.ToString());
+        File.WriteAllText(Path.Combine(fixtures, "..", "parent-worker.json"), Json.Serialize(new { parent = result, worker = childResult }));
     }
     [InstalledAudioFact]
     public async Task RealModelsThroughToolsAndScriptedChat()
@@ -95,16 +127,16 @@ public sealed class LocalAudioAcceptanceTests
             var call = new ToolCall { Id = Guid.NewGuid().ToString("N"), Name = "audio_listen", Arguments = "{\"path\":\"test01_20s.wav\",\"question\":\"Describe it\",\"startSeconds\":0,\"durationSeconds\":0}" };
             call.Prepared = tools.Prepare(ctx, call);
             var timer = Stopwatch.StartNew(); var output = JsonNode.Parse((await tools.ExecuteAsync(ctx, call)).Content)!;
-            report.Add(new JsonObject { ["case"] = label, ["seconds"] = timer.Elapsed.TotalSeconds, ["reused"] = output["reused"]!.DeepClone(), ["helper"] = LocalAudioService.State,
-                ["helperPeakCommittedBytes"] = LocalAudioService.PeakCommittedBytes });
+            report.Add(new JsonObject { ["case"] = label, ["seconds"] = timer.Elapsed.TotalSeconds, ["reused"] = output["reused"]!.DeepClone(), ["helper"] = (await AudioServiceControl.Status(data)).Helper,
+                ["helperPeakCommittedBytes"] = (await AudioServiceControl.Status(data)).HelperPeakCommittedBytes });
         }
         Assert.Equal(2, backend.Calls); Assert.Single(warm.Artifacts); Assert.True(report[2]!["reused"]!.GetValue<bool>());
         if (Environment.GetEnvironmentVariable("SMITH_AUDIO_IDLE_ACCEPTANCE") == "1")
         {
             var timer = Stopwatch.StartNew();
-            while (LocalAudioService.State != "unloaded" && timer.Elapsed < TimeSpan.FromSeconds(320)) await Task.Delay(1000);
-            Assert.Equal("unloaded", LocalAudioService.State);
-            report.Add(new JsonObject { ["case"] = "idle-expiry", ["seconds"] = timer.Elapsed.TotalSeconds, ["helperPeakCommittedBytes"] = LocalAudioService.PeakCommittedBytes });
+            while ((await AudioServiceControl.Status(data)).Helper != "unloaded" && timer.Elapsed < TimeSpan.FromSeconds(320)) await Task.Delay(1000);
+            Assert.Equal("unloaded", (await AudioServiceControl.Status(data)).Helper);
+            report.Add(new JsonObject { ["case"] = "idle-expiry", ["seconds"] = timer.Elapsed.TotalSeconds, ["helperPeakCommittedBytes"] = (await AudioServiceControl.Status(data)).HelperPeakCommittedBytes });
         }
         File.WriteAllText(Path.Combine(fixtures, "..", "performance.json"), report.ToJsonString(new() { WriteIndented = true }));
     }

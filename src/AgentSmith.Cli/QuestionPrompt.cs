@@ -2,6 +2,9 @@ using AgentSmith.Core;
 
 namespace AgentSmith.Cli;
 
+public enum QuestionOutcome { Answer, Commands, Exit, Interrupted }
+public sealed record QuestionResult(QuestionOutcome Outcome, string? Text = null);
+
 /// <summary>Keyboard state is separate from terminal I/O; only an explicit submit produces an answer.</summary>
 public sealed class QuestionInput(string[] choices)
 {
@@ -11,6 +14,7 @@ public sealed class QuestionInput(string[] choices)
     public string Note { get; private set; } = "";
     public string? Answer { get; private set; }
     public bool Closed { get; private set; }
+    public void Reopen() { Closed = false; }
     public string Hint { get; private set; } = "";
     public int OptionCount => choices.Length + 1;
     public void Paste(string? text)
@@ -24,7 +28,8 @@ public sealed class QuestionInput(string[] choices)
     {
         if (Closed) return;
         var control = key.Modifiers.HasFlag(ConsoleModifiers.Control);
-        if (key.Key == ConsoleKey.Escape || control && key.Key is ConsoleKey.C or ConsoleKey.D or ConsoleKey.Z)
+        if (control && key.Key == ConsoleKey.C) return;
+        if (key.Key == ConsoleKey.Escape || control && key.Key is ConsoleKey.D or ConsoleKey.Z)
         { Closed = true; return; }
         if (key.Key == ConsoleKey.Tab)
         {
@@ -85,7 +90,7 @@ public static class QuestionPrompt
         lines.Add("    " + note + (input.Focus == 1 ? "_" : ""));
         lines.Add("  " + (input.Focus == 2 ? "> " : "  ") + "[ Submit answer ]");
         lines.Add("  ↑↓ move · Space/Enter select · Tab note/submit");
-        lines.Add("  Enter in note submits · Esc keeps question pending");
+        lines.Add("  Enter submits · Esc commands · Ctrl+C stays here");
         if (input.Hint.Length > 0) lines.Add("  " + input.Hint);
         return lines.Select(line => Clip(TerminalRenderer.Safe(line).Replace('\t', ' ').Replace('\n', ' '), width)).ToArray();
     }
@@ -98,9 +103,10 @@ public static class QuestionPrompt
         return text[..end] + "…";
     }
 
-    public static async Task<string?> ReadAsync(Question question, bool color, CancellationToken ct, Func<CancellationToken, Task<ConsoleKeyInfo>>? readKey = null, Func<string?>? paste = null)
+    public static async Task<QuestionResult> ReadAsync(Question question, bool color, CancellationToken ct, Func<CancellationToken, Task<ConsoleKeyInfo>>? readKey = null, Func<string?>? paste = null, QuestionInput? savedState = null)
     {
-        var state = new QuestionInput(question.Choices);
+        var state = savedState ?? new QuestionInput(question.Choices);
+        state.Reopen();
         var previousLines = 0;
         var previousControlC = Console.TreatControlCAsInput;
         Console.TreatControlCAsInput = true;
@@ -114,8 +120,8 @@ public static class QuestionPrompt
                 ct.ThrowIfCancellationRequested();
                 if (Console.WindowWidth < 40 || Console.WindowHeight < 14)
                 {
-                    Console.WriteLine("  Question remains pending. Enlarge the terminal and resume to answer.");
-                    return null;
+                    Console.WriteLine("  Question remains pending. Enlarge the terminal and press Enter to return.");
+                    return new(QuestionOutcome.Commands);
                 }
                 var lines = Frame(question, state, Console.WindowWidth, Console.WindowHeight);
                 if (previousLines > 0) Console.Write($"\u001b[{Math.Min(previousLines, Math.Max(1, Console.WindowHeight - 1))}A");
@@ -134,9 +140,9 @@ public static class QuestionPrompt
                 else state.Handle(key);
             }
             Console.Write($"\u001b[{previousLines}A\r\u001b[J");
-            if (state.Answer is null) Console.WriteLine("  Question saved. Resume this conversation to answer.");
+            if (state.Answer is null) Console.WriteLine("  Question pending. Enter a command, or empty Enter to return.");
             else renderer.Render("answer.submitted", new { text = state.Answer });
-            return state.Answer;
+            return new(state.Answer is null ? QuestionOutcome.Commands : QuestionOutcome.Answer, state.Answer);
         }
         finally
         {

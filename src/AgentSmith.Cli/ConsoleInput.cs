@@ -21,6 +21,14 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     private DraftState? historyDraft;
     private int historyIndex = -1;
     internal bool EditingEnabled { get; set; } = true;
+    private int controlC;
+    private bool controlCCancel;
+    private volatile bool readingLine;
+    internal bool DraftCleared { get; private set; }
+    internal Action? IdleDraftCleared { get; set; }
+    internal bool AllowIdleClear { get; set; } = true;
+    internal void SignalControlC() { if (readingLine) Interlocked.Exchange(ref controlC, 1); }
+    internal void ClearIdleDraft() { ClearDraft(); DraftCleared = true; IdleDraftCleared?.Invoke(); }
     internal int HistoryCount => history.Count;
     internal void SetHistory(Session session)
     {
@@ -46,8 +54,13 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     public bool EndOfInput { get; private set; }
     public bool Interactive => interactive;
     internal bool ResumeConfirmation { get; set; }
+    internal bool DecisionCommands { get; private set; }
     public string Draft => draft;
     public string Status { get; set; } = "";
+    internal string RecordingStatus { get; set; } = "";
+    internal Func<Task>? PollStatus { get; set; }
+    private Task statusPoll = Task.CompletedTask;
+    private long nextStatusPoll;
     internal IClipboardService Clipboard { get; set; } = new WindowsClipboard();
     internal Func<ClipboardContent, AttachmentRecord>? ImportImage { get; set; }
     internal Func<string, bool>? ImageAvailable { get; set; }
@@ -60,6 +73,24 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     internal UserPrompt? SubmittedPrompt { get; private set; }
     internal bool SubmittedLiteral { get; private set; }
     internal bool HasBlocks => blocks.Count > 0;
+    private sealed class RestoreScope(Action restore) : IDisposable { public void Dispose() => restore(); }
+    internal IDisposable SuspendDraft()
+    {
+        lock (gate)
+        {
+            var saved = new DraftState(draft, position, blocks.ToArray(), literal);
+            var previousCommands = DecisionCommands; DecisionCommands = true;
+            ClearDraft();
+            return new RestoreScope(() =>
+            {
+                lock (gate)
+                {
+                    ClearDraft(); draft = saved.Text; position = saved.Position;
+                    blocks.AddRange(saved.Blocks); literal = saved.Literal; DecisionCommands = previousCommands; Draw();
+                }
+            });
+        }
+    }
     internal void ClearSubmission() { SubmittedPrompt = null; SubmittedLiteral = false; }
     internal void ClearDraft() { lock (gate) { Erase(); draft = ""; position = 0; blocks.Clear(); blockFocus = -1; literal = false; historyIndex = -1; historyDraft = null; dismissed = null; ClearSubmission(); Draw(); } }
     internal UserPrompt Compose(string? additionalText = null)
@@ -130,7 +161,8 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
             Console.WriteLine(contextLine);
         }
         var status = ResumeConfirmation ? "Type continue to resume · Alt+V is available in the chat composer afterward" : blockFocus >= 0 && blockFocus < blocks.Count ? blocks[blockFocus].Label + " · Enter preview · Delete remove · Tab composer"
-            : suggestions.Count > 0 ? "↑/↓ select · Tab/Enter complete · Esc dismiss" : Status.Length == 0 ? "Enter send · ↑/↓ history · Ctrl+Backspace word · Alt+V paste · /help" : Status + " · Esc cancel · Enter queue · ↑/↓ history";
+            : suggestions.Count > 0 ? "↑/↓ select · Tab/Enter complete · Esc dismiss" : Status.Length == 0 ? "Enter send · Ctrl+C clear · ↑/↓ history · Alt+V paste · /help" : Status + " · Esc cancel · Enter queue · ↑/↓ history";
+        if (RecordingStatus.Length > 0) status = RecordingStatus + " · " + status;
         if (color) Console.Write(TerminalTheme.Style("dim"));
         Console.WriteLine(status[..Math.Min(status.Length, width)]);
         var prefix = Status.Length == 0 ? "you › " : "next › ";
@@ -161,6 +193,9 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     public async Task<(bool Ready, string? Text, bool Cancel)> PollAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        if (Interlocked.Exchange(ref controlC, 0) != 0) { controlCCancel = true; return (false, null, true); }
+        if (interactive && PollStatus is not null && statusPoll.IsCompleted && Environment.TickCount64 >= nextStatusPoll)
+        { nextStatusPoll = Environment.TickCount64 + 2000; statusPoll = PollStatus(); }
         if (!interactive)
         {
             if (EndOfInput) return (true, null, false);
@@ -186,7 +221,8 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     {
         lock (gate)
         {
-            if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control)) return (false, null, true);
+            controlCCancel = key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control);
+            if (controlCCancel) return (false, null, true);
             UpdateSuggestions();
             if (key.Key == ConsoleKey.Escape)
             {
@@ -248,7 +284,7 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
             switch (key.Key)
             {
                 case ConsoleKey.Enter:
-                    if (ResumeConfirmation && string.IsNullOrEmpty(draft)) { ClearSubmission(); Draw(); return (true, "", false); }
+                    if ((ResumeConfirmation || DecisionCommands) && string.IsNullOrEmpty(draft)) { ClearSubmission(); Draw(); return (true, "", false); }
                     var composed = Compose();
                     if (composed.Parts.Any(p => p.Kind == "image" && ImageAvailable?.Invoke(p.Value) == false))
                     {
@@ -269,7 +305,7 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
                 case ConsoleKey.RightArrow: if (position < draft.Length) position += char.IsHighSurrogate(draft[position]) && position + 1 < draft.Length ? 2 : 1; break;
                 case ConsoleKey.Home: position = 0; break;
                 case ConsoleKey.End: position = draft.Length; break;
-                case ConsoleKey.D when key.Modifiers.HasFlag(ConsoleModifiers.Control): EndOfInput = true; return (true, null, false);
+                case ConsoleKey.D when key.Modifiers.HasFlag(ConsoleModifiers.Control): Draw(); return (false, null, false);
                 default: if (!char.IsControl(key.KeyChar) && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)) { draft = draft.Insert(position, key.KeyChar.ToString()); position++; } break;
             }
             foreach (var block in blocks)
@@ -367,9 +403,9 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     public void Restore(string text) { lock (gate) { Erase(); blocks.Clear(); blockFocus = -1; literal = false; dismissed = null; historyIndex = -1; historyDraft = null; ClearSubmission(); draft = text; position = text.Length; Draw(); } }
     public async Task<string?> ReadLineAsync(CancellationToken ct)
     {
-        Show();
-        try { while (true) { var next = await PollAsync(ct); if (next.Ready) return next.Text; await Task.Delay(25, ct); } }
-        finally { Hide(); }
+        DraftCleared = false; readingLine = true; Show();
+        try { while (true) { var next = await PollAsync(ct); if (next.Cancel && controlCCancel && AllowIdleClear) { ClearIdleDraft(); return ""; } if (next.Ready) return next.Text; await Task.Delay(25, ct); } }
+        finally { readingLine = false; Interlocked.Exchange(ref controlC, 0); Hide(); }
     }
     public async Task<ConsoleKeyInfo> ReadKeyAsync(CancellationToken ct)
     {

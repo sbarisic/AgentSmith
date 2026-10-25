@@ -8,6 +8,7 @@ public static class WorkflowPolicy
     public static bool IsDocumentation(string path) => Path.GetExtension(path).ToLowerInvariant() is ".md" or ".markdown" or ".rst" or ".adoc" or ".asciidoc" or ".txt";
     public static bool Enabled(Session s, ToolDefinition tool)
     {
+        if (tool.Name is "audio_recordings" or "audio_analyze" && (s.ParentConversationId is not null || s.WorkerId is not null || s.Workflow != WorkflowMode.Work)) return false;
         var ceiling = s.Mode;
         if (Planning.Active(s) is { State: "Implementing" } plan && plan.Approvals.LastOrDefault() is { } approval)
             ceiling = (PermissionMode)Math.Min((int)ceiling, (int)approval.Mode);

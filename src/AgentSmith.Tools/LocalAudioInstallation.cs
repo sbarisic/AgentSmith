@@ -14,9 +14,8 @@ public sealed record AudioReadiness(bool Transcription, bool Classification, str
 
 public static class LocalAudioInstallation
 {
-    public static string HelperState => LocalAudioService.State;
     public static string Bundle => Path.Combine(AppContext.BaseDirectory, "LocalAudio");
-    private static string Fingerprint(string bundle) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(bundle, "downloads.json"))
+    internal static string Fingerprint(string bundle) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(bundle, "downloads.json"))
         .Concat(File.ReadAllBytes(Path.Combine(bundle, "requirements.lock"))).Concat(File.ReadAllBytes(Path.Combine(bundle, "audio_helper.py"))).ToArray()));
     public static AudioReadiness Status(string dataDirectory) => Status(dataDirectory, Bundle);
     internal static AudioReadiness Status(string dataDirectory, string bundle)
@@ -130,7 +129,7 @@ public static class LocalAudioInstallation
             {
                 var speakers = Path.Combine(models, "diarization"); Directory.CreateDirectory(speakers);
                 File.Copy(files["diarization/nemo_en_titanet_small.onnx"], Path.Combine(speakers, "nemo_en_titanet_small.onnx"));
-                await command(Path.Combine(directory, "env", "Scripts", "python.exe"), ["-I", Path.Combine(helper, "audio_helper.py"), "--install-segmentation", segmentation, speakers], directory, LocalAudioService.OfflineEnvironment, cancellation);
+                await command(Path.Combine(directory, "env", "Scripts", "python.exe"), ["-I", Path.Combine(helper, "audio_helper.py"), "--install-segmentation", segmentation, speakers], directory, LocalAudioHost.OfflineEnvironment, cancellation);
             }
             progress("Running offline self-tests for installed engines");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation); timeout.CancelAfter(TimeSpan.FromMinutes(5));

@@ -15,11 +15,16 @@ public interface ILocalAudioBackend
 
 internal sealed class LocalAudioBackend : ILocalAudioBackend, IDisposable
 {
-    public LocalAudioBackend() => LocalAudioService.Acquire();
-    public void Dispose() => LocalAudioService.Release();
+    private readonly Dictionary<string, SharedAudioClient> clients = new(StringComparer.OrdinalIgnoreCase);
+    public void Dispose() { lock (clients) { foreach (var client in clients.Values) client.Dispose(); clients.Clear(); } }
     public AudioReadiness Status(string dataDirectory) => LocalAudioInstallation.Status(dataDirectory);
     public Task<JsonObject> Run(string installation, JsonObject request, Action<string> progress, CancellationToken cancellation)
-        => LocalAudioService.Infer(installation, request, progress, cancellation);
+    {
+        var data = Directory.GetParent(installation)!.Parent!.Parent!.FullName;
+        SharedAudioClient client;
+        lock (clients) { if (!clients.TryGetValue(data, out client!)) clients[data] = client = SharedAudioClient.Acquire(data); }
+        return client.Run(installation, request, progress, cancellation);
+    }
 }
 
 /// <summary>Read-only audio evidence from a fixed local helper. No cloud audio credentials or requests.</summary>
@@ -27,7 +32,7 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
 {
     public const int MaxFileBytes = 25 * 1024 * 1024;
     private static readonly HashSet<string> Languages = ("auto af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi fo fr gl gu ha haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb ln lo lt lv mg mi mk ml mn mr ms mt my ne nl nn no oc pa pl ps pt ro ru sa sd si sk sl sn so sq sr su sv sw ta te tg th tk tl tr tt uk ur uz vi yi yo zh yue").Split(' ').ToHashSet(StringComparer.Ordinal);
-    private static readonly SemaphoreSlim Jobs = new(1, 1);
+    internal static bool ValidLanguage(string language) => Languages.Contains(language);
     private readonly ILocalAudioBackend backend = backend ?? new LocalAudioBackend();
     private readonly CancellationTokenSource lifetime = new();
     public static bool IsAudio(string name) => name is "audio_listen" or "audio_transcribe" or "audio_classify" or "audio_diarize";
@@ -57,11 +62,10 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.Cancellation, lifetime.Token);
         timeout.CancelAfter(TimeSpan.FromMinutes(5));
         void Progress(string stage) => ctx.Emit?.Invoke(new("audio.progress", ctx.Session.Id, ctx.Run.Id, new { callId = call.Id, message = "Local audio · " + stage }));
-        var acquired = false; AudioTemporary? temporary = null;
+        AudioTemporary? temporary = null;
+        var deadlineTicks = Environment.TickCount64 + 300_000;
         try
         {
-            acquired = Jobs.Wait(0);
-            if (!acquired) { Progress("waiting for local audio slot"); await Jobs.WaitAsync(timeout.Token); acquired = true; }
             if (ctx.Session.Receipts.TryGetValue(call.Id, out receipt)) return new(receipt.Content);
             var status = backend.Status(ctx.Store.DataDirectory);
             if (!status.Ready(call.Name)) throw new UserFacingException(status.Message + " Run smith audio setup.");
@@ -95,7 +99,7 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
             temporary = new AudioTemporary(ctx.Store.DataDirectory);
             var snapshot = Path.Combine(temporary.Directory, "input" + Path.GetExtension(path).ToLowerInvariant());
             await File.WriteAllBytesAsync(snapshot, source, timeout.Token);
-            var request = new JsonObject { ["protocol"] = 1, ["operation"] = call.Name, ["models"] = Path.Combine(status.Location, "models"),
+            var request = new JsonObject { ["protocol"] = 1, ["sourceHash"] = sourceHash, ["deadlineTicks"] = deadlineTicks, ["operation"] = call.Name, ["models"] = Path.Combine(status.Location, "models"),
                 ["path"] = snapshot, ["startSeconds"] = args["startSeconds"]!.DeepClone(), ["durationSeconds"] = args["durationSeconds"]!.DeepClone(), ["language"] = args["language"]?.DeepClone() ?? "auto" };
             var missing = needed.Where(c => cached.Components[c] is null).ToArray();
             var installedManifest = JsonNode.Parse(File.ReadAllText(Path.Combine(status.Location, "helper", "downloads.json")))!;
@@ -108,8 +112,10 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
             foreach (var entry in cached.Components) result[entry.Key] = entry.Value!.DeepClone();
             result["reusedComponents"] = cached.Sources.DeepClone();
             result["reuseKeys"] = keys;
-            result["timings"] = new JsonObject { ["queueSeconds"] = queueSeconds, ["snapshotAndLookupSeconds"] = snapshotSeconds, ["totalSeconds"] = elapsed.Elapsed.TotalSeconds };
+            result["timings"] = new JsonObject { ["queueSeconds"] = result["service"]?["queueSeconds"]?.DeepClone() ?? JsonValue.Create(queueSeconds), ["snapshotAndLookupSeconds"] = snapshotSeconds, ["totalSeconds"] = elapsed.Elapsed.TotalSeconds };
             if (!status.Diarization && call.Name != "audio_classify") result["diarization"] = new JsonObject { ["status"] = "unavailable", ["error"] = "Speaker separation is not installed. Run smith audio setup." };
+            // Embeddings belong only to client-owned recording reconciliation, never chat evidence.
+            (result["diarization"] as JsonObject)?.Remove("embeddings");
             AudioReuse.Align(result);
             timeout.Token.ThrowIfCancellationRequested();
             var successful = AudioViews.Components.Any(k => result[k]?["status"]?.ToString() == "succeeded");
@@ -141,8 +147,7 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
         { throw new UserFacingException("Local audio timed out after at most five minutes, including waiting. No automatic retry was made."); }
         finally
         {
-            try { temporary?.Dispose(); }
-            finally { if (acquired) Jobs.Release(); }
+            temporary?.Dispose();
         }
     }
 
@@ -165,6 +170,13 @@ public sealed class AudioTool(ILocalAudioBackend? backend = null) : IDisposable
         return new(preview.ToJsonString());
     }
     public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); (backend as IDisposable)?.Dispose(); }
+    internal static void ValidateHandle(FileStream file, string path)
+    {
+        var final = new StringBuilder(32768);
+        var length = GetFinalPathNameByHandle(file.SafeFileHandle, final, final.Capacity, 0);
+        if (length == 0 || length >= final.Capacity || !final.ToString().Replace("\\\\?\\", "", StringComparison.Ordinal).Equals(Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+            throw new UserFacingException("Audio input changed or resolves through a link.");
+    }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, int length, uint flags);
 }

@@ -151,6 +151,10 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 {
                     if (result.ValueKind != JsonValueKind.Object) break;
                     if (ToolFailure(result, data)) { }
+                    else if (Text(data, "name") == "audio_read" && !Verbose) MessageText("Audio evidence read · " + Text(result, "view") + (Flag(result, "hasMore") ? " · more pages available" : ""), "dim");
+                    else if (Text(result, "kind") == "recording-result" && !Verbose) MessageText("Recording analysis · " + Text(result, "state") + (Flag(result, "reused") ? " · reused saved evidence" : "") + (result.TryGetProperty("durationSeconds", out _) ? $" · {Number(result, "processedSeconds"):0.0}/{Number(result, "durationSeconds"):0.0}s processed" : ""), "dim");
+                    else if (Text(result, "kind") == "recording-catalog" && !Verbose) MessageText("Recording metadata listed", "dim");
+                    else if (Text(result, "kind") is "recording-result" or "recording-catalog") MessageText(result.GetRawText());
                     else if (RoutineResult(data, result)) { }
                     else if (Text(data, "name") is "agent_spawn" or "agent_wait" or "agent_result" or "agent_cancel" or "agent_message") WorkerResult(Text(data, "name"), result);
                     else if (Text(result, "kind") is "audio-analysis" or "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
@@ -359,7 +363,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         if (mode == "Execute" && Text(data, "workflow") is not ("Review" or "Plan")) Wrapped(Text(data, "workflow") == "Document" ? "  Execute runs project code; process effects are not restricted to documentation files." : "  Processes run as your Windows account; the workspace is not a sandbox.", "dim");
         if (local) Wrapped("  " + Text(data, "endpoint") + " · Loaded context: " + (Text(data, "loadedContextTokens").Length > 0 ? Text(data, "loadedContextTokens") + " tokens" : "not reported"), "dim");
         else { Wrapped("  Remaining usage unavailable", "dim"); Wrapped("  Manage usage: https://chatgpt.com/settings/usage", "dim"); }
-        Line("  /help commands   /exit leave   Ctrl+C stop", "dim");
+        Line("  /help commands   /exit leave   Ctrl+C clear / stop", "dim");
         output.WriteLine();
     }
     private void Box(string value, string style, int inner)

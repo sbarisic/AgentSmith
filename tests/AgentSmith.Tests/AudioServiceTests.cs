@@ -14,8 +14,8 @@ public sealed class AudioServiceTests
     private sealed class Host : IDisposable
     {
         public readonly TestDirectory Directory = new();
-        private readonly Func<string, WindowsChild> original = LocalAudioService.Launch;
-        private readonly TimeSpan idle = LocalAudioService.IdleTimeout;
+        internal readonly LocalAudioHost Service = new();
+
         public Host()
         {
             System.IO.Directory.CreateDirectory(Path.Combine(Directory.Path, "helper"));
@@ -35,14 +35,14 @@ public sealed class AudioServiceTests
                     [Console]::WriteLine((@{protocol=2;requestId=$id;type='complete'} | ConvertTo-Json -Compress))
                 }
                 """);
-            LocalAudioService.Launch = _ => WindowsChild.Start(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"),
-                ["-NoProfile", "-File", script], Directory.Path, LocalAudioService.OfflineEnvironment);
-            LocalAudioService.Acquire();
+            Service.Launch = _ => WindowsChild.Start(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"),
+                ["-NoProfile", "-File", script], Directory.Path, LocalAudioHost.OfflineEnvironment);
+
         }
-        public Task<JsonObject> Run(string mode = "ok", CancellationToken ct = default) => LocalAudioService.Infer(Directory.Path,
+        public Task<JsonObject> Run(string mode = "ok", CancellationToken ct = default) => Service.Infer(Directory.Path,
             new() { ["operation"] = "audio_diarize", ["testMode"] = mode }, _ => { }, ct);
         public void Dispose()
-        { LocalAudioService.Release(); LocalAudioService.Launch = original; LocalAudioService.IdleTimeout = idle; Directory.Dispose(); }
+        { Service.Dispose(); Directory.Dispose(); }
     }
 
     [Fact]
@@ -50,10 +50,10 @@ public sealed class AudioServiceTests
     {
         using var host = new Host(); var first = await host.Run(); var second = await host.Run();
         Assert.Equal(first["processId"]!.ToString(), second["processId"]!.ToString());
-        LocalAudioService.IdleTimeout = TimeSpan.FromMilliseconds(100); await host.Run();
+        host.Service.IdleTimeout = TimeSpan.FromMilliseconds(100); await host.Run();
         var watch = Stopwatch.StartNew();
-        while (LocalAudioService.State != "unloaded" && watch.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(30);
-        Assert.Equal("unloaded", LocalAudioService.State);
+        while (host.Service.State != "unloaded" && watch.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(30);
+        Assert.Equal("unloaded", host.Service.State);
         try { using var process = Process.GetProcessById(int.Parse(first["processId"]!.ToString())); Assert.True(process.HasExited); }
         catch (ArgumentException) { /* The process has already been reaped. */ }
     }
@@ -65,7 +65,7 @@ public sealed class AudioServiceTests
         using var host = new Host(); var first = await host.Run();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         await Assert.ThrowsAnyAsync<Exception>(() => host.Run(failure, deadline.Token));
-        Assert.Equal("unloaded", LocalAudioService.State);
+        Assert.Equal("unloaded", host.Service.State);
         var next = await host.Run(); Assert.NotEqual(first["processId"]!.ToString(), next["processId"]!.ToString());
     }
 
@@ -75,7 +75,7 @@ public sealed class AudioServiceTests
         using var host = new Host(); await host.Run();
         using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => host.Run("sleep", deadline.Token));
-        Assert.Equal("unloaded", LocalAudioService.State);
+        Assert.Equal("unloaded", host.Service.State);
         await host.Run();
     }
 }

@@ -7,6 +7,20 @@ namespace AgentSmith.IntegrationTests;
 
 public sealed class ComposerEditingTests
 {
+    [Fact]
+    public void DecisionCommandsAcceptEmptyReturnAndRestoreThePriorDraft()
+    {
+        var input = new ConsoleInput(false); input.Restore("prior draft");
+        using (input.SuspendDraft())
+        {
+            var enter = input.HandleKey(new('\r', ConsoleKey.Enter, false, false, false));
+            Assert.True(enter.Ready); Assert.Equal("", enter.Text); Assert.Null(input.SubmittedPrompt);
+            input.Restore("/status");
+        }
+        Assert.Equal("prior draft", input.Draft); Assert.False(input.DecisionCommands);
+        Assert.False(input.HandleKey(new('\u0004', ConsoleKey.D, false, false, true)).Ready);
+        Assert.False(input.EndOfInput);
+    }
     private static ConsoleKeyInfo Key(ConsoleKey key, char character = '\0', bool control = false) => new(character, key, false, false, control);
     private static void Press(ConsoleInput input, ConsoleKey key) => input.HandleKey(Key(key));
 
