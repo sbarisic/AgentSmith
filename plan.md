@@ -1,5 +1,16 @@
 # AgentSmith implementation status and future work
 
+## AgentSmithLite: separate legacy build (26 October 2026)
+
+- [x] Independent .NET 6 / win-x86 console project, ChatGPT sign-in/chat, bounded file tools, owned command execution and independent app launch.
+- [x] Plain console, isolated DPAPI credentials and no full-app project dependencies. Modern-host build script creates a self-contained portable folder and ZIP.
+- [x] 29 acceptance checks passed under .NET 6.0.36 in a real x86 process on Windows 11, including scripted HTTP chat/tool execution, denial, cancellation, child-process cleanup, DPAPI, signed identity-token validation, manual sign-in and streamed-output regressions. The full application's 45 relevant authentication/process regression tests also passed before the manual sign-in addition; 24 authentication regressions passed afterward.
+- [x] User-reported Windows 8.1 acceptance: manual sign-in worked, and on 26 October 2026 the user confirmed the latest build works on the Windows 8.1 machine. Automated verification remains on Windows 11; this is not a comprehensive independently observed Windows 8.1 compatibility test.
+- [x] `auth login offline` prints a sign-in link without launching a browser and accepts a pasted callback from another machine, retaining PKCE/state/identity validation and cancellation. Covered by local protocol fixtures; the user subsequently reported that it works on the other machine.
+- [x] Version 1.0.1 retains completed streamed output items when the final response omits them. The original `Invalid response completion` error was reproduced with fixtures and fixed; no tools execute before successful response completion. The user subsequently confirmed the latest build works on the Windows 8.1 machine.
+
+See [Lite build and usage](AgentSmithLite/README.md). This is a separate minimal application; the full application's target remains .NET 10.
+
 Updated 15 October 2026. The shared local audio service, explicit chat exit, Windows output recording and whole-recording analysis are implemented. Verified behavior and remaining acceptance limits are recorded below.
 
 ## Shared local audio service: delivered

@@ -23,7 +23,7 @@ public static class OAuthProtocol
     public const string Issuer = "https://auth.openai.com";
     public const string Scope = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
     public static string RandomValue() => Base64UrlEncoder.Encode(RandomNumberGenerator.GetBytes(32));
-    public static string AuthorizeUrl(OAuthAttempt attempt, string hostId, Account? returning)
+    public static string AuthorizeUrl(OAuthAttempt attempt, string hostId, Account? returning, string applicationName = "AgentSmith")
     {
         var query = new Dictionary<string, string>
         {
@@ -38,7 +38,7 @@ public static class OAuthProtocol
             ["code_challenge_method"] = "S256",
             ["code_challenge"] = Base64UrlEncoder.Encode(SHA256.HashData(Encoding.ASCII.GetBytes(attempt.Verifier)))
         };
-        if (attempt.ClientId is null) query["agent_name_hint"] = "AgentSmith";
+        if (attempt.ClientId is null) query["agent_name_hint"] = applicationName;
         if (!string.IsNullOrEmpty(returning?.IdToken)) query["id_token_hint"] = returning.IdToken;
         return Issuer + "/api/accounts/authorize?" + string.Join('&', query.Select(p => Uri.EscapeDataString(p.Key) + "=" + Uri.EscapeDataString(p.Value)));
     }
@@ -92,9 +92,10 @@ public sealed class IdentityValidator
         return new(subject, claims.FindFirst("email")?.Value ?? "");
     }
 }
-public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, IdentityValidator validator)
+public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, IdentityValidator validator, string applicationName = "AgentSmith")
 {
-    public async Task<Account> LoginAsync(string? accountId, Action<string> notify, CancellationToken ct)
+    public async Task<Account> LoginAsync(string? accountId, Action<string> notify, CancellationToken ct,
+        Func<string, CancellationToken, Task<string?>>? manualCallback = null)
     {
         Account? previous;
         string hostId;
@@ -114,26 +115,42 @@ public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, Identity
         listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         listener.Start();
         var attempt = new OAuthAttempt(OAuthProtocol.RandomValue(), OAuthProtocol.RandomValue(), OAuthProtocol.RandomValue(), redirect, previous?.ClientId);
-        notify("Continue with ChatGPT in your browser. Waiting for explicit sign-in and consent; Ctrl+C cancels.");
-        try { Process.Start(new ProcessStartInfo(OAuthProtocol.AuthorizeUrl(attempt, hostId, previous)) { UseShellExecute = true }); }
-        catch { throw new UserFacingException("Could not open the system browser. Configure a default browser and retry sign-in."); }
         CallbackResult callback;
-        while (true)
+        if (manualCallback is not null)
         {
-            var context = await listener.GetContextAsync().WaitAsync(ct);
-            if (context.Request.Url?.AbsolutePath != "/auth/callback") { context.Response.StatusCode = 404; context.Response.Close(); continue; }
-            try
+            // No retained ID-token hint in a URL intended for copying between machines.
+            // The original PKCE verifier, nonce and callback URI stay with this process.
+            var returned = await manualCallback(OAuthProtocol.AuthorizeUrl(attempt, hostId, null, applicationName), ct);
+            ct.ThrowIfCancellationRequested();
+            if (returned is null) throw new OperationCanceledException("Sign-in cancelled.", ct);
+            returned = returned.Trim();
+            if (returned.Length > 16000 || returned.Any(char.IsControl)
+                || !Uri.TryCreate(returned, UriKind.Absolute, out var callbackUri) || callbackUri.Fragment.Length != 0)
+                throw new UserFacingException("Paste the complete http://127.0.0.1:PORT/auth/callback?... URL from the browser address bar. Start sign-in again to retry.");
+            callback = OAuthProtocol.ValidateCallback(callbackUri, attempt);
+        }
+        else
+        {
+            notify("Continue with ChatGPT in your browser. Waiting for explicit sign-in and consent; Ctrl+C cancels.");
+            try { Process.Start(new ProcessStartInfo(OAuthProtocol.AuthorizeUrl(attempt, hostId, previous, applicationName)) { UseShellExecute = true }); }
+            catch { throw new UserFacingException("Could not open the system browser. Configure a default browser and retry sign-in."); }
+            while (true)
             {
-                if (context.Request.HttpMethod != "GET" || context.Request.RawUrl?.Length > 16000) throw new UserFacingException("Invalid authorization callback request.");
-                callback = OAuthProtocol.ValidateCallback(context.Request.Url!, attempt);
-                var message = Encoding.UTF8.GetBytes("Authorization received. Return to AgentSmith to check sign-in completion.");
-                context.Response.ContentType = "text/plain; charset=utf-8";
-                context.Response.Headers["Cache-Control"] = "no-store";
-                await context.Response.OutputStream.WriteAsync(message, ct);
-                context.Response.Close();
-                break;
+                var context = await listener.GetContextAsync().WaitAsync(ct);
+                if (context.Request.Url?.AbsolutePath != "/auth/callback") { context.Response.StatusCode = 404; context.Response.Close(); continue; }
+                try
+                {
+                    if (context.Request.HttpMethod != "GET" || context.Request.RawUrl?.Length > 16000) throw new UserFacingException("Invalid authorization callback request.");
+                    callback = OAuthProtocol.ValidateCallback(context.Request.Url!, attempt);
+                    var message = Encoding.UTF8.GetBytes($"Authorization received. Return to {applicationName} to check sign-in completion.");
+                    context.Response.ContentType = "text/plain; charset=utf-8";
+                    context.Response.Headers["Cache-Control"] = "no-store";
+                    await context.Response.OutputStream.WriteAsync(message, ct);
+                    context.Response.Close();
+                    break;
+                }
+                catch { context.Response.StatusCode = 400; context.Response.Close(); throw; }
             }
-            catch { context.Response.StatusCode = 400; context.Response.Close(); throw; }
         }
         using var tokens = await ExchangeAsync(new() { ["grant_type"] = "authorization_code", ["client_id"] = callback.ClientId, ["code"] = callback.Code, ["code_verifier"] = attempt.Verifier, ["redirect_uri"] = redirect, ["resource"] = OAuthProtocol.Resource }, ct);
         var token = tokens.RootElement.GetProperty("id_token").GetString()!;

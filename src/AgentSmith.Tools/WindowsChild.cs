@@ -26,7 +26,7 @@ internal sealed class WindowsChild : IDisposable
     public int ExitCode { get { if (!GetExitCodeProcess(process, out var code)) throw ErrorException(); return unchecked((int)code); } }
     private static Exception ErrorException() => new IOException("Windows process operation failed (" + Marshal.GetLastWin32Error() + ").");
 
-    public static WindowsChild Start(string executable, IReadOnlyList<string> arguments, string cwd, IReadOnlyDictionary<string, string> overrides)
+    public static WindowsChild Start(string executable, IReadOnlyList<string> arguments, string cwd, IReadOnlyDictionary<string, string> overrides, string? commandLine = null)
     {
         if (!OperatingSystem.IsWindows()) throw new UserFacingException("Process execution currently requires Windows.");
         var child = new WindowsChild();
@@ -58,7 +58,7 @@ internal sealed class WindowsChild : IDisposable
             foreach (var item in overrides) values[item.Key] = item.Value;
             var block = string.Join('\0', values.Select(v => v.Key + "=" + v.Value)) + "\0\0";
             environment = Marshal.StringToHGlobalUni(block);
-            var command = new StringBuilder(string.Join(' ', new[] { executable }.Concat(arguments).Select(Quote)));
+            var command = new StringBuilder(commandLine ?? string.Join(' ', new[] { executable }.Concat(arguments).Select(Quote)));
             if (!CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, true, 0x4 | 0x400 | 0x80000 | 0x08000000, environment, cwd, ref startup, out var info)) throw ErrorException();
             child.process = info.Process; thread = info.Thread;
             if (!AssignProcessToJobObject(child.job, child.process)) { TerminateProcess(child.process, 1); throw ErrorException(); }

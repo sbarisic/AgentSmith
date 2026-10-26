@@ -1,5 +1,7 @@
 # AgentSmith
 
+For a separate basic .NET 6 / Windows x86 console build, see [AgentSmithLite](AgentSmithLite/README.md). It supports ChatGPT chat, file tools, commands and app launch without the full application's optional features.
+
 AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, Review, and Memorize workflows share permission checks and saved task state.
 
 The shared audio service, explicit chat exit, Windows output recording and resumable whole-recording analysis are implemented. See [plan.md](plan.md) for verified delivery and remaining acceptance work.

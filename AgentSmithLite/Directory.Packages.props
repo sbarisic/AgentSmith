@@ -1,0 +1,4 @@
+<Project>
+  <!-- Keep the Lite dependency versions independent of the full .NET 10 application. -->
+  <PropertyGroup><ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally></PropertyGroup>
+</Project>

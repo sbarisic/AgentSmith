@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>AgentSmithLite</AssemblyName>
+    <Version>1.0.1</Version>
+    <RootNamespace>AgentSmithLite</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.14.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.14.0" />
+    <!-- Share authentication and process containment, not the full application's dependency graph. -->
+    <Compile Include="../../src/AgentSmith.OpenAI/ChatGptAuth.cs" Link="Shared/ChatGptAuth.cs" />
+    <Compile Include="../../src/AgentSmith.OpenAI/Credentials.cs" Link="Shared/Credentials.cs" />
+    <Compile Include="../../src/AgentSmith.Tools/WindowsChild.cs" Link="Shared/WindowsChild.cs" />
+    <InternalsVisibleTo Include="AgentSmithLite.Tests" />
+  </ItemGroup>
+</Project>
