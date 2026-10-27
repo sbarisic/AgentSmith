@@ -17,9 +17,10 @@ public static partial class Program
         var dataOption = new Option<string?>("--data-dir") { Description = "Override the local state directory.", Recursive = true };
         var jsonOption = new Option<bool>("--json") { Description = "Write newline-delimited JSON events.", Recursive = true };
         var noColor = new Option<bool>("--no-color") { Description = "Disable terminal color.", Recursive = true };
+        var admin = new Option<bool>("--admin") { Description = "Run as administrator in a new Windows console (requests UAC approval).", Recursive = true };
         using var helpRegistry = new ToolRegistry();
         var root = new RootCommand("AgentSmith: ChatGPT and local-model project assistant\n" + string.Join('\n', helpRegistry.Definitions.Concat(WorkerCoordinator.DelegationDefinitions).GroupBy(t => t.Capability).Select(g => $"{g.Key} tools: {string.Join(", ", g.Select(t => t.Name == "agent_finish" ? "agent_finish (worker only)" : t.Name))}")));
-        root.Options.Add(dataOption); root.Options.Add(jsonOption); root.Options.Add(noColor);
+        root.Options.Add(dataOption); root.Options.Add(jsonOption); root.Options.Add(noColor); root.Options.Add(admin);
         MemoryCommands(root, dataOption, jsonOption, noColor);
         AudioCommands(root, dataOption, jsonOption, noColor);
         ServiceCommands(root, dataOption, jsonOption);
@@ -187,6 +188,14 @@ public static partial class Program
             app.Write("run.inspection", run); return Task.FromResult(0);
         }).GetAwaiter().GetResult());
         var parsed = root.Parse(args);
+        // Help and invalid commands must not request elevation. Keep --admin in the
+        // child arguments; its elevated token prevents another relaunch.
+        if (parsed.Errors.Count == 0 && parsed.Action is not null &&
+            parsed.Action == parsed.CommandResult.Command.Action && parsed.GetValue(admin))
+        {
+            var elevatedExitCode = await AdministratorLaunch.TryRunAsync(args);
+            if (elevatedExitCode is not null) return elevatedExitCode.Value;
+        }
         // Interactive chats own Ctrl+C. System.CommandLine otherwise cancels the
         // invocation (and exits after its termination timeout) even when our handler suppresses it.
         return await parsed.InvokeAsync(parsed.CommandResult.Command.Name is "chat" or "resume" or "analyze" or "analysis"

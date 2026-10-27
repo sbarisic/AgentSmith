@@ -397,6 +397,8 @@ dotnet publish src/AgentSmith.Cli -c Release -r win-x64 --self-contained true -o
 
 Keep the entire publish directory together; this is a self-contained folder deployment, not a single-file executable.
 
+On Windows, add `--admin` to run a command as administrator, for example `smith chat --admin` or `smith --admin resume`. Accept the Windows UAC prompt to open Smith in a new elevated console. The command arguments and current directory are preserved, and the original process waits for the elevated command to finish and returns its exit code. If Smith is already elevated, it continues in the current console. Declining the prompt cancels the command; help and invalid commands do not request elevation. Redirected input/output stays with the original process; elevated command output appears in the new console.
+
 ## Bonsai 2 on a local Chat Completions server
 
 Use `--provider local` for the server at `http://127.0.0.1:8080/v1`. This adapter discovers models through `/v1/models` and streams `/v1/chat/completions`; it does not require an API key. Both an origin and a base URL ending in `/v1` are accepted. The endpoint is loopback-only, with no automatic retries or provider fallback.

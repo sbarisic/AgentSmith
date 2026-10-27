@@ -34,6 +34,31 @@ public sealed class CliTests : IDisposable
         { using var json = JsonDocument.Parse(line); Assert.Equal(1, json.RootElement.GetProperty("schemaVersion").GetInt32()); }
         Assert.Empty(status.Error);
     }
+    [Theory]
+    [InlineData("--admin", "chat", "--help")]
+    [InlineData("chat", "--admin", "--help")]
+    public async Task AdminHelpDoesNotRequestElevation(string first, string second, string third)
+    {
+        var result = await Invoke([first, second, third]);
+        Assert.Equal(0, result.Code);
+        Assert.Contains("--admin", result.Output);
+        Assert.DoesNotContain("Requesting administrator", result.Error);
+    }
+    [Fact]
+    public async Task InvalidAdminCommandDoesNotRequestElevation()
+    {
+        var result = await Invoke(["run", "--admin"]);
+        Assert.NotEqual(0, result.Code);
+        Assert.DoesNotContain("Requesting administrator", result.Error);
+    }
+    [Fact]
+    public async Task ExplicitlyDisabledAdminRunsNormally()
+    {
+        var result = await Invoke(["--admin=false", "--json", "auth", "status"]);
+        Assert.Equal(0, result.Code);
+        Assert.Contains("auth.accounts", result.Output);
+        Assert.Empty(result.Error);
+    }
     [Fact]
     public async Task PendingQuestionSurvivesEofAndDoesNotLeakCredentials()
     {
