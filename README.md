@@ -8,6 +8,11 @@ The shared audio service, explicit chat exit, Windows output recording and resum
 
 Licensed under the [MIT License](LICENSE). This repository distributes source, tests, and documentation only. It contains no binaries, model weights, local session data, or CI/CD workflows. Build locally with the .NET SDK pinned in `global.json`; local model servers and credentials are configured separately.
 
+Full Smith supports editable defaults in `%LOCALAPPDATA%\AgentSmith\config.toml`.
+Run `smith config init` to create the file from existing model defaults, or
+`smith config` to show its location. See [configuration](CONFIGURATION.md) for
+supported settings, CLI precedence and persistence. AgentSmithLite is unchanged.
+
 ## Repository memorization
 
 `/memorize` starts bounded source inspection and reconciliation of repository-local development knowledge. `/memorize --full` requests a bounded full rescan; `/memorize --path src` restricts inspection to a workspace-relative path. `/mode memorize` and startup `--workflow memorize` select the workflow. This describes the local implementation, not a published release.
@@ -51,6 +56,8 @@ Type `/` for local command and finite-argument suggestions. Up/Down selects sugg
 ## Local audio transcription and sound recognition
 
 Run `smith audio setup` once on Windows x64 to download a private Python 3.11 runtime, hash-locked packages, Whisper multilingual small, Google YAMNet and sherpa-onnx speaker models. All downloads are public and require no account or token. Use `smith audio status` or `/audio status` to inspect readiness. Pass the same `--data-dir <directory>` you use for Smith when selecting a custom data directory. Setup leaves system Python and PATH unchanged, and retains the previous working installation if an update fails. The Microsoft Visual C++ 2015–2022 x64 Redistributable is required; setup reports missing DLLs with installation guidance.
+
+Smith automatically removes obsolete audio installations at startup, after setup, after analysis completion or deletion, and when an old helper unloads. It keeps the current installation, versions referenced by unfinished or retryable analyses (including `CompletedWithGaps`), and versions leased by queued requests or running helpers. Completed analysis results remain readable and exportable after their installation is removed. Run `smith audio cleanup` to retry cleanup explicitly. Busy files or unreadable job metadata defer cleanup; recordings, analysis results, download caches, credentials, and chat history are preserved.
 
 After setup, inference is local, CPU-only and offline, with no API key. Tools are advertised only when their engines are ready:
 

@@ -70,6 +70,7 @@ internal static class LocalAudioProcess
 
     internal static async Task<JsonObject> Infer(string directory, JsonObject request, Action<string> progress, CancellationToken cancellation)
     {
+        using var installationLease = LocalAudioInstallation.Use(directory);
         var text = await Run(Path.Combine(directory, "env", "Scripts", "python.exe"),
             ["-I", "-u", Path.Combine(directory, "helper", "audio_helper.py")], directory, request.ToJsonString(), cancellation, progress, true);
         try

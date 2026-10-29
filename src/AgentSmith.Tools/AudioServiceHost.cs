@@ -232,6 +232,7 @@ public sealed partial class AudioServiceHost
         internal readonly Peer Peer;
         internal readonly AudioSubmission Submission;
         internal readonly string Installation;
+        internal readonly FileStream? InstallationLease;
         internal readonly AudioTemporary Temporary;
         internal readonly string Path;
         internal readonly CancellationTokenSource Cancel;
@@ -252,12 +253,18 @@ public sealed partial class AudioServiceHost
             Upload = new(Path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous);
             Cancel = CancellationTokenSource.CreateLinkedTokenSource(peer.Closed.Token);
             Cancel.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, submission.DeadlineTicks - Environment.TickCount64)));
+            try { InstallationLease = LocalAudioInstallation.Use(installation); }
+            catch { Dispose(); throw; }
         }
         public void Dispose()
         {
-            Upload?.Dispose(); Upload = null;
-            try { Temporary.Dispose(); } catch (IOException) { /* A later leased cleanup retries. */ }
-            Cancel.Cancel();
+            try
+            {
+                Upload?.Dispose(); Upload = null;
+                try { Temporary.Dispose(); } catch (IOException) { /* A later leased cleanup retries. */ }
+                Cancel.Cancel();
+            }
+            finally { InstallationLease?.Dispose(); }
         }
     }
     private sealed class Peer(AudioServiceHost host, NamedPipeServerStream pipe, int number)

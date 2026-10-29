@@ -30,6 +30,7 @@ public static partial class Program
         root.Options.Add(provider); root.Options.Add(endpoint); root.Options.Add(outputBudget);
         WorkerCommands(root, dataOption, jsonOption, noColor, provider, endpoint, outputBudget);
         ModelCommands(root, dataOption, jsonOption, noColor, provider, endpoint, outputBudget);
+        ConfigCommands(root, dataOption, jsonOption, noColor);
         var auth = new Command("auth", "Manage ChatGPT account registrations."); root.Subcommands.Add(auth);
         var login = new Command("login", "Continue with ChatGPT in the system browser.");
         var loginAccount = new Option<string?>("--account") { Description = "Reauthorize an existing account ID; omitted registers another account." };
@@ -70,7 +71,9 @@ public static partial class Program
         }).GetAwaiter().GetResult());
         var models = new Command("models", "List models available to the selected account."); root.Subcommands.Add(models);
         models.SetAction(async (p, ct) => await Execute(p.GetValue(dataOption), p.GetValue(jsonOption), p.GetValue(noColor), async app =>
-        { await app.ShowModels(p.GetValue(provider), ResolveEndpoint(p.GetValue(provider), p.GetValue(endpoint)), ct); return 0; }));
+        { var selectedProvider = p.GetResult(provider) is { Implicit: false } ? p.GetValue(provider) : app.Config.Provider ?? p.GetValue(provider);
+          var selectedEndpoint = p.GetValue(endpoint) ?? app.Config.ProviderString(selectedProvider, "endpoint", app.Config.Provider ?? ModelProvider.ChatGpt);
+          await app.ShowModels(selectedProvider, ResolveEndpoint(selectedProvider, selectedEndpoint), ct); return 0; }));
         foreach (var name in new[] { "chat", "run" })
         {
             var command = new Command(name, name == "chat" ? "Start interactive project chat." : "Execute one request.");
@@ -101,13 +104,13 @@ public static partial class Program
                 var path = WorkspaceTools.ValidateRoot(p.GetValue(workspace) ?? Environment.CurrentDirectory);
                 var selection = app.ResolveChatModel(p.GetValue(model), p.GetResult(provider) is { Implicit: false } ? p.GetValue(provider) : null, p.GetValue(endpoint), p.GetValue(outputBudget));
                 var selected = selection.Model;
-                var session = new Session { Workspace = path, Model = selected, Mode = p.GetValue(mode), Workflow = CliApp.ParseWorkflow(p.GetValue(workflow), p.GetValue(plan)),
+                var session = new Session { Workspace = path, Model = selected, Mode = app.Config.Option(p, mode, "permissions.mode"), Workflow = CliApp.ParseWorkflow(p.GetValue(workflow), p.GetValue(plan)),
                     AccountId = selection.AccountId, Connection = selection.Connection() };
                 session.EnabledWorkers = app.ResolveWorkers(p.GetValue(workerNames));
-                session.WorkerPolicy = new() { MaxConcurrent = p.GetValue(maxWorkers), MaxLocalConcurrent = p.GetValue(maxLocalWorkers), MaxRequests = p.GetValue(workerRequests), MaxMinutes = p.GetValue(workerMinutes) }; session.WorkerPolicy.Validate();
-                session.Execution = new() { MaxRequests = p.GetValue(maxSteps), MaxMinutes = p.GetValue(maxMinutes) }; session.Execution.Validate();
-                session.ContextPolicy.Budget = p.GetValue(contextBudget)!; session.ContextPolicy.Validate();
-                session.Delegation = p.GetValue(delegation)!;
+                session.WorkerPolicy = new() { MaxConcurrent = app.Config.Option(p, maxWorkers, "workers.max_concurrent"), MaxLocalConcurrent = app.Config.Option(p, maxLocalWorkers, "workers.max_local_concurrent"), MaxRequests = app.Config.Option(p, workerRequests, "workers.max_requests"), MaxMinutes = app.Config.Option(p, workerMinutes, "workers.max_minutes") }; session.WorkerPolicy.Validate();
+                session.Execution = new() { MaxRequests = app.Config.Option(p, maxSteps, "execution.max_steps"), MaxMinutes = app.Config.Option(p, maxMinutes, "execution.max_minutes") }; session.Execution.Validate();
+                session.ContextPolicy.Budget = app.Config.Option(p, contextBudget, "execution.context_budget")!; session.ContextPolicy.Validate();
+                session.Delegation = app.Config.Option(p, delegation, "workers.delegation")!;
                 if (session.Delegation is not ("proactive" or "manual")) throw new UserFacingException("Delegation must be proactive or manual.");
                 await app.ConfigureModel(session, ct);
                 session.ContextPolicy.WorkingTokens(session.Connection);
@@ -116,7 +119,7 @@ public static partial class Program
                 app.Store.Save(session, new("conversation.created", session.Id, null, new { workspace = path, model = selected }));
                 app.SetConversation(session);
                 foreach (var image in p.GetValue(images) ?? []) app.AttachFile(session, image);
-                if (name == "chat") app.Store.SaveChatDefault(ChatModelSelection.From(session));
+                if (name == "chat") app.SaveModelDefault(ChatModelSelection.From(session));
                 app.Write("conversation", app.Header(session));
                 return await app.Chat(session, p.GetValue(prompt), name == "chat", ct);
             }));
@@ -237,6 +240,7 @@ internal sealed partial class CliApp : IDisposable
     private long sequence;
     private CancellationTokenSource? activeRun;
     private readonly ConsoleCancelEventHandler cancelHandler;
+    internal SmithConfig Config { get; private set; }
     public CredentialVault Vault { get; }
     public ChatGptAuth Auth { get; }
     public SessionStore Store { get; }
@@ -247,14 +251,16 @@ internal sealed partial class CliApp : IDisposable
     public CliApp(string? directory, bool json, bool noColor, TextReader? reader = null)
     {
         this.json = json;
-        color = !json && !noColor && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null;
+        var root = SmithPaths.DataDirectory(directory);
+        Config = SmithConfig.Load(root);
+        color = !json && Config.Boolean("display.color") != false && !noColor && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null;
         var width = Console.IsOutputRedirected ? 90 : Console.WindowWidth;
-        terminal = new TerminalRenderer(Console.Out, color, width);
+        terminal = new TerminalRenderer(Console.Out, color, width) { Verbose = string.Equals(Config.String("display.verbosity"), "verbose", StringComparison.OrdinalIgnoreCase) };
         input = new ConsoleInput(!json && !Console.IsInputRedirected && !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("TERM") != "dumb", reader, color);
         attention = InputAttention.Create(!json && reader is null && !Console.IsInputRedirected && !Console.IsOutputRedirected);
-        var root = SmithPaths.DataDirectory(directory);
         Vault = new(root, new WindowsSecretProtector());
         Auth = new(http, Vault, new IdentityValidator()); Store = new(root);
+        LocalAudioInstallation.Cleanup(root);
         Registry = new(Store);
         Registry.Recordings.StartService = Program.EnsureAudioService;
         Registry.Recordings.Summarize = SummarizeRecording;
@@ -284,6 +290,10 @@ internal sealed partial class CliApp : IDisposable
     }
     public async Task<Run> Run(Session session, string? prompt, string? answer, CancellationToken ct, bool recordHistory = true, bool literal = false)
     {
+        // Recover network pauses written by older builds which marked transient
+        // compaction failures as permanent explicit-retry barriers.
+        if (prompt is null && answer is null && session.Runs.LastOrDefault() is { State: RunState.Paused, PauseReason: PauseReason.Network })
+            foreach (var attempt in session.CompactionAttempts.Where(a => a.State == "Failed" && a.BoundaryHash == ContextBuilder.Hash(session.History))) attempt.State = "Retryable";
         if (prompt is null && answer is null && session.Runs.LastOrDefault() is { State: RunState.Paused } paused
             && new ContextBuilder(Store, ModelClient(session), Agents) { Limit = ContextLimit }.RequiresExplicitRetry(session))
         {

@@ -14,7 +14,7 @@ public sealed class LocalChatModelClient(HttpClient http, ModelConnection connec
     public async Task<TokenMeasurement?> CountTokensAsync(ModelRequest request, CancellationToken ct)
     {
         CheckHeaders();
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
             var body = BuildRequest(request, request.MaxOutputTokens ?? connection.MaxOutputTokens);
@@ -24,15 +24,108 @@ public sealed class LocalChatModelClient(HttpClient http, ModelConnection connec
                     for (var i = 0; i < parts.Count; i++) if (parts[i]?["type"]?.ToString() == "image_url") { images++; parts[i] = new JsonObject { ["type"] = "text", ["text"] = "[image]" }; }
             body["add_generation_prompt"] = true;
             using var templated = await http.PostAsync(new Uri(Endpoint(connection.Endpoint), "../apply-template"), new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"), timeout.Token);
-            if (!templated.IsSuccessStatusCode) return null;
-            var prompt = JsonNode.Parse(await templated.Content.ReadAsStringAsync(timeout.Token))?["prompt"]?.ToString(); if (prompt is null) return null;
+            if (!templated.IsSuccessStatusCode)
+            {
+                if (templated.StatusCode is not (System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed)) throw CountingFailure($"Local chat-template counting failed (HTTP {(int)templated.StatusCode}).");
+                return await CountStrataAsync(body, images, timeout.Token);
+            }
+            var prompt = JsonNode.Parse(await templated.Content.ReadAsStringAsync(timeout.Token))?["prompt"]?.ToString();
+            if (prompt is null) throw CountingFailure("Local chat-template counting returned no prompt.");
             var input = new JsonObject { ["content"] = prompt, ["add_special"] = false, ["parse_special"] = true };
             using var tokenized = await http.PostAsync(new Uri(Endpoint(connection.Endpoint), "../tokenize"), new StringContent(input.ToJsonString(), Encoding.UTF8, "application/json"), timeout.Token);
-            if (!tokenized.IsSuccessStatusCode) return null;
+            if (!tokenized.IsSuccessStatusCode) throw CountingFailure($"Local tokenizer failed (HTTP {(int)tokenized.StatusCode}).");
             var tokens = JsonNode.Parse(await tokenized.Content.ReadAsStringAsync(timeout.Token))?["tokens"]?.AsArray().Count;
-            return tokens is null ? null : new(tokens.Value + images * 4096, images == 0 ? "server chat template/tokenizer" : "server text tokenizer + estimated image tokens", images == 0);
+            return tokens is null ? throw CountingFailure("Local tokenizer returned no token array.") : new(tokens.Value + images * 4096, images == 0 ? "server chat template/tokenizer" : "server text tokenizer + estimated image tokens", images == 0);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw CountingFailure("Local token counting timed out after 30 seconds."); }
+        catch (HttpRequestException) { throw CountingFailure("Local token counting could not reach the model server."); }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { throw CountingFailure("Local token counting returned an invalid response."); }
+    }
+
+    private static UserFacingException CountingFailure(string reason) => Failures.Reject("local_token_count_failed",
+        reason + " Context size is unknown; no estimate-driven compaction was started. Check the local server and continue to retry.",
+        "Restore the local tokenizer endpoint, then continue. Saved tool results are retained.");
+
+    // Strata exposes its tokenizer through the Messages counting API, not llama.cpp's
+    // apply-template/tokenize routes. Convert the same chat transcript, including tools.
+    private async Task<TokenMeasurement?> CountStrataAsync(JsonObject chat, int images, CancellationToken ct)
+    {
+        using var props = await http.GetAsync(new Uri(Endpoint(connection.Endpoint), "../props"), ct);
+        if (!props.IsSuccessStatusCode)
+        {
+            if (props.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed) return null;
+            throw CountingFailure($"Local tokenizer discovery failed (HTTP {(int)props.StatusCode}).");
+        }
+        var info = JsonNode.Parse(await props.Content.ReadAsStringAsync(ct));
+        if (info?["build_info"]?.ToString().StartsWith("Strata ", StringComparison.OrdinalIgnoreCase) != true) return null;
+        var messages = new JsonArray();
+        var system = new StringBuilder();
+        var transcript = chat["messages"]!.AsArray().Select(m => m!).ToList();
+        // Strata's chat path pairs a parallel result batch by call ID before applying
+        // the template; the Messages path pairs by position. Use the same ordering.
+        for (var i = 1; i < transcript.Count; i++)
+        {
+            if (transcript[i]["role"]?.ToString() != "tool") continue;
+            var end = i + 1;
+            while (end < transcript.Count && transcript[end]["role"]?.ToString() == "tool") end++;
+            var calls = transcript[i - 1]["tool_calls"] as JsonArray;
+            var ids = calls?.Select(c => c!["id"]!.ToString()).ToArray() ?? [];
+            var results = transcript.GetRange(i, end - i);
+            var resultIds = results.Select(r => r["tool_call_id"]!.ToString()).ToArray();
+            if (ids.Length == results.Count && ids.Distinct().Count() == ids.Length && resultIds.Distinct().Count() == ids.Length && ids.ToHashSet().SetEquals(resultIds))
+            {
+                var ordered = results.OrderBy(r => Array.IndexOf(ids, r["tool_call_id"]!.ToString())).ToArray();
+                for (var j = 0; j < ordered.Length; j++) transcript[i + j] = ordered[j];
+            }
+            i = end - 1;
+        }
+        foreach (var message in transcript)
+        {
+            var role = message!["role"]!.ToString();
+            if (ReferenceEquals(message, transcript[0])) { system.Append(message["content"]!.ToString()); continue; }
+            if (role is "system" or "developer") role = "user";
+            var blocks = new JsonArray();
+            if (role == "tool")
+                blocks.Add(new JsonObject { ["type"] = "tool_result", ["tool_use_id"] = message["tool_call_id"]!.DeepClone(), ["content"] = message["content"]!.DeepClone() });
+            else
+            {
+                if (message["reasoning_content"] is { } reasoning)
+                    blocks.Add(new JsonObject { ["type"] = "thinking", ["thinking"] = reasoning.DeepClone() });
+                var content = message["content"];
+                if (content is JsonArray parts)
+                    foreach (var part in parts) blocks.Add(part!.DeepClone());
+                else if (content?.ToString() is { Length: > 0 } text)
+                    blocks.Add(new JsonObject { ["type"] = "text", ["text"] = text });
+                if (message["tool_calls"] is JsonArray calls)
+                    foreach (var call in calls)
+                        blocks.Add(new JsonObject { ["type"] = "tool_use", ["id"] = call!["id"]!.DeepClone(),
+                            ["name"] = call["function"]!["name"]!.DeepClone(), ["input"] = JsonNode.Parse(call["function"]!["arguments"]!.ToString()) });
+            }
+            messages.Add(new JsonObject { ["role"] = role == "tool" ? "user" : role, ["content"] = blocks });
+        }
+        var request = new JsonObject { ["model"] = chat["model"]!.DeepClone(), ["system"] = system.ToString(), ["messages"] = messages };
+        if (chat["tools"] is JsonArray tools)
+            request["tools"] = new JsonArray(tools.Select(t => (JsonNode)new JsonObject { ["name"] = t!["function"]!["name"]!.DeepClone(),
+                ["description"] = t["function"]!["description"]!.DeepClone(), ["input_schema"] = t["function"]!["parameters"]!.DeepClone() }).ToArray());
+        async Task<int> Count()
+        {
+            using var response = await http.PostAsync(new Uri(Endpoint(connection.Endpoint), "messages/count_tokens"), new StringContent(request.ToJsonString(), Encoding.UTF8, "application/json"), ct);
+            if (!response.IsSuccessStatusCode) throw CountingFailure($"Strata token counting failed (HTTP {(int)response.StatusCode}).");
+            var result = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
+            return result?["input_tokens"] is JsonValue count && count.TryGetValue<int>(out var tokens) && tokens > 0
+                ? tokens : throw CountingFailure("Strata token counting returned no valid input-token count.");
+        }
+        // The counting API inherits shared reasoning defaults, just like inference.
+        // Its separate Anthropic on_request setting can still change the template.
+        // Compare with explicit model thinking: equal counts are exact; otherwise
+        // keep a server-tokenized upper bound, never falsely advertise exactness.
+        var inherited = await Count();
+        request["thinking"] = new JsonObject { ["type"] = "enabled" };
+        var enabled = await Count();
+        var sameTemplateCount = inherited == enabled;
+        return new(Math.Max(inherited, enabled) + images * 4096,
+            images > 0 ? "Strata text tokenizer + estimated image tokens" : sameTemplateCount ? "Strata server chat tokenizer" : "Strata server tokenizer upper bound (reasoning defaults differ)",
+            images == 0 && sameTemplateCount);
     }
     public static Uri Endpoint(string endpoint)
     {

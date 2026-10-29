@@ -18,31 +18,40 @@ public static partial class Program
             var candidate = new Session { Model = selection.Model, AccountId = selection.AccountId, Connection = selection.Connection() };
             await app.ConfigureModel(candidate, ct);
             candidate.ContextPolicy.WorkingTokens(candidate.Connection);
-            app.Store.SaveChatDefault(ChatModelSelection.From(candidate)); app.ShowModel(null); return 0;
+            app.SaveModelDefault(ChatModelSelection.From(candidate)); app.ShowModel(null); return 0;
         }));
     }
 }
 
 internal sealed partial class CliApp
 {
+    internal void SaveModelDefault(ChatModelSelection selection)
+    {
+        SmithConfig.SaveModel(Store.DataDirectory, selection);
+        Config = SmithConfig.Load(Store.DataDirectory);
+        Store.SaveChatDefault(selection);
+    }
     internal ChatModelSelection ResolveChatModel(string? model, ModelProvider? provider, string? endpoint, int output)
     {
         var saved = Store.ChatDefault();
         // Existing installations can start a fresh chat using their most recent parent model.
         saved ??= Store.List().FirstOrDefault(s => s.ParentConversationId is null && !string.IsNullOrWhiteSpace(s.Model)) is { } recent
             ? ChatModelSelection.From(recent) : null;
-        var selectedProvider = provider ?? saved?.Provider ?? ModelProvider.ChatGpt;
+        var configuredProvider = Config.Provider ?? saved?.Provider ?? ModelProvider.ChatGpt;
+        var selectedProvider = provider ?? configuredProvider;
         var compatible = saved?.Provider == selectedProvider ? saved : null;
-        var selectedModel = model ?? compatible?.Model
+        var selectedModel = model ?? Config.ProviderString(selectedProvider, "model", configuredProvider) ?? compatible?.Model
             ?? throw new UserFacingException("No default model is configured. Run smith models, then smith model <id>, or start smith chat --model <id>.");
         if (string.IsNullOrWhiteSpace(selectedModel) || selectedModel.Length > 2048 || selectedModel.Any(char.IsControl))
             throw new UserFacingException("Invalid model ID. Use smith models to list available IDs.");
-        return new(selectedModel, selectedProvider, endpoint ?? compatible?.Endpoint ?? Program.ResolveEndpoint(selectedProvider, null),
-            compatible?.AccountId ?? "", output == 0 ? compatible?.MaxOutputTokens ?? (selectedProvider == ModelProvider.ChatGpt ? 16384 : 8192) : output);
+        return new(selectedModel, selectedProvider, endpoint ?? Config.ProviderString(selectedProvider, "endpoint", configuredProvider) ?? compatible?.Endpoint ?? Program.ResolveEndpoint(selectedProvider, null),
+            compatible?.AccountId ?? "", output == 0 ? Config.ProviderInteger(selectedProvider, "max_output_tokens", configuredProvider) ?? compatible?.MaxOutputTokens ?? (selectedProvider == ModelProvider.ChatGpt ? 16384 : 8192) : output);
     }
     internal void ShowModel(Session? session)
     {
-        var saved = Store.ChatDefault();
+        ChatModelSelection? saved = null;
+        try { saved = ResolveChatModel(null, null, null, 0); }
+        catch (UserFacingException) when (Config.String("model") is null && Store.ChatDefault() is null) { }
         Write("model.selection", new { model = session?.Model, provider = session?.Connection.Provider.ToString(), defaults = saved,
             message = (session is null ? "" : $"Current: {session.Model} · {session.Connection.Provider}\n")
                 + (saved is null ? "No saved default. Use /model <id> or smith model <id>." : $"New chats: {saved.Model} · {saved.Provider}\nStart with smith chat.") });
@@ -76,6 +85,8 @@ internal sealed partial class CliApp
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException)
         { throw new UserFacingException("Model validation was unavailable. The current model and saved default are unchanged. Check the provider connection and retry."); }
         session.ContextPolicy.WorkingTokens(candidate.Connection);
+        SmithConfig.SaveModel(Store.DataDirectory, ChatModelSelection.From(candidate));
+        Config = SmithConfig.Load(Store.DataDirectory);
         Store.SelectChatModel(session, candidate);
         Write("model.selection", new { model = session.Model, provider = session.Connection.Provider.ToString(),
             message = $"Next prompt: {session.Model} · {session.Connection.Provider}. Saved as the default for new chats in this data directory. Worker profiles are unchanged." });

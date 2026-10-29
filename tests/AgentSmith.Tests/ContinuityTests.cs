@@ -157,6 +157,112 @@ public sealed class ContinuityTests
     }
 
     [Fact]
+    public async Task OneLargeCompletedToolGroupCanCompactWithoutLosingTaskOrSourceHistory()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.Connection.Capabilities.ContextTokens = 32768; s.Connection.MaxOutputTokens = 8192;
+        s.History.Add(User("Keep this active task verbatim"));
+        s.History.Add(RuntimeTests.Call("only", "file_read", "{}"));
+        s.History.Add(new() { ["type"] = "function_call_output", ["call_id"] = "only", ["output"] = new string('x', 24000) });
+        var original = ContextBuilder.Hash(s.History); var model = new ExactCountingModel();
+        var builder = new ContextBuilder(store, model, new CountingTools());
+        var run = new Run { PromptHistoryIndex = 0, ContextManifest = builder.Build(s).Manifest };
+        var observedCount = false;
+        var context = await builder.PrepareAsync(s, run, e =>
+        {
+            if (e.Type != "context.compaction.started") return;
+            var manifest = JsonNode.Parse(run.ContextManifest!)!;
+            Assert.True(manifest["measurement"]!["exact"]!.GetValue<bool>());
+            Assert.Equal("test count", manifest["measurement"]!["method"]!.ToString());
+            observedCount = true;
+        }, default);
+        Assert.True(observedCount);
+        Assert.NotNull(s.ActiveContextId); Assert.Equal(3, ContextBuilder.Active(s)!.Through);
+        Assert.Equal(original, ContextBuilder.Hash(store.Get(s.Id)!.History));
+        Assert.Contains(context.Request.Input, i => i["content"]?.ToString() == "Keep this active task verbatim");
+        Assert.DoesNotContain(context.Request.Input, i => i["type"]?.ToString() is "function_call" or "function_call_output");
+        Assert.True(ExactCountingModel.Count(context.Request) < 20643);
+    }
+
+    private sealed class PaddedTools : IToolDispatcher
+    {
+        public IReadOnlyList<ToolDefinition> Definitions => [];
+        public string Instructions(string workspace) => new string('i', 12000);
+        public Task<ToolOutput> ExecuteAsync(string workspace, ToolCall call, CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task FixedOverheadAbovePreferredTargetDoesNotRejectUsableShortConversationSummary()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.Connection.Capabilities.ContextTokens = 32768; s.Connection.MaxOutputTokens = 8192;
+        s.History.Add(User("Preserve the task"));
+        for (var i = 0; i < 2; i++)
+        {
+            s.History.Add(RuntimeTests.Call("read" + i, "file_read", "{}"));
+            s.History.Add(new() { ["type"] = "function_call_output", ["call_id"] = "read" + i, ["output"] = new string('x', 5000) });
+        }
+        var builder = new ContextBuilder(store, new ExactCountingModel(), new PaddedTools());
+        var context = await builder.PrepareAsync(s, new(), _ => { }, default);
+        Assert.NotNull(s.ActiveContextId);
+        Assert.InRange(ExactCountingModel.Count(context.Request), 13763, 20642);
+        Assert.Equal(5, s.History.Count);
+        Assert.Contains(context.Request.Input, i => i["content"]?.ToString() == "Preserve the task");
+    }
+
+    [Fact]
+    public async Task ExactCountBelowTriggerDoesNotCompactDespiteLargeByteEstimate()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store);
+        s.Connection.Capabilities.ContextTokens = 32768; s.Connection.MaxOutputTokens = 8192;
+        s.History.Add(User("small task"));
+        var model = new SmallCountingModel();
+        var builder = new ContextBuilder(store, model, new CountingTools());
+        var context = await builder.PrepareAsync(s, new(), _ => { }, default);
+        Assert.Null(s.ActiveContextId); Assert.Empty(s.CompactionAttempts);
+        Assert.Contains("server count", context.Manifest);
+    }
+
+    private sealed class SmallCountingModel : IModelClient
+    {
+        public Task<TokenMeasurement?> CountTokensAsync(ModelRequest request, CancellationToken ct) => Task.FromResult<TokenMeasurement?>(new(9500, "server count", true));
+        public IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, CancellationToken ct) => throw new InvalidOperationException("No compaction should run.");
+    }
+
+    private sealed class UnavailableCountingModel : IModelClient
+    {
+        public Task<TokenMeasurement?> CountTokensAsync(ModelRequest request, CancellationToken ct) => throw Failures.Reject("local_token_count_failed", "Tokenizer HTTP 503", "Restore the server.");
+        public IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, CancellationToken ct) => throw new InvalidOperationException("Do not start compaction on a guessed count.");
+    }
+
+    [Fact]
+    public async Task TokenizerOutagePausesBeforeEstimateDrivenCompactionAndRetainsHistory()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store); LongHistory(s);
+        s.Connection.Capabilities.ContextTokens = 32768; s.Connection.MaxOutputTokens = 8192;
+        var original = ContextBuilder.Hash(s.History);
+        var builder = new ContextBuilder(store, new UnavailableCountingModel(), new CountingTools());
+        var error = await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default));
+        Assert.Equal(PauseReason.Network, error.Reason); Assert.Contains("HTTP 503", error.Message);
+        Assert.Empty(s.CompactionAttempts); Assert.Equal(original, ContextBuilder.Hash(s.History));
+    }
+
+    private sealed class FailedSummaryModel : IModelClient
+    {
+        public IAsyncEnumerable<ModelEvent> StreamAsync(ModelRequest request, CancellationToken ct) => throw new UserFacingException("Local response exhausted its output budget.");
+    }
+
+    [Fact]
+    public async Task SummaryFailurePreservesTheActualProviderReason()
+    {
+        using var dir = new TestDirectory(); var store = new SessionStore(dir.Path); var s = Conversation(store); LongHistory(s);
+        var builder = new ContextBuilder(store, new FailedSummaryModel(), new CountingTools()) { Limit = 30000 };
+        var error = await Assert.ThrowsAsync<ContextBudgetException>(() => builder.PrepareAsync(s, new(), _ => { }, default));
+        Assert.Equal("Local response exhausted its output budget.", error.Message);
+        Assert.Equal(error.Message, Assert.Single(s.CompactionAttempts).Reason);
+    }
+
+    [Fact]
     public void ProtocolGroupsPreserveReasoningAllCallsAndAllResults()
     {
         JsonObject Item(string type, string? id = null) => new() { ["type"] = type, ["call_id"] = id };

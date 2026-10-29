@@ -193,5 +193,6 @@ public sealed class RecordingAnalysisStore
                 if (Path.GetFileName(path) != "job.lock") { if (Directory.Exists(path)) Directory.Delete(path, true); else File.Delete(path); }
         }
         // Keep the lease inode to avoid a delete/reopen race. Tombstones contain no evidence.
+        LocalAudioInstallation.Cleanup(Directory.GetParent(Root)!.Parent!.FullName);
     }
 }

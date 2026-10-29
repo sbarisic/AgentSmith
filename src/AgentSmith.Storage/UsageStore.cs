@@ -34,7 +34,7 @@ public sealed partial class SessionStore
         {
             var row = originalRow;
             using var events = db.CreateCommand(); events.Transaction = tx;
-            events.CommandText = "SELECT type,json_extract(payload,'$.usage'),json_extract(payload,'$.usageUnavailable'),json_extract(payload,'$.model') FROM events WHERE conversation_id=$id AND type IN ('model.changed','model.requested','model.completed','context.compaction.completed','context.compaction.failed','context.compaction.retry') ORDER BY sequence";
+            events.CommandText = "SELECT type,json_extract(payload,'$.usage'),json_extract(payload,'$.usageUnavailable'),json_extract(payload,'$.model'),json_extract(payload,'$.usageRecorded') FROM events WHERE conversation_id=$id AND type IN ('model.changed','model.requested','model.completed','context.compaction.usage','context.compaction.completed','context.compaction.failed','context.compaction.retry') ORDER BY sequence";
             events.Parameters.AddWithValue("$id", row.ConversationId);
             using var reader = events.ExecuteReader(); var requested = 0; var completed = 0;
             while (reader.Read())
@@ -55,6 +55,10 @@ public sealed partial class SessionStore
                 if (type == "context.compaction.failed") { row.FailedCompactions++; continue; }
                 if (type == "context.compaction.retry") { if (!reader.IsDBNull(2) && reader.GetInt64(2) == 1) row.RequestsWithoutUsage++; continue; }
                 if (type == "model.completed") { completed++; Add(row, usage, false); continue; }
+                if (type == "context.compaction.usage") { Add(row, usage, true); continue; }
+                // New snapshots record each completed summary request durably. Keep
+                // reading aggregate usage from older builds, without counting it twice.
+                if (!reader.IsDBNull(4) && reader.GetInt64(4) == 1) continue;
                 try
                 {
                     using var document = JsonDocument.Parse(usage ?? "null");

@@ -12,7 +12,7 @@ public sealed record AudioReadiness(bool Transcription, bool Classification, str
     public bool Ready(string tool) => tool switch { "audio_transcribe" => Transcription, "audio_classify" => Classification, "audio_diarize" => Diarization, _ => Transcription && Classification };
 }
 
-public static class LocalAudioInstallation
+public static partial class LocalAudioInstallation
 {
     public static string Bundle => Path.Combine(AppContext.BaseDirectory, "LocalAudio");
     internal static string Fingerprint(string bundle) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(bundle, "downloads.json"))
@@ -76,7 +76,7 @@ public static class LocalAudioInstallation
         using var setupLock = new FileStream(Path.Combine(root, "setup.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var status = Status(dataDirectory, bundle);
         if (status.Transcription && status.Classification && JsonNode.Parse(File.ReadAllText(Path.Combine(status.Location, "ready.json")))?["fingerprint"]?.ToString() == Fingerprint(bundle))
-        { progress(status.Message); return; }
+        { CleanupLocked(dataDirectory, progress); progress(status.Message); return; }
         var id = Guid.NewGuid().ToString("N");
         var directory = Path.Combine(root, "installations", id); Directory.CreateDirectory(directory);
         var downloads = Path.Combine(root, "downloads"); Directory.CreateDirectory(downloads);
@@ -149,6 +149,7 @@ public static class LocalAudioInstallation
             // Preserve previous current and resumable verified downloads. Incomplete generation is not advertised.
             throw;
         }
+        finally { CleanupLocked(dataDirectory, progress); }
     }
 
     internal static async Task<bool> Matches(string path, string hash, long? size, CancellationToken cancellation)

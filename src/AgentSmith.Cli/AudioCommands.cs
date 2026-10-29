@@ -12,13 +12,14 @@ public static partial class Program
         root.Subcommands.Add(command);
         CaptureCommands(command, data, json);
         RecordingAnalysisCommands(command, data, json, noColor);
-        foreach (var name in new[] { "setup", "status" })
+        foreach (var name in new[] { "setup", "status", "cleanup" })
         {
-            var action = new Command(name, name == "setup" ? "Install local audio engines explicitly." : "Inspect engines and service.");
+            var action = new Command(name, name switch { "setup" => "Install local audio engines explicitly.", "cleanup" => "Remove unused audio installations; keep active and resumable generations.", _ => "Inspect engines and service." });
             command.Subcommands.Add(action);
             action.SetAction(p => Execute(p.GetValue(data), p.GetValue(json), p.GetValue(noColor), async app =>
             {
                 if (name == "status") { app.AudioStatus(); return 0; }
+                if (name == "cleanup") { LocalAudioInstallation.Cleanup(app.Store.DataDirectory, message => app.Write("audio.cleanup", new { message })); return 0; }
                 using var cancel = new CancellationTokenSource();
                 ConsoleCancelEventHandler handler = (_, e) => { e.Cancel = true; cancel.Cancel(); };
                 Console.CancelKeyPress += handler;

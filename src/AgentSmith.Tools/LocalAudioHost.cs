@@ -11,6 +11,7 @@ internal sealed class LocalAudioHost : IDisposable
     private readonly object Sync = new();
     private WindowsChild? child;
     private string? generation;
+    private FileStream? installationLease;
     private int errorBytes;
     private Task? errors;
     private bool active;
@@ -52,11 +53,19 @@ internal sealed class LocalAudioHost : IDisposable
         if (child is { } process)
         {
             try { process.Stop(); process.WaitForExit(5000); }
-            finally { process.Dispose(); child = null; generation = null; }
+            finally
+            {
+                var oldGeneration = generation;
+                process.Dispose(); child = null; generation = null;
+                installationLease?.Dispose(); installationLease = null;
+                if (oldGeneration is not null && Directory.GetParent(oldGeneration)?.Name == "installations")
+                    LocalAudioInstallation.Cleanup(Directory.GetParent(oldGeneration)!.Parent!.Parent!.FullName);
+            }
         }
     }
     internal async Task<JsonObject> Infer(string directory, JsonObject request, Action<string> progress, CancellationToken cancellation)
     {
+        using var requestLease = LocalAudioInstallation.Use(directory);
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "helper", "downloads.json")));
         if (manifest?["helperProtocol"]?.GetValue<int>() != 2)
             return await LocalAudioProcess.Infer(directory, request, progress, cancellation);
@@ -70,7 +79,9 @@ internal sealed class LocalAudioHost : IDisposable
                 if (child is not null && (generation != directory || child.Exited)) Stop();
                 if (child is null)
                 {
-                    child = Launch(directory);
+                    installationLease = LocalAudioInstallation.Use(directory);
+                    try { child = Launch(directory); }
+                    catch { installationLease?.Dispose(); installationLease = null; throw; }
                     generation = directory;
                     var process = child;
                     errors = Task.Run(async () =>

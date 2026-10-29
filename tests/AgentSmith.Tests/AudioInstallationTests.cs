@@ -101,7 +101,7 @@ public sealed class AudioInstallationTests
         Assert.True(File.Exists(Path.Combine(f.Data, "audio", "last-error.txt")));
         f.Handler.Corrupt = f.Handler.Interrupt = f.FailSelfTest = f.MissingDll = false;
         await f.Setup(); Assert.NotEqual(before.Location, LocalAudioInstallation.Status(f.Data, f.Bundle).Location);
-        Assert.True(File.Exists(Path.Combine(before.Location, "ready.json")));
+        Assert.False(Directory.Exists(before.Location));
     }
 
     [Fact]

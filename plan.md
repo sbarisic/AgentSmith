@@ -1,5 +1,17 @@
 # AgentSmith implementation status and future work
 
+## TOML configuration defaults (29 October 2026)
+
+- [x] Provider sections `[chatgpt]`, `[local]` and `[lmstudio]` retain independent model connections. New templates include all seven sections with explanatory comments; explicit provider selection reads that provider's settings, and model saves preserve other providers. Existing flat files remain readable. Verified with 386 passing Release integration tests, including sectioned CLI startup/resume, provider switching, comments, missing keys, inline/dotted tables and validation. Refreshed the local Windows x64 executable and updated the user's config with a backup, preserving the active ChatGPT model.
+- [x] Full Smith reads `config.toml` in the selected data directory. Explicit CLI options override file defaults; existing SQLite/parent-session model defaults remain the fallback.
+- [x] Configurable provider/model/endpoint/output budget, new-conversation permissions and execution/worker limits, and process display preferences. Resumed conversations keep their saved execution settings; Lite is unchanged.
+- [x] `smith config` locates the file and `smith config init` creates a commented template from existing model defaults without overwriting. Model selection commands and chat setup save model settings atomically while preserving comments and unrelated settings.
+- [x] Strict TOML syntax, duplicate-key, schema/type/range validation; account credentials stay outside TOML.
+- [x] ChatGPT config creation and model saves omit the unused local endpoint. Switching between local and ChatGPT providers is covered by a regression test; 32 focused configuration/model tests passed after this correction, and the local Windows x64 executable was refreshed.
+- [x] 374 Release integration tests passed with no failures or skips, including TOML precedence, malformed configuration, comment preservation, legacy fallback and actual CLI startup/model-selection/resume against an isolated mock local catalog. Self-contained Windows x64 publish refreshed. Built with installed SDK 10.0.400 from the Lite SDK-selection directory; the root 10.0.401 SDK pin is unchanged.
+
+See [configuration reference](CONFIGURATION.md).
+
 ## AgentSmithLite: separate legacy build (26 October 2026)
 
 - [x] Independent .NET 6 / win-x86 console project, ChatGPT sign-in/chat, bounded file tools, owned command execution and independent app launch.

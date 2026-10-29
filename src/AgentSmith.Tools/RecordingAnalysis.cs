@@ -32,6 +32,7 @@ public sealed partial class RecordingAnalysis : IDisposable
         else if (!Guid.TryParseExact(source, "N", out _)) throw new UserFacingException("Invalid capture ID.");
         var installation = backend.Status(data);
         if (!installation.Transcription || !installation.Diarization) throw new UserFacingException("Transcription and speaker engines are required. Run smith audio setup.");
+        using var installationLease = LocalAudioInstallation.Use(installation.Location);
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(installation.Location, "helper", "downloads.json")))!;
         if (manifest["recordingAnalysis"]?.GetValue<int>() != 1) throw new UserFacingException("The installed helper needs updating for recording analysis. Run smith audio setup.");
         var job = new RecordingAnalysisJob { SourceKind = kind, Source = source, Options = options,
@@ -150,7 +151,7 @@ public sealed partial class RecordingAnalysis : IDisposable
         catch (OperationCanceledException) { job.State = "Paused"; job.Error = cancellation.IsCancellationRequested ? "Cancelled; completed evidence retained." : "Execution budget reached; resume explicitly."; }
         catch (Exception ex) when (ex is IOException or UserFacingException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException or HttpRequestException)
         { job.State = "Paused"; job.Error = ex.Message; }
-        finally { job.ExecutionSeconds += timer.Elapsed.TotalSeconds; Store.Save(job); }
+        finally { job.ExecutionSeconds += timer.Elapsed.TotalSeconds; Store.Save(job); LocalAudioInstallation.Cleanup(data); }
         return job;
     }
     private async Task Prepare(RecordingAnalysisJob job, string installation, Action<string> progress, CancellationToken ct)
