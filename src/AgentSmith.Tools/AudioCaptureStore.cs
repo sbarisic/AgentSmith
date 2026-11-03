@@ -7,10 +7,19 @@ using AgentSmith.Core;
 namespace AgentSmith.Tools;
 
 public sealed record CaptureChunk(string File, long StartFrame, long Frames, long Bytes, string Hash);
-public sealed record CaptureCoverage(long StartFrame, long Frames, string Kind);
+public sealed record CaptureCoverage(long StartFrame, long Frames, string Kind, string TrackId = "");
+public sealed record CaptureAnchor(long Frame, long Qpc);
 public sealed class CaptureManifest
 {
     public int Version { get; set; } = 1;
+    public string TrackId { get; set; } = "";
+    public long StartQpc { get; set; }
+    public double TimelineSeconds { get; set; }
+    public double Level { get; set; }
+    public bool Muted { get; set; }
+    public List<CaptureAnchor> Anchors { get; set; } = [];
+    public List<CaptureManifest> Tracks { get; set; } = [];
+    public IEnumerable<CaptureChunk> AllChunks() => Version == 2 ? Tracks.SelectMany(t => t.Chunks) : Chunks;
     public string Id { get; set; } = "";
     public string OperationId { get; set; } = "";
     public string Owner { get; set; } = "";
@@ -24,6 +33,7 @@ public sealed class CaptureManifest
     public int BitsPerSample { get; set; }
     public int BlockAlign { get; set; }
     public string Format { get; set; } = "";
+    public bool? FloatingPoint { get; set; }
     public long Frames { get; set; }
     public long Bytes { get; set; }
     public long BudgetBytes { get; set; }
@@ -32,7 +42,7 @@ public sealed class CaptureManifest
     public string? Error { get; set; }
     public List<CaptureChunk> Chunks { get; set; } = [];
     public List<CaptureCoverage> Coverage { get; set; } = [];
-    public double DurationSeconds => SampleRate > 0 ? (double)Frames / SampleRate : 0;
+    public double DurationSeconds => TimelineSeconds > 0 ? TimelineSeconds : SampleRate > 0 ? (double)Frames / SampleRate : 0;
 }
 
 internal sealed class AudioCaptureStore
@@ -76,17 +86,23 @@ internal sealed class AudioCaptureStore
         var info = new FileInfo(path);
         if (info.Length > 16 * 1024 * 1024) throw new IOException("Recording manifest is too large.");
         var m = JsonSerializer.Deserialize<CaptureManifest>(File.ReadAllText(path)) ?? throw new IOException("Invalid recording manifest.");
-        if (m.Version != 1 || m.Id != id || m.Chunks.Any(c => !ValidChunk(c.File))) throw new IOException("Unsupported recording manifest.");
+        if (m.Version is not (1 or 2) || m.Id != id || m.AllChunks().Any(c => !ValidChunk(c.File)) ||
+            m.Version == 2 && (m.Tracks.Count != 2 || m.Tracks.Select(t => t.TrackId).Order().SequenceEqual(new[] { "call", "mic" }) == false)) throw new IOException("Unsupported recording manifest.");
         return m;
     }
-    internal static bool ValidChunk(string name) => name.Length == 16 && name.StartsWith("chunk-", StringComparison.Ordinal) &&
-        name.EndsWith(".wav", StringComparison.Ordinal) && name.AsSpan(6, 6).ToString().All(char.IsAsciiDigit);
+    internal static bool ValidChunk(string name)
+    {
+        if (name.StartsWith("call-", StringComparison.Ordinal)) name = name[5..];
+        else if (name.StartsWith("mic-", StringComparison.Ordinal)) name = name[4..];
+        return name.Length == 16 && name.StartsWith("chunk-", StringComparison.Ordinal) && name.EndsWith(".wav", StringComparison.Ordinal) && name.AsSpan(6, 6).ToString().All(char.IsAsciiDigit);
+    }
     internal void Save(CaptureManifest manifest)
     {
         var directory = DirectoryFor(manifest.Id);
-        var path = Path.Combine(directory, "manifest.json");
+        var name = manifest.TrackId is "call" or "mic" ? manifest.TrackId + "-manifest" : "manifest";
+        var path = Path.Combine(directory, name + ".json");
         if (File.Exists(path)) Check(path);
-        var temporary = Path.Combine(directory, "manifest.new");
+        var temporary = Path.Combine(directory, name + ".new");
         if (File.Exists(temporary)) Check(temporary);
         using (var file = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
         { JsonSerializer.Serialize(file, manifest); file.Flush(true); }
@@ -109,8 +125,27 @@ internal sealed class AudioCaptureStore
             if (!File.Exists(Path.Combine(DirectoryFor(id), "manifest.json"))) continue;
             var manifest = Read(id);
             if (manifest.State is not ("Starting" or "Recording" or "Finalizing")) continue;
+            if (manifest.Version == 2)
+            {
+                for (var index = 0; index < manifest.Tracks.Count; index++)
+                {
+                    var track = manifest.Tracks[index];
+                    var checkpoint = Path.Combine(DirectoryFor(id), track.TrackId + "-manifest.json");
+                    if (File.Exists(checkpoint)) { Check(checkpoint); track = JsonSerializer.Deserialize<CaptureManifest>(File.ReadAllText(checkpoint))!; }
+                    RecoverTrack(track); manifest.Tracks[index] = track;
+                }
+                manifest.State = "Interrupted"; manifest.Error = "Recovered call; missing intervals and trailing coverage are unknown.";
+                manifest.Ended = DateTimeOffset.UtcNow; manifest.Bytes = manifest.Tracks.Sum(t => t.Bytes);
+                manifest.TimelineSeconds = manifest.Tracks.Max(t => t.DurationSeconds); Save(manifest); continue;
+            }
+            RecoverTrack(manifest);
+        }
+    }
+    private void RecoverTrack(CaptureManifest manifest)
+    {
+            var id = manifest.Id;
             manifest.Chunks.Clear(); manifest.Frames = 0; manifest.Bytes = 0;
-            foreach (var path in Directory.EnumerateFiles(DirectoryFor(id), "chunk-*.wav").Order())
+            foreach (var path in Directory.EnumerateFiles(DirectoryFor(id), (manifest.TrackId.Length == 0 ? "" : manifest.TrackId + "-") + "chunk-*.wav").Order())
             {
                 Check(path);
                 if (!ValidChunk(Path.GetFileName(path))) throw new IOException("Unexpected recording chunk name.");
@@ -119,10 +154,12 @@ internal sealed class AudioCaptureStore
                 manifest.Frames += frames; manifest.Bytes += new FileInfo(path).Length;
             }
             manifest.Coverage.RemoveAll(c => c.StartFrame >= manifest.Frames);
+            manifest.Anchors.RemoveAll(a => a.Frame > manifest.Frames);
+            manifest.Coverage = manifest.Coverage.Select(c => c with { Frames = Math.Min(c.Frames, manifest.Frames - c.StartFrame) }).ToList();
+            manifest.TimelineSeconds = Math.Max(manifest.TimelineSeconds, manifest.SampleRate > 0 ? manifest.Frames / (double)manifest.SampleRate : 0);
             manifest.State = "Interrupted"; manifest.Ended = DateTimeOffset.UtcNow;
             manifest.Error = "Service stopped before finalization; recovered complete frames. Uncheckpointed coverage and the trailing interval are unknown.";
             Save(manifest);
-        }
     }
     private static long RepairWave(string path, int blockAlign)
     {

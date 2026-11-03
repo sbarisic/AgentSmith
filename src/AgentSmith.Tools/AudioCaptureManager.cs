@@ -6,16 +6,17 @@ using NAudio.Wave;
 
 namespace AgentSmith.Tools;
 
-public sealed record CaptureStart(string OperationId, string? DeviceId = null, double MaxStorageGiB = 10, string? Conversation = null);
+public sealed record CaptureStart(string OperationId, string? DeviceId = null, double MaxStorageGiB = 10, string? Conversation = null, string? MicrophoneId = null);
 public sealed record CaptureSummary(string Id, string State, string Device, double DurationSeconds, long Bytes, long BudgetBytes, bool BudgetWarning, string? Error);
 
-internal sealed class AudioCaptureManager : IDisposable
+internal sealed partial class AudioCaptureManager : IDisposable
 {
     private readonly AudioCaptureStore store;
     private readonly SemaphoreSlim gate = new(1);
-    private Recording? active;
+    private ICaptureRecording? active;
     private bool shuttingDown;
     internal Func<CaptureDevice[]> Devices = () => OperatingSystem.IsWindows() ? WindowsCaptureSource.Devices() : throw new PlatformNotSupportedException();
+    internal Func<CaptureDevice[]> Microphones = () => OperatingSystem.IsWindows() ? WindowsCaptureSource.Devices(true) : throw new PlatformNotSupportedException();
     internal Func<string, ICaptureSource> CreateSource = id => OperatingSystem.IsWindows() ? new WindowsCaptureSource(id) : throw new PlatformNotSupportedException();
     internal Func<long> FreeBytes;
     internal long DiskReserve = 1024L * 1024 * 1024;
@@ -52,6 +53,7 @@ internal sealed class AudioCaptureManager : IDisposable
             // Use the persisted operation ID as the capture ID: retries never start twice, even after restart.
             if (store.Ids().Contains(request.OperationId)) return Status(request.OperationId);
             if (Active is not null) throw new UserFacingException("A recording is already active. Inspect capture status.");
+            if (request.MicrophoneId is not null) return StartPair(request);
             var devices = Devices();
             var device = devices.SingleOrDefault(d => string.IsNullOrEmpty(request.DeviceId) ? d.Default : d.Id == request.DeviceId)
                 ?? throw new UserFacingException("Playback device is unavailable. Run smith audio devices.");
@@ -69,12 +71,12 @@ internal sealed class AudioCaptureManager : IDisposable
                 store.Save(manifest);
                 source = CreateSource(device.Id);
                 active?.Dispose();
-                active = new(this, store, manifest, source, lease, used);
+                active = new Recording(this, store, manifest, source, lease, used);
                 active.Start(); return active.Snapshot();
             }
             catch (Exception ex)
             {
-                source?.Dispose(); lease.Dispose();
+                source?.Dispose(); lease?.Dispose();
                 manifest.State = "Failed"; manifest.Error = ex.Message; manifest.Ended = DateTimeOffset.UtcNow; store.Save(manifest); throw;
             }
         }
@@ -139,14 +141,28 @@ internal sealed class AudioCaptureManager : IDisposable
     }
     public void Dispose() { active?.Dispose(); gate.Dispose(); }
 
-    private sealed record Packet(byte[] Data, long Position, long Qpc, bool Discontinuity, bool TimestampError);
-    private sealed class Recording : IDisposable
+    private sealed record Packet(byte[] Data, long Position, long Qpc, bool Discontinuity, bool TimestampError, bool Muted);
+    private interface ICaptureRecording : IDisposable
+    {
+        string Id { get; }
+        Task Done { get; }
+        CaptureManifest Snapshot();
+        void Start();
+        void RequestStop(string? error);
+        void Mute(bool muted);
+    }
+    internal void Mute(string id, bool muted)
+    {
+        if (active?.Id != id || active.Done.IsCompleted) throw new UserFacingException("Recording is not active.");
+        active.Mute(muted);
+    }
+    private sealed class Recording : ICaptureRecording
     {
         private readonly AudioCaptureManager owner;
         private readonly AudioCaptureStore store;
         private readonly CaptureManifest manifest;
         private readonly ICaptureSource source;
-        private readonly FileStream lease;
+        private readonly FileStream? lease;
         private readonly long priorBytes;
         private readonly object sync = new();
         private readonly Channel<Packet> packets = Channel.CreateBounded<Packet>(1024);
@@ -166,24 +182,32 @@ internal sealed class AudioCaptureManager : IDisposable
         private int stopRequested;
         private string? pendingError;
         private bool disposed;
-        internal string Id => manifest.Id;
-        internal Task Done => done;
-        internal Recording(AudioCaptureManager owner, AudioCaptureStore store, CaptureManifest manifest, ICaptureSource source, FileStream lease, long priorBytes)
+        private int muted;
+        private double level;
+        private long lastDataAt;
+        public void Mute(bool value) { Interlocked.Exchange(ref muted, value ? 1 : 0); }
+        internal Action<int>? ReserveBytes;
+        internal long SharedStart;
+        public string Id => manifest.Id;
+        public Task Done => done;
+        internal Recording(AudioCaptureManager owner, AudioCaptureStore store, CaptureManifest manifest, ICaptureSource source, FileStream? lease, long priorBytes)
         {
             this.owner = owner; this.store = store; this.manifest = manifest; this.source = source; this.lease = lease; this.priorBytes = priorBytes;
             var format = source.Format;
             if (format.SampleRate is < 8000 or > 384000 || format.BlockAlign is < 1 or > 256) throw new IOException("Unsupported recording format.");
             manifest.SampleRate = format.SampleRate; manifest.Channels = format.Channels; manifest.BitsPerSample = format.BitsPerSample;
             manifest.BlockAlign = format.BlockAlign; manifest.Format = format.ToString();
+            manifest.FloatingPoint = format.Encoding == WaveFormatEncoding.IeeeFloat || format is WaveFormatExtensible extensible && extensible.SubFormat == new Guid("00000003-0000-0010-8000-00aa00389b71");
             source.Data += Data;
             source.Stopped += error => { if (error is not null) Fail(error.Message); else if (Volatile.Read(ref stopRequested) == 0) Fail("Capture device stopped unexpectedly."); stopped.TrySetResult(); };
         }
-        internal CaptureManifest Snapshot() { lock (sync) return JsonSerializer.Deserialize<CaptureManifest>(JsonSerializer.Serialize(manifest))!; }
-        internal void Start()
+        public CaptureManifest Snapshot() { lock (sync) { var copy = JsonSerializer.Deserialize<CaptureManifest>(JsonSerializer.Serialize(manifest))!; copy.Level = Environment.TickCount64 - Interlocked.Read(ref lastDataAt) < 500 ? Volatile.Read(ref level) : 0; copy.Muted = Volatile.Read(ref muted) != 0; return copy; } }
+        public void Start()
         {
-            startQpc = owner.Now();
+            startQpc = SharedStart == 0 ? owner.Now() : SharedStart; manifest.StartQpc = startQpc;
             lock (sync) { manifest.State = "Recording"; store.Save(manifest); }
-            source.Start(); done = Task.Run(Write);
+            try { source.Start(); done = Task.Run(Write); }
+            catch { manifest.State = "Failed"; throw; }
         }
         // Device callbacks must never wait on a disk writer or a snapshot lock.
         private void Fail(string error) => Interlocked.CompareExchange(ref pendingError, error, null);
@@ -193,10 +217,15 @@ internal sealed class AudioCaptureManager : IDisposable
             if (bytes.Length % manifest.BlockAlign != 0) { Fail("Invalid capture frame data."); return; }
             if (Interlocked.Add(ref queuedBytes, bytes.Length) > owner.BufferLimit)
             { Interlocked.Add(ref queuedBytes, -bytes.Length); Fail("Capture buffer overflow or invalid frame data; audio is missing."); return; }
-            var packet = new Packet(bytes.ToArray(), position, qpc, discontinuity, timestampError);
+            var isMuted = Volatile.Read(ref muted) != 0;
+            var data = isMuted ? new byte[bytes.Length] : bytes.ToArray();
+            var peak = AudioMeter.Peak(data, source.Format);
+            Volatile.Write(ref level, peak);
+            Interlocked.Exchange(ref lastDataAt, Environment.TickCount64);
+            var packet = new Packet(data, position, qpc, discontinuity, timestampError, isMuted);
             if (!packets.Writer.TryWrite(packet)) { Interlocked.Add(ref queuedBytes, -bytes.Length); Fail("Capture packet queue overflow; audio is missing."); }
         }
-        internal void RequestStop(string? error)
+        public void RequestStop(string? error)
         {
             if (error is not null) Fail(error);
             if (Interlocked.Exchange(ref stopRequested, 1) != 0 || done.IsCompleted && manifest.State is not "Recording") return;
@@ -235,7 +264,11 @@ internal sealed class AudioCaptureManager : IDisposable
                             if (target > manifest.Frames) Silence(target - manifest.Frames);
                             // QPC rounding can overlap a frame; discard only the overlapping frames, never stretch audio.
                             var skip = Math.Min(count, Math.Max(0, manifest.Frames - target));
+                            if (manifest.TrackId.Length > 0 && count > skip && (manifest.Anchors.Count == 0 || manifest.Frames > manifest.Anchors[^1].Frame && packet.Qpc - manifest.Anchors[^1].Qpc >= 10_000_000))
+                                manifest.Anchors.Add(new(manifest.Frames, packet.Qpc + (long)(skip * 10_000_000d / manifest.SampleRate)));
+                            var savedStart = manifest.Frames;
                             Append(packet.Data.AsSpan(checked((int)skip * manifest.BlockAlign)));
+                            if (packet.Muted) AddCoverage(savedStart, manifest.Frames - savedStart, "IntentionalMute");
                         }
                     }
                     lock (sync)
@@ -247,6 +280,7 @@ internal sealed class AudioCaptureManager : IDisposable
                             if (owner.FreeBytes() <= owner.DiskReserve) { Fail("Free-disk reserve reached."); RequestStop(null); }
                             // Preserve quiet intervals, leaving a one-second window for delayed device packets.
                             if (stopRequested == 0) Silence(Math.Max(0, FrameAt(owner.Now() - 10_000_000) - manifest.Frames));
+                            manifest.TimelineSeconds = Math.Max(0, (owner.Now() - startQpc) / 10_000_000d);
                             writer?.Flush(); chunkStream?.Flush(true); store.Save(manifest); checkpoint.Restart();
                         }
                     }
@@ -263,6 +297,7 @@ internal sealed class AudioCaptureManager : IDisposable
                 {
                     manifest.Error ??= Volatile.Read(ref pendingError);
                     if (Volatile.Read(ref pendingError) is null) Silence(Math.Max(0, FrameAt(stopQpc) - manifest.Frames));
+                    manifest.TimelineSeconds = Math.Max(0, (stopQpc - startQpc) / 10_000_000d);
                     FinalizeChunk();
                     manifest.State = manifest.Error is null ? "Completed" : "Interrupted";
                     manifest.Ended = DateTimeOffset.UtcNow; store.Save(manifest);
@@ -279,7 +314,7 @@ internal sealed class AudioCaptureManager : IDisposable
                     try { store.Save(manifest); } catch (IOException) { /* Recovery retains the last durable checkpoint. */ }
                 }
             }
-            finally { source.Dispose(); chunkStream?.Dispose(); lease.Dispose(); packets.Writer.TryComplete(); }
+            finally { source.Dispose(); chunkStream?.Dispose(); lease?.Dispose(); packets.Writer.TryComplete(); }
         }
         private void Silence(long frames)
         {
@@ -290,20 +325,26 @@ internal sealed class AudioCaptureManager : IDisposable
             {
                 var count = (int)Math.Min(frames, 4096); Append(buffer.AsSpan(0, count * manifest.BlockAlign)); frames -= count;
             }
+            AddCoverage(start, manifest.Frames - start, manifest.TrackId == "mic" ? "Missing" : "InferredSilence");
+        }
+        private void AddCoverage(long start, long frames, string kind)
+        {
+            if (frames <= 0) return;
             var prior = manifest.Coverage.LastOrDefault();
-            if (prior is { Kind: "InferredSilence" } && prior.StartFrame + prior.Frames == start)
-                manifest.Coverage[^1] = prior with { Frames = prior.Frames + manifest.Frames - start };
-            else manifest.Coverage.Add(new(start, manifest.Frames - start, "InferredSilence"));
+            if (prior is not null && prior.Kind == kind && prior.StartFrame + prior.Frames == start) manifest.Coverage[^1] = prior with { Frames = prior.Frames + frames };
+            else manifest.Coverage.Add(new(start, frames, kind));
         }
         private void Append(ReadOnlySpan<byte> data)
         {
+            ReserveBytes?.Invoke(data.Length);
             while (data.Length > 0)
             {
-                if (priorBytes + manifest.Bytes + data.Length + 4096 >= manifest.BudgetBytes) throw new IOException("Recording storage budget reached; audio retained up to the limit.");
+                if (ReserveBytes is null && priorBytes + manifest.Bytes + data.Length + 4096 >= manifest.BudgetBytes) throw new IOException("Recording storage budget reached; audio retained up to the limit.");
                 if (writer is null)
                 {
+                    ReserveBytes?.Invoke(4096);
                     chunkStart = manifest.Frames; chunkData = 0;
-                    chunkPath = Path.Combine(store.DirectoryFor(Id), $"chunk-{++chunkIndex:000000}.wav");
+                    chunkPath = Path.Combine(store.DirectoryFor(Id), $"{(manifest.TrackId.Length == 0 ? "" : manifest.TrackId + "-")}chunk-{++chunkIndex:000000}.wav");
                     chunkStream = new FileStream(chunkPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
                     writer = new WaveFileWriter(chunkStream, source.Format);
                 }
@@ -328,7 +369,7 @@ internal sealed class AudioCaptureManager : IDisposable
         public void Dispose()
         {
             if (disposed) return; disposed = true;
-            RequestStop("Recording host disposed."); done.GetAwaiter().GetResult(); source.Dispose(); lease.Dispose();
+            RequestStop("Recording host disposed."); done.GetAwaiter().GetResult(); source.Dispose(); lease?.Dispose();
         }
     }
 }

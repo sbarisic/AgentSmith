@@ -97,7 +97,7 @@ public sealed partial class RecordingAnalysis : IDisposable
                 if (needed.Any(c => chunk.Components[c] is "Submitted" or "Uncertain") && !retryUncertain || needed.Any(c => chunk.Components[c] == "Failed") && !retryFailed)
                     continue;
                 using var space = await Store.Reserve(10 * 1024 * 1024, job.Options.MaxStorageGiB, ct);
-                job.Stage = "Inference"; progress($"Analysis {id} · {job.ProcessedSeconds:0}/{job.DurationSeconds:0}s · chunk {chunk.Index + 1}/{job.Chunks.Count}");
+                job.Stage = "Inference"; progress($"Analysis {id} · {job.ProcessedSeconds:0}/{job.TotalAudioSeconds:0}s · chunk {chunk.Index + 1}/{job.Chunks.Count}");
                 var clip = Store.FileFor(id, "inference.wav");
                 using var requestDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct); requestDeadline.CancelAfter(TimeSpan.FromMinutes(5));
                 var ticks = Environment.TickCount64 + Math.Min(300000, Math.Max(1, (long)(job.Options.MaxMinutes * 60000 - timer.Elapsed.TotalMilliseconds)));
@@ -144,7 +144,7 @@ public sealed partial class RecordingAnalysis : IDisposable
                 if (summarize is null) throw new UserFacingException("Local evidence is saved. Configure a summary model and resume to generate the report.");
                 await Timed("summarySeconds", () => Summarize(job, summarize, modelIdentity ?? "unknown", retryUncertain, progress, ct));
             }
-            job.State = incomplete || job.Coverage.Any(c => c.Kind != "InferredSilence") ? "CompletedWithGaps" : "Completed";
+            job.State = incomplete || job.Coverage.Any(c => c.Kind is not ("InferredSilence" or "IntentionalMute")) ? "CompletedWithGaps" : "Completed";
             job.Stage = "Done";
             if (incomplete) job.Error = "Some components failed or are uncertain. Use explicit --retry-failed / --retry-uncertain on resume.";
         }
@@ -176,6 +176,8 @@ public sealed partial class RecordingAnalysis : IDisposable
             }
             var manifestPath = Path.Combine(snapshot, "manifest.json");
             var manifest = RecordingAnalysisStore.ReadJson<CaptureManifest>(manifestPath);
+            if (manifest.Version == 2)
+            { await PrepareTracks(job, manifest, snapshot, location: installation, space.Capacity, progress, ct); return; }
             ValidateCapture(manifest, job.Source, job.Options.AllowInterrupted);
             long previous = 0;
             foreach (var chunk in manifest.Chunks)
@@ -186,7 +188,7 @@ public sealed partial class RecordingAnalysis : IDisposable
                 if (chunk.StartFrame > previous) job.Coverage.Add(new(previous * 16000 / manifest.SampleRate, (chunk.StartFrame - previous) * 16000 / manifest.SampleRate, "Missing"));
                 var first = (long)Math.Round(chunk.StartFrame * 16000d / manifest.SampleRate);
                 inputs.Add(new JsonObject { ["path"] = path, ["start"] = first, ["frames"] = (long)Math.Round((chunk.StartFrame + chunk.Frames) * 16000d / manifest.SampleRate) - first,
-                    ["sampleRate"] = manifest.SampleRate, ["channels"] = manifest.Channels, ["bitsPerSample"] = manifest.BitsPerSample, ["floatingPoint"] = manifest.Format.Contains("float", StringComparison.OrdinalIgnoreCase) });
+                    ["sampleRate"] = manifest.SampleRate, ["channels"] = manifest.Channels, ["bitsPerSample"] = manifest.BitsPerSample, ["floatingPoint"] = manifest.FloatingPoint ?? manifest.Format.Contains("float", StringComparison.OrdinalIgnoreCase) });
                 previous = chunk.StartFrame + chunk.Frames;
             }
             job.Coverage.AddRange(manifest.Coverage.Select(c => new CaptureCoverage(c.StartFrame * 16000 / manifest.SampleRate, c.Frames * 16000 / manifest.SampleRate, c.Kind)));
@@ -231,9 +233,10 @@ public sealed partial class RecordingAnalysis : IDisposable
     }
     internal static void ValidateCapture(CaptureManifest m, string id, bool interrupted)
     {
+        var emptyTrack = m.TrackId is "call" or "mic" && m.Frames == 0 && m.Chunks.Count == 0;
         if (m.Version != 1 || m.Id != id || m.SampleRate is <= 0 or > 192000 || m.Channels is < 1 or > 8 ||
-            m.BitsPerSample is not (8 or 16 or 24 or 32 or 64) || m.BlockAlign != m.Channels * m.BitsPerSample / 8 || m.Frames <= 0 ||
-            m.State != "Completed" && !(m.State == "Interrupted" && interrupted)) throw new IOException("Invalid or active capture manifest.");
+            m.BitsPerSample is not (8 or 16 or 24 or 32 or 64) || m.BlockAlign != m.Channels * m.BitsPerSample / 8 || m.Frames <= 0 && !emptyTrack ||
+            m.State != "Completed" && !(interrupted && (m.State == "Interrupted" || emptyTrack && m.State == "Failed"))) throw new IOException("Invalid or active capture manifest.");
         long end = 0;
         var names = new HashSet<string>();
         foreach (var c in m.Chunks)
@@ -257,7 +260,7 @@ public sealed partial class RecordingAnalysis : IDisposable
     internal static void WriteClip(string source, string destination, RecordingAnalysisChunk chunk)
     {
         RecordingAnalysisStore.CheckPath(source); RecordingAnalysisStore.CheckPath(destination);
-        using var input = File.OpenRead(source); input.Position = chunk.Start * 4;
+        using var input = File.OpenRead(source); input.Position = (chunk.Start + chunk.SourceOffset) * 4;
         using var output = new BinaryWriter(new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None));
         var bytes = checked((int)((chunk.End - chunk.Start) * 4));
         output.Write("RIFF"u8); output.Write(bytes + 36); output.Write("WAVEfmt "u8); output.Write(16); output.Write((short)3); output.Write((short)1);

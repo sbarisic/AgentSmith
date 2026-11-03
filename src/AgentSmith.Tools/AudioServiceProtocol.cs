@@ -16,7 +16,7 @@ public sealed record AudioServiceStatus(bool Available, string Identity, string 
 
 internal static class AudioWire
 {
-    internal const int Version = 3;
+    internal const int Version = 4;
     internal const int FrameLimit = 64 * 1024;
     internal const int ChunkSize = 32 * 1024;
     internal static string Build => typeof(AudioWire).Assembly.ManifestModule.ModuleVersionId.ToString("N");

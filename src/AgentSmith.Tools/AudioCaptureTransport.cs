@@ -17,7 +17,8 @@ public sealed partial class AudioServiceHost
             object result;
             switch (message.Type)
             {
-                case "capture.devices": result = captures.Devices(); break;
+                case "capture.devices": result = message.Data?["all"]?.GetValue<bool>() == true ? captures.Devices().Concat(captures.Microphones()).ToArray() : captures.Devices(); break;
+                case "capture.mute": captures.Mute(id ?? "", message.Data?["muted"]?.GetValue<bool>() ?? false); result = Compact(captures.Status(id)); break;
                 case "capture.list": result = captures.List(message.Data?["page"]?.GetValue<int>() ?? 1); break;
                 case "capture.status": result = Compact(captures.Status(id)); break;
                 case "capture.start":
@@ -33,7 +34,7 @@ public sealed partial class AudioServiceHost
                         await send(new("capture.file", message.Id, new() { ["name"] = "manifest.json", ["length"] = manifestBytes.Length, ["hash"] = Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant() }), ct);
                         for (var offset = 0; offset < manifestBytes.Length; offset += AudioWire.ChunkSize)
                             await send(new("capture.bytes", message.Id, Bytes: manifestBytes.AsSpan(offset, Math.Min(AudioWire.ChunkSize, manifestBytes.Length - offset)).ToArray()), ct);
-                        foreach (var chunk in manifest.Chunks)
+                        foreach (var chunk in manifest.AllChunks())
                         {
                             await using var file = File.OpenRead(captures.ChunkPath(manifest.Id, chunk.File));
                             if (file.Length != chunk.Bytes) throw new IOException("Recording chunk changed.");
@@ -52,7 +53,7 @@ public sealed partial class AudioServiceHost
         { await send(new("error", message.Id, new() { ["message"] = ex.Message }), ct); }
     }
     private static CaptureManifest Compact(CaptureManifest manifest)
-    { manifest.Chunks = []; manifest.Coverage = []; return manifest; }
+    { manifest.Chunks = []; manifest.Coverage = []; manifest.Anchors = []; foreach (var t in manifest.Tracks) Compact(t); return manifest; }
 }
 
 public static class AudioCaptureControl
@@ -123,8 +124,14 @@ public static class AudioCaptureControl
                 else throw new IOException("Invalid export sequence.");
             }
             var manifest = JsonSerializer.Deserialize<CaptureManifest>(await File.ReadAllTextAsync(Path.Combine(staging, "manifest.json"), ct)) ?? throw new IOException("Invalid export manifest.");
-            if (manifest.Id != id || manifest.Chunks.Any(c => !names.Contains(c.File)) || names.Count != manifest.Chunks.Count + 1) throw new IOException("Incomplete export.");
-            await File.WriteAllLinesAsync(Path.Combine(staging, "recording.m3u"), new[] { "#EXTM3U" }.Concat(manifest.Chunks.Select(c => c.File)), ct);
+            if (manifest.Id != id || manifest.AllChunks().Any(c => !names.Contains(c.File)) || names.Count != manifest.AllChunks().Count() + 1) throw new IOException("Incomplete export.");
+            if (manifest.Version == 2)
+            {
+                foreach (var track in manifest.Tracks)
+                    await File.WriteAllLinesAsync(Path.Combine(staging, track.TrackId + ".m3u"), new[] { "#EXTM3U" }.Concat(track.Chunks.Select(c => c.File)), ct);
+                await File.WriteAllTextAsync(Path.Combine(staging, "readme.txt"), "These are simultaneous native tracks. Play each track playlist separately, or use AgentSmith Recorder for synchronized playback. Timing is retained in manifest.json.", ct);
+            }
+            else await File.WriteAllLinesAsync(Path.Combine(staging, "recording.m3u"), new[] { "#EXTM3U" }.Concat(manifest.Chunks.Select(c => c.File)), ct);
             Directory.Move(staging, destination); return destination;
         }
         finally { output?.Dispose(); hash?.Dispose(); }

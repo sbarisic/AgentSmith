@@ -96,7 +96,7 @@ public sealed class AudioCleanupTests
         using var f = new Fixture(); var old = f.Generation(); var job = f.Job(old, "Completed");
         if (invalid == "pointer") File.WriteAllText(Path.Combine(f.Data, "audio", "current"), "../outside");
         if (invalid == "metadata") File.WriteAllText(f.Store.FileFor(job.Id, "job.json"), "broken JSON");
-        if (invalid == "version") { job.Version = 2; f.Store.Save(job); }
+        if (invalid == "version") { job.Version = 3; f.Store.Save(job); }
         if (invalid == "missing-current") File.Delete(Path.Combine(f.Current, "ready.json"));
         if (invalid == "bad-ready") File.WriteAllText(Path.Combine(f.Current, "ready.json"), "{}");
         LocalAudioInstallation.Cleanup(f.Data); Assert.True(Directory.Exists(old));
@@ -109,6 +109,19 @@ public sealed class AudioCleanupTests
         LocalAudioInstallation.Cleanup(f.Data); Assert.True(Directory.Exists(old));
         job.State = "Completed"; f.Store.Save(job);
         LocalAudioInstallation.Cleanup(f.Data); Assert.False(Directory.Exists(old));
+    }
+
+    [Theory]
+    [InlineData("Completed", false)]
+    [InlineData("Paused", true)]
+    [InlineData("CompletedWithGaps", true)]
+    public void PairedRecordingJobsUseTheSameGenerationRetentionRules(string state, bool retained)
+    {
+        using var f = new Fixture(); var old = f.Generation(); var job = f.Job(old, state);
+        job.Version = 2; job.TrackCount = 2; f.Store.Save(job);
+        LocalAudioInstallation.Cleanup(f.Data);
+        Assert.Equal(retained, Directory.Exists(old));
+        Assert.Equal(state, f.Store.Read(job.Id).State);
     }
 
     [Fact]

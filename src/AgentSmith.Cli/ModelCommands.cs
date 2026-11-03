@@ -47,6 +47,7 @@ internal sealed partial class CliApp
         return new(selectedModel, selectedProvider, endpoint ?? Config.ProviderString(selectedProvider, "endpoint", configuredProvider) ?? compatible?.Endpoint ?? Program.ResolveEndpoint(selectedProvider, null),
             compatible?.AccountId ?? "", output == 0 ? Config.ProviderInteger(selectedProvider, "max_output_tokens", configuredProvider) ?? compatible?.MaxOutputTokens ?? (selectedProvider == ModelProvider.ChatGpt ? 16384 : 8192) : output);
     }
+
     internal void ShowModel(Session? session)
     {
         ChatModelSelection? saved = null;

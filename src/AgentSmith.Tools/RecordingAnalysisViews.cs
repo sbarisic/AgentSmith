@@ -21,6 +21,7 @@ public sealed partial class RecordingAnalysis
         var speakers = new List<Speaker>();
         var transcriptPath = Store.FileFor(job.Id, "transcript.jsonl");
         var previous = new List<JsonObject>();
+        var currentTrack = "";
         using (var transcript = new StreamWriter(transcriptPath + ".new", false, new UTF8Encoding(false)))
         using (var turnsOutput = new StreamWriter(Store.FileFor(job.Id, "speakers.jsonl") + ".new", false, new UTF8Encoding(false)))
         using (var sounds = new StreamWriter(Store.FileFor(job.Id, "sounds.jsonl") + ".new", false, new UTF8Encoding(false)))
@@ -28,6 +29,11 @@ public sealed partial class RecordingAnalysis
             foreach (var chunk in job.Chunks)
             {
                 ct.ThrowIfCancellationRequested();
+                if (chunk.TrackId != currentTrack)
+                {
+                    foreach (var prior in previous) transcript.WriteLine(prior.ToJsonString());
+                    previous.Clear(); speakers.Clear(); currentTrack = chunk.TrackId;
+                }
                 var path = Store.FileFor(job.Id, $"evidence-{chunk.Index:D6}.json");
                 if (!File.Exists(path)) continue;
                 var result = RecordingAnalysisStore.ReadJson<JsonObject>(path);
@@ -48,7 +54,7 @@ public sealed partial class RecordingAnalysis
                         map[local] = label;
                     }
                 }
-                string Label(string local) => map.GetValueOrDefault(local) ?? (local.StartsWith("Speaker ", StringComparison.Ordinal) ? $"Chunk {chunk.Index + 1} / {local}" : local);
+                string Label(string local) => chunk.TrackId == "mic" ? "You" : map.GetValueOrDefault(local) ?? (local.StartsWith("Speaker ", StringComparison.Ordinal) ? $"Chunk {chunk.Index + 1} / {local}" : local);
                 if (result["diarization"]?["turns"] is JsonArray turns)
                     foreach (var t in turns.OfType<JsonObject>())
                     {
@@ -79,7 +85,9 @@ public sealed partial class RecordingAnalysis
                             .Where(t => N(t["startSeconds"]) + chunk.Start / 16000d < end && N(t["endSeconds"]) + chunk.Start / 16000d > begin)
                             .Select(t => Label(t["speaker"]!.ToString())).Distinct().ToArray() ?? [];
                         row["speaker"] = matching.Length == 1 ? matching[0] : matching.Length > 1 ? "Overlapping/ambiguous speakers" : "Unknown speaker";
-                        row["id"] = $"c{chunk.Index:D6}s{number++:D5}"; row["chunk"] = chunk.Index;
+                        if (chunk.TrackId == "mic") row["speaker"] = "You";
+                        row["track"] = chunk.TrackId;
+                        row["id"] = $"{chunk.TrackId}c{chunk.Index:D6}s{number++:D5}"; row["chunk"] = chunk.Index;
                         row["boundaryUncertain"] = words is null && (begin < chunk.CoreStart / 16000d || end > chunk.CoreEnd / 16000d);
                         current.Add(row);
                     }
@@ -106,12 +114,17 @@ public sealed partial class RecordingAnalysis
             }
             foreach (var row in previous) transcript.WriteLine(row.ToJsonString());
         }
+        if (job.Version == 2)
+        {
+            var sorted = Rows(transcriptPath + ".new").OrderBy(r => N(r["startSeconds"])).ThenBy(r => r["id"]!.ToString()).Select(r => r.ToJsonString()).ToArray();
+            File.WriteAllLines(transcriptPath + ".new", sorted);
+        }
         var evidenceChanged = new[] { "transcript.jsonl", "speakers.jsonl", "sounds.jsonl" }.Any(file =>
             !File.Exists(Store.FileFor(job.Id, file)) || RecordingAnalysisStore.Hash(Store.FileFor(job.Id, file)) != RecordingAnalysisStore.Hash(Store.FileFor(job.Id, file) + ".new"));
         if (evidenceChanged) File.Delete(Store.FileFor(job.Id, "summary.md"));
         foreach (var file in new[] { "transcript.jsonl", "speakers.jsonl", "sounds.jsonl" }) RecordingAnalysisStore.CommitFile(Store.FileFor(job.Id, file) + ".new", Store.FileFor(job.Id, file));
         RecordingAnalysisStore.WriteJson(Store.FileFor(job.Id, "coverage.json"), new { job.Frames, job.DurationSeconds, job.ProcessedSeconds, job.Coverage,
-            intervals = job.Chunks.Select(c => new { c.Index, c.CoreStart, c.CoreEnd, c.Components }), speakers = speakers.Select(s => s.Label), job.Reconciliation });
+            intervals = job.Chunks.Select(c => new { c.Index, c.TrackId, c.CoreStart, c.CoreEnd, c.Components }), speakers = speakers.Select(s => s.Label), job.Reconciliation });
     }
     internal static void ReconcileBoundary(List<JsonObject> previous, List<JsonObject> current)
     {
@@ -205,7 +218,7 @@ public sealed partial class RecordingAnalysis
         var staging = Path.Combine(parent, ".smith-analysis-export-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(staging);
         foreach (var name in new[] { "job.json", "coverage.json", "summary.md", "transcript.jsonl", "speakers.jsonl", "sounds.jsonl" })
         { var source = Store.FileFor(id, name); if (File.Exists(source)) File.Copy(source, Path.Combine(staging, name)); }
-        File.WriteAllText(Path.Combine(staging, "index.md"), $"# Recording analysis {id}\n\nState: {job.State}. Processed {job.ProcessedSeconds:0.0}/{job.DurationSeconds:0.0} seconds.\n\n" +
+        File.WriteAllText(Path.Combine(staging, "index.md"), $"# Recording analysis {id}\n\nState: {job.State}. Processed {job.ProcessedSeconds:0.0}/{job.TotalAudioSeconds:0.0} seconds.\n\n" +
             "Read coverage.json before assuming completeness. Transcript files contain model estimates, not verified facts. Anonymous speakers may be misattributed.\n\n" +
             "- [Timestamped transcript](transcript.txt)\n- [Subtitles](transcript.srt)\n- [Structured transcript](transcript.jsonl)\n- [Coverage](coverage.json)\n" +
             (File.Exists(Path.Combine(staging, "summary.md")) ? "- [Cited summary](summary.md)\n" : "\nNo completed summary is available.\n"));

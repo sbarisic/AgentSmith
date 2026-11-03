@@ -93,7 +93,7 @@ public static partial class LocalAudioInstallation
             var path = Path.Combine(directory, "job.json");
             if (!File.Exists(path)) continue; // Deleted job tombstone, or creator holding a lease.
             var job = RecordingAnalysisStore.ReadJson<RecordingAnalysisJob>(path);
-            if (job.Version != 1 || job.Id != Path.GetFileName(directory) || !Guid.TryParseExact(job.Installation, "N", out _))
+            if (job.Version is not (1 or 2) || job.Id != Path.GetFileName(directory) || !Guid.TryParseExact(job.Installation, "N", out _))
                 throw new IOException("Unknown analysis metadata; preserving installations.");
             // CompletedWithGaps can still retry failed/uncertain components.
             if (job.State != "Completed" && job.Installation.Equals(installation, StringComparison.OrdinalIgnoreCase)) return true;

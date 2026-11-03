@@ -30,14 +30,19 @@ public sealed class RecordingAnalysisJob
     public List<RecordingAnalysisChunk> Chunks { get; set; } = [];
     public string Reconciliation { get; set; } = "titanet-cosine-v1;threshold=.75;margin=.10";
     public string? SummaryModel { get; set; }
+    public string SummaryLanguage { get; set; } = "en";
+    public Dictionary<string, string> SpeakerNames { get; set; } = [];
+    public string? SummaryRevision { get; set; }
+    public int TrackCount { get; set; } = 1;
     public double ExecutionSeconds { get; set; }
     public int SummaryRequests { get; set; }
     public Dictionary<string, double> Timings { get; set; } = [];
     public double DurationSeconds => Frames / 16000d;
+    public double TotalAudioSeconds => DurationSeconds * TrackCount;
     public double ProcessedSeconds => Chunks.Where(c => c.Components.GetValueOrDefault("transcription") == "Succeeded").Sum(c =>
     {
         long missing = 0, end = c.CoreStart;
-        foreach (var gap in Coverage.Where(g => g.Kind != "InferredSilence" && g.Frames > 0).OrderBy(g => g.StartFrame))
+        foreach (var gap in Coverage.Where(g => g.Kind is not ("InferredSilence" or "IntentionalMute") && g.Frames > 0 && (g.TrackId.Length == 0 || g.TrackId == c.TrackId)).OrderBy(g => g.StartFrame))
         {
             var first = Math.Max(c.CoreStart, gap.StartFrame); var last = Math.Min(c.CoreEnd, gap.StartFrame + gap.Frames);
             if (last > first) { missing += Math.Max(0, last - Math.Max(end, first)); end = Math.Max(end, last); }
@@ -48,6 +53,8 @@ public sealed class RecordingAnalysisJob
 public sealed class RecordingAnalysisChunk
 {
     public int Index { get; set; }
+    public string TrackId { get; set; } = "";
+    public long SourceOffset { get; set; }
     public long Start { get; set; }
     public long End { get; set; }
     public long CoreStart { get; set; }
@@ -93,7 +100,7 @@ public sealed class RecordingAnalysisStore
     public RecordingAnalysisJob Read(string id)
     {
         var job = ReadJson<RecordingAnalysisJob>(FileFor(id, "job.json"));
-        if (job.Version != 1 || job.Id != id) throw new UserFacingException("Unsupported analysis record.");
+        if (job.Version is not (1 or 2) || job.Id != id) throw new UserFacingException("Unsupported analysis record.");
         if (job.State == "Running")
         {
             try { using var lease = Lease(id); job.State = "Interrupted"; job.Error = "The owning client stopped. Resume explicitly; uncertain submissions require --retry-uncertain."; }

@@ -152,7 +152,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                     if (result.ValueKind != JsonValueKind.Object) break;
                     if (ToolFailure(result, data)) { }
                     else if (Text(data, "name") == "audio_read" && !Verbose) MessageText("Audio evidence read · " + Text(result, "view") + (Flag(result, "hasMore") ? " · more pages available" : ""), "dim");
-                    else if (Text(result, "kind") == "recording-result" && !Verbose) MessageText("Recording analysis · " + Text(result, "state") + (Flag(result, "reused") ? " · reused saved evidence" : "") + (result.TryGetProperty("durationSeconds", out _) ? $" · {Number(result, "processedSeconds"):0.0}/{Number(result, "durationSeconds"):0.0}s processed" : ""), "dim");
+                    else if (Text(result, "kind") == "recording-result" && !Verbose) MessageText("Recording analysis · " + Text(result, "state") + (Flag(result, "reused") ? " · reused saved evidence" : "") + (result.TryGetProperty("durationSeconds", out _) ? $" · {Number(result, "processedSeconds"):0.0}/{Number(result, result.TryGetProperty("totalAudioSeconds", out _) ? "totalAudioSeconds" : "durationSeconds"):0.0}s processed" : ""), "dim");
                     else if (Text(result, "kind") == "recording-catalog" && !Verbose) MessageText("Recording metadata listed", "dim");
                     else if (Text(result, "kind") is "recording-result" or "recording-catalog") MessageText(result.GetRawText());
                     else if (RoutineResult(data, result)) { }

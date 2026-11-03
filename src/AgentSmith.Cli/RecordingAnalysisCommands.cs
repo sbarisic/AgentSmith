@@ -110,7 +110,7 @@ internal sealed partial class CliApp
         if (session is not null && File.Exists(analysis.Store.FileFor(job.Id, "transcript.jsonl"))) AttachAnalysis(analysis, job.Id, session);
         return result.State == "Completed" ? 0 : result.State == "CompletedWithGaps" ? 3 : 2;
     }
-    private static string AnalysisMessage(RecordingAnalysisJob job) => $"Analysis {job.Id} · {job.State} · {job.Stage}\n{job.ProcessedSeconds:0.0}/{job.DurationSeconds:0.0} seconds transcribed" + (job.Error is null ? "" : "\n" + job.Error);
+    private static string AnalysisMessage(RecordingAnalysisJob job) => $"Analysis {job.Id} · {job.State} · {job.Stage}\n{job.ProcessedSeconds:0.0}/{job.TotalAudioSeconds:0.0} seconds transcribed" + (job.Error is null ? "" : "\n" + job.Error);
     private void AttachAnalysis(RecordingAnalysis analysis, string id, Session session)
     {
         var artifactId = RecordingCoordinator.Attach(Context(session), analysis, id);

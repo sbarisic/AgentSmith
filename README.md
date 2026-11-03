@@ -1,5 +1,7 @@
 # AgentSmith
 
+Build the Windows call-recording GUI with `./publish-recorder.ps1`. See [Call Recorder](CALL_RECORDER.md) for paired microphone/output recording, post-call transcription, optional summaries, and acceptance limits.
+
 For a separate basic .NET 6 / Windows x86 console build, see [AgentSmithLite](AgentSmithLite/README.md). It supports ChatGPT chat, file tools, commands and app launch without the full application's optional features.
 
 AgentSmith is a Windows-first C# coding assistant with a terminal interface, ChatGPT and local-model providers, delegated workers, checkpointed file editing, process execution, and durable conversations. Work, Plan, Document, Review, and Memorize workflows share permission checks and saved task state.
