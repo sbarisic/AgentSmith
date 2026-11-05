@@ -48,14 +48,14 @@ public partial class MainWindow : Window
     private async Task Initialize()
     {
         RefreshDevices(); RefreshLibrary();
-        ModelLabel.Text = await Task.Run(recorder.ModelDescription);
+        await RefreshModel();
         var status = await recorder.Status(); activeId = status.Capture?.Id;
         if (!status.Available && recorder.Library().Any(c => c.Capture.State is "Starting" or "Recording" or "Finalizing"))
         {
             await recorder.EnsureService(CancellationToken.None); status = await recorder.Status(); activeId = status.Capture?.Id; RefreshLibrary();
         }
         StatusText.Text = activeId is not null ? "A recording is already active. Stop acts on that recording; closing this window leaves it running." :
-            status.Engines.Transcription && status.Engines.Diarization ? "Ready · Select both devices, then Record. Transcription starts after Stop." :
+            status.Engines.Transcription && status.Engines.Diarization ? "Ready · Record your call. Devices and languages are in Configuration." :
             $"Recording is available. For transcription, run: smith audio setup --data-dir \"{recorder.DataDirectory}\"";
         SetControls(); timer.Start();
     }
@@ -65,6 +65,24 @@ public partial class MainWindow : Window
         if (!File.Exists(Path.Combine(recorder.DataDirectory, "recorder-ui-fixture.json"))) throw new InvalidOperationException("Smoke checks require disposable fixture data from prepare_recorder_ui_fixture.py.");
         await Initialize(); timer.Stop();
         Measure(new Size(1280, 900)); Arrange(new Rect(0, 0, 1280, 900)); UpdateLayout();
+        // Exercise both tab contents without opening a window or capturing a device.
+        foreach (var size in new[] { new Size(1264, 861), new Size(984, 681) })
+        foreach (var tab in new[] { RecordingTab, ConfigurationTab })
+        {
+            WorkspaceTabs.SelectedItem = tab;
+            var view = (FrameworkElement)Content;
+            view.Measure(size); view.Arrange(new Rect(size)); view.UpdateLayout();
+            if (tab.Content is not FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 }) throw new InvalidOperationException($"{tab.Name} layout failed.");
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+            var background = new System.Windows.Media.DrawingVisual();
+            using (var drawing = background.RenderOpen()) drawing.DrawRectangle(Background, null, new Rect(size));
+            bitmap.Render(background);
+            bitmap.Render(view);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+            var name = tab == RecordingTab ? "recording-tab" : "configuration-tab";
+            using var output = File.Create(Path.Combine(recorder.DataDirectory, $"{name}-{size.Width}.png")); encoder.Save(output);
+        }
+        WorkspaceTabs.SelectedItem = RecordingTab; ResultsTabs.SelectedItem = TranscriptTab; UpdateLayout();
         if (Selected is { } call)
         {
             SearchInput.Text = "Synthetic";
@@ -83,7 +101,13 @@ public partial class MainWindow : Window
             foreach (var track in manifest.Version == 2 ? manifest.Tracks : [manifest])
             { using var reader = new CaptureAudioReader(recorder.CaptureDirectory(call.Capture.Id), track); _ = reader.Sample(1); }
         }
-        RecordingAnalysisStore.WriteJson(Path.Combine(recorder.DataDirectory, "desktop-smoke.json"), new { passed = true, windowShown = false, recordings = LibraryList.Items.Count, transcriptRows = transcript.Length, search = true, export = Selected?.Analysis is not null });
+        var pausedWork = Run(ct => Task.Delay(Timeout.Infinite, ct));
+        if (!PauseButton.IsEnabled || PauseButton.Visibility != Visibility.Visible || ConfigurationFields.IsEnabled) throw new InvalidOperationException("Processing controls did not enter the active state.");
+        PauseClick(this, new RoutedEventArgs());
+        try { await pausedWork; throw new InvalidOperationException("Processing cancellation was ignored."); } catch (OperationCanceledException) { }
+        if (PauseButton.Visibility != Visibility.Collapsed || !ConfigurationFields.IsEnabled) throw new InvalidOperationException("Processing controls did not return to the idle state.");
+        ResultsTabs.SelectedItem = SummaryTab;
+        RecordingAnalysisStore.WriteJson(Path.Combine(recorder.DataDirectory, "desktop-smoke.json"), new { passed = true, windowShown = false, tabs = 2, recordings = LibraryList.Items.Count, transcriptRows = transcript.Length, search = true, export = Selected?.Analysis is not null });
     }
     private void RefreshDevices()
     {
@@ -115,7 +139,7 @@ public partial class MainWindow : Window
     private async Task Run(Func<CancellationToken, Task> operation)
     {
         if (busy) return;
-        busy = true; SetControls(); workCancellation = new();
+        busy = true; workCancellation = new(); SetControls();
         var token = workCancellation.Token;
         try { work = Task.Run(() => operation(token), token); await work; }
         finally { busy = false; work = null; workCancellation.Dispose(); workCancellation = null; if (!closing) RefreshLibrary(); SetControls(); }
@@ -129,39 +153,65 @@ public partial class MainWindow : Window
     }
     private void ShowSelected()
     {
-        if (Selected is not { } call) { transcript = []; TranscriptList.ItemsSource = transcript; SetControls(); return; }
+        if (Selected is not { } call)
+        {
+            transcript = []; TranscriptList.ItemsSource = transcript; SelectedTitle.Text = "Your recording";
+            CoverageText.Clear(); SpeakerName.Clear(); RenderSummary(""); SetControls(); return;
+        }
+        SelectedTitle.Text = call.Title;
         transcript = recorder.Transcript(call.Capture.Id); FilterTranscript();
         CoverageText.Text = recorder.Coverage(call.Capture.Id); RenderSummary(recorder.Summary(call.Capture.Id));
-        KeepButton.Visibility = call.Metadata.Test && !call.Metadata.Kept ? Visibility.Visible : Visibility.Collapsed;
         sliderUpdating = true; PlaybackPosition.Maximum = Math.Max(1, call.Capture.DurationSeconds); sliderUpdating = false;
         SetControls();
     }
     private void SetControls()
     {
         if (!IsInitialized) return;
+        var capturing = activeId is not null;
+        RecordButton.Visibility = capturing ? Visibility.Collapsed : Visibility.Visible;
+        StopButton.Visibility = capturing ? Visibility.Visible : Visibility.Collapsed;
+        CancelRecordingButton.Visibility = capturing && ownsCapture && testDeadline is null ? Visibility.Visible : Visibility.Collapsed;
+        CancelRecordingButton.IsEnabled = !busy && !closing;
+        StopButton.Content = testDeadline is null ? "■ Stop and transcribe" : "■ Stop test";
+        MuteInput.Visibility = LevelPanel.Visibility = capturing ? Visibility.Visible : Visibility.Collapsed;
+        PauseButton.Visibility = busy && workCancellation is not null ? Visibility.Visible : Visibility.Collapsed;
+        TitleInput.IsEnabled = ConfigurationFields.IsEnabled = !busy && !capturing && !closing;
+        RecordingHint.Text = capturing ? testDeadline is not null ? "Recording a short test. Stop, listen, then Keep or Delete."
+            : ownsCapture ? "Recording both tracks. Cancel keeps the audio without starting transcription."
+            : "A recording is active in the shared service. Stop will finalize it."
+            : busy ? "Processing your recording. You can browse saved calls while you wait."
+            : OutputDevice.SelectedItem is null || MicrophoneDevice.SelectedItem is null ? "Choose your call output and microphone in Configuration before recording."
+            : "Record your call, then stop to transcribe automatically. Devices and languages are in Configuration.";
         RecordButton.IsEnabled = TestButton.IsEnabled = !busy && activeId is null && !closing;
         StopButton.IsEnabled = activeId is not null && !busy && !closing;
         MuteInput.IsEnabled = activeId is not null && !closing;
         OutputDevice.IsEnabled = MicrophoneDevice.IsEnabled = !busy && activeId is null;
         var inactive = Selected is { } selected && selected.Capture.State is not ("Starting" or "Recording" or "Finalizing");
         TranscribeButton.IsEnabled = inactive && !busy && activeId is null && !closing;
+        TranscribeButton.Visibility = inactive && (Selected?.Analysis?.State != "Completed" || transcript.Length == 0) ? Visibility.Visible : Visibility.Collapsed;
         SummaryButton.IsEnabled = inactive && transcript.Length > 0 && !busy && activeId is null && !closing;
         DeleteRecordingButton.IsEnabled = DeleteAnalysisButton.IsEnabled = inactive && !busy && !closing;
         ExportButton.IsEnabled = inactive && Selected?.Analysis is not null && !busy;
         RawExportButton.IsEnabled = inactive && !busy;
-        PauseButton.IsEnabled = busy && workCancellation is not null && !closing;
+        PauseButton.IsEnabled = busy && workCancellation is { IsCancellationRequested: false } && !closing;
         PlayButton.IsEnabled = inactive && activeId is null;
-        KeepButton.IsEnabled = inactive && !busy;
+        PlaybackPanel.Visibility = inactive && !capturing ? Visibility.Visible : Visibility.Collapsed;
+        var test = Selected is { Metadata.Test: true, Metadata.Kept: false };
+        KeepButton.Visibility = DeleteTestButton.Visibility = test ? Visibility.Visible : Visibility.Collapsed;
+        KeepButton.IsEnabled = DeleteTestButton.IsEnabled = inactive && !busy && !closing;
     }
     private async Task Start(bool test)
     {
         if (busy || activeId is not null) return;
+        if (OutputDevice.SelectedItem is null || MicrophoneDevice.SelectedItem is null)
+        { WorkspaceTabs.SelectedItem = ConfigurationTab; throw new UserFacingException("Select both call output and microphone in Configuration."); }
         SaveSettings(); playback?.Dispose(); playback = null;
         busy = true; SetControls();
         try
         {
             var capture = await recorder.Start(TitleInput.Text, test, CancellationToken.None);
             activeId = capture.Id; ownsCapture = true; MuteInput.IsChecked = false;
+            Elapsed.Text = "00:00:00"; WorkspaceTabs.SelectedItem = RecordingTab;
             testDeadline = test ? DateTimeOffset.UtcNow.AddSeconds(10) : null;
             RefreshLibrary(capture.Id); StatusText.Text = test ? "Recording a 10-second test. Play it back, then Keep or Delete." : "Recording both tracks. Stop starts local transcription.";
         }
@@ -222,7 +272,21 @@ public partial class MainWindow : Window
     private async void RecordClick(object sender, RoutedEventArgs e) => await Guard(() => Start(false));
     private async void TestClick(object sender, RoutedEventArgs e) => await Guard(() => Start(true));
     private async void StopClick(object sender, RoutedEventArgs e) => await Guard(() => Stop(true));
-    private async void RefreshClick(object sender, RoutedEventArgs e) => await Guard(async () => { RefreshDevices(); RefreshLibrary(); ModelLabel.Text = await Task.Run(recorder.ModelDescription); });
+    private async void CancelRecordingClick(object sender, RoutedEventArgs e) => await Guard(async () =>
+    {
+        if (busy || !ownsCapture) return;
+        await Stop(false);
+        StatusText.Text = "Recording cancelled. Audio is kept in the library; transcription has not started.";
+    });
+    private async Task RefreshModel()
+    {
+        ModelLabel.Text = await Task.Run(recorder.ModelDescription);
+        SummaryDisclosure.Text = $"{ModelLabel.Text}\nGenerate summary sends transcript evidence to this provider. Audio stays local.";
+    }
+    private async void RefreshClick(object sender, RoutedEventArgs e) => await Guard(async () => { if (!busy && activeId is null) RefreshDevices(); RefreshLibrary(); await RefreshModel(); });
+    private void DeviceSelectionChanged(object sender, SelectionChangedEventArgs e) { if (!loading) SetControls(); }
+    private async void SaveConfigurationClick(object sender, RoutedEventArgs e) => await Guard(() =>
+    { SaveSettings(); StatusText.Text = "Configuration saved. You can return to Recording."; return Task.CompletedTask; });
     private async void MuteClick(object sender, RoutedEventArgs e) => await Guard(async () => { if (activeId is { } id) await recorder.Mute(id, MuteInput.IsChecked == true); });
     private async void TranscribeClick(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
@@ -231,10 +295,12 @@ public partial class MainWindow : Window
         if (interrupted && MessageBox.Show(this, "This recording has missing or uncertain audio. Analyze the retained parts?", "Interrupted recording", MessageBoxButton.OKCancel) != MessageBoxResult.OK) return;
         await Transcribe(call.Capture.Id, interrupted);
     });
-    private void PauseClick(object sender, RoutedEventArgs e) => workCancellation?.Cancel();
+    private void PauseClick(object sender, RoutedEventArgs e)
+    { workCancellation?.Cancel(); PauseButton.IsEnabled = false; StatusText.Text = "Pausing processing; saving completed work…"; }
     private async void SummaryClick(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (Selected is not { } call) return;
+        ResultsTabs.SelectedItem = SummaryTab;
         SaveSettings(); var retry = RetryUncertain.IsChecked == true; StatusText.Text = "Generating cited summary…";
         await Run(async ct => { var result = await recorder.Summarize(call.Capture.Id, retry, ct); await Dispatcher.InvokeAsync(() => StatusText.Text = $"Summary {result.State}. {result.Error}"); });
     });
@@ -282,6 +348,11 @@ public partial class MainWindow : Window
     { if (!loading && recorder is not null && SummaryLanguage.SelectedValue is string code) { recorder.Preferences.SummaryLanguage = code; if (Selected is { } call) RenderSummary(recorder.Summary(call.Capture.Id)); } }
     private void RenderSummary(string text)
     {
+        SummaryPlaceholder.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Visible : Visibility.Collapsed;
+        SummaryView.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
+        SummaryPlaceholder.Text = Selected is null ? "Your summary will appear here. Record a call or select one from the library to get started."
+            : transcript.Length > 0 ? "Your transcript is ready. Click Generate summary to summarize this call."
+            : "Stop recording to transcribe your call. Then generate a summary when you are ready.";
         var document = new FlowDocument { FontFamily = FontFamily, FontSize = 14, PagePadding = new Thickness(0) };
         foreach (var line in text.Split('\n'))
         {

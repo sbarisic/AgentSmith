@@ -13,7 +13,11 @@ The GUI accepts `--data-dir <directory>` and, for development, `--smith <matchin
 
 ## Recording a call
 
-Select the output carrying the call and your microphone. A headset is the supported baseline. Use the ten-second test to check both sides, then play it back and choose Keep or Delete. Device selections and language preferences are saved when recording or processing starts.
+The main panel has two tabs. **Recording** contains Record, Stop and transcribe, and Generate summary. **Configuration** contains call output and microphone selection, transcription and summary languages, the ten-second audio test, and advanced processing limits/retry options. Use Save configuration to remember changes; settings are also saved when recording or processing starts.
+
+Select the output carrying the call and your microphone in Configuration. A headset is the supported baseline. Use the ten-second test to check both sides, then play it back in Recording and choose Keep test or Delete test.
+
+During recording, Cancel recording stops and keeps the audio without starting transcription. During transcription or summary generation, Pause processing saves completed work for explicit resume. These controls appear only when relevant; capture itself does not pause. Summary is the default result view, with Transcript and Details & export beside it. Recording and analysis deletion are under Manage selected recording in the library.
 
 Record and Stop control the shared audio service. Stop finalizes both tracks and starts local transcription for normal recordings. Test recordings require explicit transcription. A changed default device never redirects an active recording. Device failures finalize the call as interrupted; analyzing retained parts requires explicit acknowledgment.
 

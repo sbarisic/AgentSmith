@@ -1,76 +1,130 @@
 <Window x:Class="AgentSmith.Desktop.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="AgentSmith · Call Recorder" Width="1280" Height="900" MinWidth="1000" MinHeight="720" Background="#F4F6FA" FontFamily="Segoe UI" FontSize="14" Closing="OnClosing">
+  <Window.Resources>
+    <Style x:Key="Card" TargetType="Border"><Setter Property="Background" Value="White"/><Setter Property="CornerRadius" Value="8"/><Setter Property="Padding" Value="18"/></Style>
+    <Style x:Key="Hint" TargetType="TextBlock"><Setter Property="Foreground" Value="#677487"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="FontSize" Value="12"/></Style>
+    <Style x:Key="SectionTitle" TargetType="TextBlock"><Setter Property="FontSize" Value="18"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Margin" Value="0,0,0,12"/></Style>
+  </Window.Resources>
   <Grid Margin="24">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel Margin="0,0,0,20"><TextBlock Text="AgentSmith" FontSize="26" FontWeight="SemiBold"/><TextBlock Text=" / Call Recorder" FontSize="26" Foreground="#677487"/><TextBlock Text="LOCAL TRANSCRIPTION" Foreground="#38685A" VerticalAlignment="Center" HorizontalAlignment="Right"/></DockPanel>
     <Grid Grid.Row="1">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-      <Border Background="White" CornerRadius="8" Padding="14">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Border Style="{StaticResource Card}" Padding="14">
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top"><TextBlock Text="Recordings" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/><Button Content="Refresh recordings and devices" Click="RefreshClick" Margin="0,0,0,10"/></StackPanel>
-          <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0"><Button x:Name="DeleteRecordingButton" Content="Delete selected recording…" Click="DeleteRecordingClick" Margin="0,0,0,8"/><Button x:Name="DeleteAnalysisButton" Content="Delete selected analysis…" Click="DeleteAnalysisClick" Margin="0"/></StackPanel>
+          <StackPanel DockPanel.Dock="Top"><TextBlock Text="Recordings" Style="{StaticResource SectionTitle}"/><Button Content="Refresh" Click="RefreshClick" HorizontalAlignment="Left" Margin="0,0,0,10"/></StackPanel>
+          <Expander DockPanel.Dock="Bottom" Header="Manage selected recording" Margin="0,12,0,0"><StackPanel Margin="0,10,0,0">
+            <Button x:Name="DeleteRecordingButton" Content="Delete recording…" Click="DeleteRecordingClick" Margin="0,0,0,8"/>
+            <Button x:Name="DeleteAnalysisButton" Content="Delete analysis…" Click="DeleteAnalysisClick" Margin="0"/>
+          </StackPanel></Expander>
           <ListBox x:Name="LibraryList" BorderThickness="0" SelectionChanged="LibraryChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
             <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4,9"><TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="{Binding Detail}" FontSize="12" Foreground="#677487" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
           </ListBox>
         </DockPanel>
       </Border>
-      <Grid Grid.Column="2">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <Border Background="White" CornerRadius="8" Padding="18">
-          <StackPanel>
-            <TextBox x:Name="TitleInput" Text="New call" AutomationProperties.Name="Recording title" Margin="0,0,0,10"/>
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/></Grid.ColumnDefinitions>
-              <StackPanel><TextBlock Text="Call audio · headphones / speakers" Margin="0,0,0,5"/><ComboBox x:Name="OutputDevice" DisplayMemberPath="Name" AutomationProperties.Name="Call audio device"/><ProgressBar x:Name="CallLevel" Maximum="1" Height="6" Margin="0,8,0,0"/></StackPanel>
-              <StackPanel Grid.Column="2"><TextBlock Text="My microphone" Margin="0,0,0,5"/><ComboBox x:Name="MicrophoneDevice" DisplayMemberPath="Name" AutomationProperties.Name="Microphone device"/><ProgressBar x:Name="MicLevel" Maximum="1" Height="6" Margin="0,8,0,0"/></StackPanel>
-            </Grid>
-            <WrapPanel Margin="0,14,0,10">
-              <Button x:Name="RecordButton" Content="● Record" Background="#DDEFE8" Click="RecordClick"/>
-              <Button x:Name="StopButton" Content="■ Stop" Click="StopClick" IsEnabled="False"/>
-              <Button x:Name="TestButton" Content="Test · 10 seconds" Click="TestClick"/>
-              <CheckBox x:Name="MuteInput" Content="Mute recorder microphone" VerticalAlignment="Center" Click="MuteClick" IsEnabled="False"/>
-              <TextBlock x:Name="Elapsed" Text="00:00:00" VerticalAlignment="Center" Margin="18,0,0,0" FontFamily="Consolas" FontSize="18"/>
-            </WrapPanel>
-            <TextBlock Text="Call audio includes other apps on that output. Recorder mute is independent of Teams / VM mute. Headset recommended." FontSize="12" Foreground="#677487" TextWrapping="Wrap"/>
-            <Expander Header="Language and processing limits" Margin="0,10,0,0"><StackPanel Margin="0,8,0,0">
-              <WrapPanel><TextBlock Text="Transcription" VerticalAlignment="Center" Margin="0,0,8,0"/><ComboBox x:Name="LanguageInput" Width="170" DisplayMemberPath="Name" SelectedValuePath="Code"/>
-                <TextBlock Text="Other language code" VerticalAlignment="Center" Margin="12,0,8,0"/><TextBox x:Name="OtherLanguage" Width="65" ToolTip="Optional Whisper language code, such as de or it; overrides the language menu."/></WrapPanel>
-              <WrapPanel Margin="0,8,0,0"><TextBlock Text="Storage GiB" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBox x:Name="StorageInput" Width="65"/>
-                <TextBlock Text="Minutes per attempt" VerticalAlignment="Center" Margin="12,0,6,0"/><TextBox x:Name="MinutesInput" Width="65"/>
-                <TextBlock Text="Summary request limit" VerticalAlignment="Center" Margin="12,0,6,0"/><TextBox x:Name="RequestsInput" Width="65"/></WrapPanel>
-            </StackPanel></Expander>
-          </StackPanel>
-        </Border>
-        <WrapPanel Grid.Row="1" Margin="0,14,0,12">
-          <Button x:Name="TranscribeButton" Content="Transcribe / Resume" Click="TranscribeClick"/>
-          <Button x:Name="PauseButton" Content="Pause processing" Click="PauseClick" IsEnabled="False"/>
-          <Button x:Name="KeepButton" Content="Keep test" Click="KeepClick" Visibility="Collapsed"/>
-          <Button x:Name="ExportButton" Content="Export results…" Click="ExportClick"/>
-          <Button x:Name="RawExportButton" Content="Export audio…" Click="RawExportClick"/>
-          <CheckBox x:Name="RetryFailed" Content="Retry failed" VerticalAlignment="Center" Margin="0,0,12,0"/>
-          <CheckBox x:Name="RetryUncertain" Content="Retry uncertain" VerticalAlignment="Center"/>
-        </WrapPanel>
-        <TabControl Grid.Row="2" Background="White" BorderBrush="#DCE2EA">
-          <TabItem Header="Transcript"><DockPanel Margin="12">
-            <TextBox x:Name="SearchInput" DockPanel.Dock="Top" AutomationProperties.Name="Search transcript" ToolTip="Search transcript" TextChanged="SearchChanged" Margin="0,0,0,10"/>
-            <WrapPanel DockPanel.Dock="Bottom" Margin="0,10,0,0"><TextBlock Text="Rename selected speaker" VerticalAlignment="Center" Margin="0,0,8,0"/><TextBox x:Name="SpeakerName" Width="150"/><Button Content="Save name" Click="RenameClick" Margin="8,0,0,0"/></WrapPanel>
-            <ListBox x:Name="TranscriptList" BorderThickness="0" MouseDoubleClick="TranscriptDoubleClick" KeyDown="TranscriptKeyDown" SelectionChanged="TranscriptSelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
-              <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style></ListBox.ItemContainerStyle>
-              <ListBox.ItemTemplate><DataTemplate><Grid Margin="4,8"><Grid.ColumnDefinitions><ColumnDefinition Width="78"/><ColumnDefinition Width="125"/><ColumnDefinition/></Grid.ColumnDefinitions><TextBlock Text="{Binding Time}" Foreground="#356A86"/><TextBlock Grid.Column="1" Text="{Binding Speaker}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap"/></Grid></DataTemplate></ListBox.ItemTemplate>
-            </ListBox>
-          </DockPanel></TabItem>
-          <TabItem Header="Summary"><DockPanel Margin="12"><StackPanel DockPanel.Dock="Top">
-            <TextBlock x:Name="ModelLabel" TextWrapping="Wrap" Margin="0,0,0,8"/>
-            <TextBlock Text="Generate summary sends transcript evidence to this provider. Audio stays local." Foreground="#677487" TextWrapping="Wrap" Margin="0,0,0,10"/>
-            <WrapPanel Margin="0,0,0,10"><Button x:Name="SummaryButton" Content="Generate summary" Click="SummaryClick"/><ComboBox x:Name="SummaryLanguage" Width="150" DisplayMemberPath="Name" SelectedValuePath="Code" SelectionChanged="SummaryLanguageChanged"/></WrapPanel>
-          </StackPanel><FlowDocumentScrollViewer x:Name="SummaryView" IsToolBarVisible="False" VerticalScrollBarVisibility="Auto"/></DockPanel></TabItem>
-          <TabItem Header="Coverage"><TextBox x:Name="CoverageText" Margin="12" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"/></TabItem>
-        </TabControl>
-        <Border Grid.Row="3" Background="White" CornerRadius="8" Padding="12" Margin="0,12,0,0"><DockPanel>
-          <Button x:Name="PlayButton" Content="Play / Pause" Click="PlayClick" DockPanel.Dock="Left"/>
-          <ComboBox x:Name="PlaybackTrack" Width="125" SelectedIndex="0" SelectionChanged="PlaybackTrackChanged" DockPanel.Dock="Right"><ComboBoxItem Content="Both tracks"/><ComboBoxItem Content="Call only"/><ComboBoxItem Content="Microphone"/></ComboBox>
-          <Slider x:Name="PlaybackPosition" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="8,0,14,0" ValueChanged="PlaybackSeek" AutomationProperties.Name="Playback position"/>
-        </DockPanel></Border>
-      </Grid>
+      <TabControl x:Name="WorkspaceTabs" Grid.Column="2" Background="Transparent" BorderThickness="0">
+        <TabItem x:Name="RecordingTab" Header="_Recording">
+          <Grid Margin="0,14,0,0">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Border Style="{StaticResource Card}"><StackPanel>
+              <TextBox x:Name="TitleInput" Text="New call" AutomationProperties.Name="Recording title" Margin="0,0,0,12"/>
+              <WrapPanel>
+                <Button x:Name="RecordButton" Content="● Record" Background="#DDEFE8" Click="RecordClick"/>
+                <Button x:Name="StopButton" Content="■ Stop and transcribe" Background="#DDEFE8" Click="StopClick" Visibility="Collapsed"/>
+                <Button x:Name="CancelRecordingButton" Content="Cancel recording" Click="CancelRecordingClick" Visibility="Collapsed" ToolTip="Stop and keep the audio without starting transcription."/>
+                <Button x:Name="PauseButton" Content="Pause processing" Click="PauseClick" Visibility="Collapsed"/>
+                <CheckBox x:Name="MuteInput" Content="Mute my microphone" VerticalAlignment="Center" Margin="4,0,0,0" Click="MuteClick" Visibility="Collapsed" ToolTip="Mutes this recording only; independent of Teams or VM mute."/>
+                <TextBlock x:Name="Elapsed" Text="00:00:00" VerticalAlignment="Center" Margin="18,0,0,0" FontFamily="Consolas" FontSize="18"/>
+              </WrapPanel>
+              <TextBlock x:Name="RecordingHint" Text="Record your call, then stop to transcribe automatically." Style="{StaticResource Hint}" Margin="0,10,0,0"/>
+              <Grid x:Name="LevelPanel" Margin="0,12,0,0" Visibility="Collapsed">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <TextBlock Text="Call" Style="{StaticResource Hint}" Margin="0,0,8,0"/>
+                <ProgressBar x:Name="CallLevel" Grid.Column="1" Maximum="1" Height="6" AutomationProperties.Name="Call audio level"/>
+                <TextBlock Grid.Column="2" Text="Microphone" Style="{StaticResource Hint}" Margin="18,0,8,0"/>
+                <ProgressBar x:Name="MicLevel" Grid.Column="3" Maximum="1" Height="6" AutomationProperties.Name="Microphone level"/>
+              </Grid>
+            </StackPanel></Border>
+            <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,12,0,0"><DockPanel>
+              <StackPanel DockPanel.Dock="Top">
+                <TextBlock x:Name="SelectedTitle" Text="Your recording" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <WrapPanel Margin="0,10,0,12">
+                  <Button x:Name="SummaryButton" Content="Generate summary" Background="#DDEFE8" Click="SummaryClick"/>
+                  <Button x:Name="TranscribeButton" Content="Transcribe / Resume" Click="TranscribeClick" Visibility="Collapsed"/>
+                  <Button x:Name="KeepButton" Content="Keep test" Click="KeepClick" Visibility="Collapsed"/>
+                  <Button x:Name="DeleteTestButton" Content="Delete test…" Click="DeleteRecordingClick" Visibility="Collapsed"/>
+                </WrapPanel>
+              </StackPanel>
+              <TabControl x:Name="ResultsTabs" Background="White" BorderBrush="#DCE2EA">
+                <TabItem x:Name="SummaryTab" Header="Summary"><DockPanel Margin="12">
+                  <TextBlock x:Name="SummaryDisclosure" DockPanel.Dock="Top" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+                  <Grid><TextBlock x:Name="SummaryPlaceholder" Text="Your summary will appear here. Record a call or select one from the library to get started." Style="{StaticResource Hint}" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="380" TextAlignment="Center"/>
+                    <FlowDocumentScrollViewer x:Name="SummaryView" IsToolBarVisible="False" VerticalScrollBarVisibility="Auto"/>
+                  </Grid>
+                </DockPanel></TabItem>
+                <TabItem x:Name="TranscriptTab" Header="Transcript"><DockPanel Margin="12">
+                  <TextBox x:Name="SearchInput" DockPanel.Dock="Top" AutomationProperties.Name="Search transcript" ToolTip="Search transcript" TextChanged="SearchChanged" Margin="0,0,0,10"/>
+                  <Expander DockPanel.Dock="Bottom" Header="Rename a speaker" Margin="0,10,0,0"><WrapPanel Margin="0,8,0,0"><TextBox x:Name="SpeakerName" Width="150" AutomationProperties.Name="Speaker display name"/><Button Content="Save name" Click="RenameClick" Margin="8,0,0,0"/></WrapPanel></Expander>
+                  <ListBox x:Name="TranscriptList" BorderThickness="0" MouseDoubleClick="TranscriptDoubleClick" KeyDown="TranscriptKeyDown" SelectionChanged="TranscriptSelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                    <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style></ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate><DataTemplate><Grid Margin="4,8"><Grid.ColumnDefinitions><ColumnDefinition Width="78"/><ColumnDefinition Width="110"/><ColumnDefinition/></Grid.ColumnDefinitions><TextBlock Text="{Binding Time}" Foreground="#356A86"/><TextBlock Grid.Column="1" Text="{Binding Speaker}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap"/></Grid></DataTemplate></ListBox.ItemTemplate>
+                  </ListBox>
+                </DockPanel></TabItem>
+                <TabItem Header="Details &amp; export"><DockPanel Margin="12">
+                  <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,12"><Button x:Name="ExportButton" Content="Export results…" Click="ExportClick"/><Button x:Name="RawExportButton" Content="Export audio…" Click="RawExportClick"/></WrapPanel>
+                  <TextBlock DockPanel.Dock="Top" Text="Audio coverage" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                  <TextBox x:Name="CoverageText" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"/>
+                </DockPanel></TabItem>
+              </TabControl>
+            </DockPanel></Border>
+            <Border x:Name="PlaybackPanel" Grid.Row="2" Style="{StaticResource Card}" Padding="12" Margin="0,12,0,0" Visibility="Collapsed"><DockPanel>
+              <Button x:Name="PlayButton" Content="Play / Pause" Click="PlayClick" DockPanel.Dock="Left"/>
+              <ComboBox x:Name="PlaybackTrack" Width="125" SelectedIndex="0" SelectionChanged="PlaybackTrackChanged" DockPanel.Dock="Right" AutomationProperties.Name="Playback tracks"><ComboBoxItem Content="Both tracks"/><ComboBoxItem Content="Call only"/><ComboBoxItem Content="Microphone"/></ComboBox>
+              <Slider x:Name="PlaybackPosition" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="8,0,14,0" ValueChanged="PlaybackSeek" AutomationProperties.Name="Playback position"/>
+            </DockPanel></Border>
+          </Grid>
+        </TabItem>
+        <TabItem x:Name="ConfigurationTab" Header="_Configuration">
+          <DockPanel Margin="0,14,0,0">
+            <Button DockPanel.Dock="Bottom" Content="Save configuration" Click="SaveConfigurationClick" IsEnabled="{Binding IsEnabled, ElementName=ConfigurationFields}" HorizontalAlignment="Left" Background="#DDEFE8" Margin="0,12,0,0"/>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel x:Name="ConfigurationFields">
+              <Border Style="{StaticResource Card}"><StackPanel>
+                <TextBlock Text="Audio devices" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Call output · headphones or speakers" Margin="0,0,0,5"/>
+                <ComboBox x:Name="OutputDevice" DisplayMemberPath="Name" AutomationProperties.Name="Call audio device" SelectionChanged="DeviceSelectionChanged"/>
+                <TextBlock Text="Microphone" Margin="0,14,0,5"/>
+                <ComboBox x:Name="MicrophoneDevice" DisplayMemberPath="Name" AutomationProperties.Name="Microphone device" SelectionChanged="DeviceSelectionChanged"/>
+                <TextBlock Text="Use a headset. Call audio includes other apps playing through the selected output. Recorder microphone mute is independent of Teams / VM mute." Style="{StaticResource Hint}" Margin="0,12,0,14"/>
+                <WrapPanel><Button Content="Refresh devices" Click="RefreshClick"/><Button x:Name="TestButton" Content="Test · 10 seconds" Click="TestClick"/></WrapPanel>
+                <TextBlock Text="A test is saved in Recordings for playback. Choose Keep test or Delete test after listening." Style="{StaticResource Hint}" Margin="0,10,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource Card}" Margin="0,12,0,0"><StackPanel>
+                <TextBlock Text="Language and summary" Style="{StaticResource SectionTitle}"/>
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="18"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                  <StackPanel><TextBlock Text="Transcription language" Margin="0,0,0,5"/><ComboBox x:Name="LanguageInput" DisplayMemberPath="Name" SelectedValuePath="Code" AutomationProperties.Name="Transcription language"/></StackPanel>
+                  <StackPanel Grid.Column="2"><TextBlock Text="Summary language" Margin="0,0,0,5"/><ComboBox x:Name="SummaryLanguage" DisplayMemberPath="Name" SelectedValuePath="Code" SelectionChanged="SummaryLanguageChanged" AutomationProperties.Name="Summary language"/></StackPanel>
+                </Grid>
+                <TextBlock Text="Summary provider" FontWeight="SemiBold" Margin="0,16,0,5"/>
+                <TextBlock x:Name="ModelLabel" TextWrapping="Wrap"/>
+                <TextBlock Text="Summaries are generated only when you click Generate summary. Transcript evidence is sent to the configured provider; audio stays local." Style="{StaticResource Hint}" Margin="0,8,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource Card}" Margin="0,12,0,0"><Expander Header="Advanced settings"><StackPanel Margin="0,14,0,0">
+                <WrapPanel><TextBlock Text="Other language code" VerticalAlignment="Center" Margin="0,0,8,0"/><TextBox x:Name="OtherLanguage" Width="65" AutomationProperties.Name="Other transcription language code" ToolTip="Optional Whisper language code, such as de or it; overrides the language menu."/></WrapPanel>
+                <TextBlock Text="Optional Whisper language code; overrides the transcription language above." Style="{StaticResource Hint}" Margin="0,6,0,14"/>
+                <WrapPanel><StackPanel Margin="0,0,18,12"><TextBlock Text="Storage (GiB)" Margin="0,0,0,5"/><TextBox x:Name="StorageInput" Width="100" HorizontalAlignment="Left" AutomationProperties.Name="Storage limit in GiB"/></StackPanel>
+                  <StackPanel Margin="0,0,18,12"><TextBlock Text="Minutes per attempt" Margin="0,0,0,5"/><TextBox x:Name="MinutesInput" Width="100" HorizontalAlignment="Left" AutomationProperties.Name="Minutes per attempt"/></StackPanel>
+                  <StackPanel Margin="0,0,0,12"><TextBlock Text="Summary request limit" Margin="0,0,0,5"/><TextBox x:Name="RequestsInput" Width="100" HorizontalAlignment="Left" AutomationProperties.Name="Summary request limit"/></StackPanel>
+                </WrapPanel>
+                <TextBlock Text="Retry options for the next processing attempt" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                <WrapPanel><CheckBox x:Name="RetryFailed" Content="Retry failed" Margin="0,0,18,0"/><CheckBox x:Name="RetryUncertain" Content="Retry uncertain"/></WrapPanel>
+                <TextBlock Text="Retrying an uncertain request can repeat a provider request whose response was lost." Style="{StaticResource Hint}" Margin="0,8,0,0"/>
+              </StackPanel></Expander></Border>
+            </StackPanel>
+          </ScrollViewer>
+          </DockPanel>
+        </TabItem>
+      </TabControl>
     </Grid>
     <TextBlock x:Name="StatusText" Grid.Row="2" Text="Loading…" TextWrapping="Wrap" Margin="0,14,0,0" Foreground="#405369"/>
   </Grid>
