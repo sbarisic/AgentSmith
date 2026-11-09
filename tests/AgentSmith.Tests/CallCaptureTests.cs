@@ -67,6 +67,22 @@ public sealed class CallCaptureTests
         }
     }
     [Fact]
+    public async Task NormalStopCompletesBothTracksAndRetainsNonfatalGlitchCoverage()
+    {
+        using var f = new Fixture(); var start = await f.Start();
+        f.Call.Feed(160, 0, f.Clock); f.Mic.Feed(480, 0, f.Clock);
+        f.Call.Feed(160, 160, f.Clock + 100_000, discontinuity: true);
+        f.Mic.Feed(480, 160, f.Clock + 80_000);
+        f.Clock += 200_000;
+        var result = await Stop(f, start.Id);
+        Assert.Equal("Completed", result.State); Assert.NotNull(result.Error);
+        Assert.All(result.Tracks, t => Assert.Equal("Completed", t.State));
+        Assert.Contains(result.Tracks[0].Coverage, c => c.Kind == "DeviceDiscontinuity");
+        Assert.Empty(result.Tracks[1].Coverage);
+        Assert.Equal(960, result.Tracks[1].Frames);
+        Assert.Equal(0, result.Tracks[1].TimingDiagnostics!.OverlapFramesDiscarded);
+    }
+    [Fact]
     public async Task RecorderMuteNeverWritesSuppressedMicrophoneSamples()
     {
         using var f = new Fixture(); var start = await f.Start(); f.Manager.Mute(start.Id, true);

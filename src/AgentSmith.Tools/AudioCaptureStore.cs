@@ -9,6 +9,18 @@ namespace AgentSmith.Tools;
 public sealed record CaptureChunk(string File, long StartFrame, long Frames, long Bytes, string Hash);
 public sealed record CaptureCoverage(long StartFrame, long Frames, string Kind, string TrackId = "");
 public sealed record CaptureAnchor(long Frame, long Qpc);
+public sealed record CaptureTimingObservation(long ExpectedPosition, long Position, long Qpc, long ExpectedFrame, long TimestampFrame, bool DeviceDiscontinuity);
+public sealed class CaptureTimingDiagnostics
+{
+    public long Packets { get; set; }
+    public long DeviceDiscontinuities { get; set; }
+    public long PositionRegressions { get; set; }
+    public long PositionUnitMismatches { get; set; }
+    public long TimestampFallbacks { get; set; }
+    public long TimestampErrors { get; set; }
+    public long OverlapFramesDiscarded { get; set; }
+    public List<CaptureTimingObservation> Observations { get; set; } = [];
+}
 public sealed class CaptureManifest
 {
     public int Version { get; set; } = 1;
@@ -18,6 +30,8 @@ public sealed class CaptureManifest
     public double Level { get; set; }
     public bool Muted { get; set; }
     public List<CaptureAnchor> Anchors { get; set; } = [];
+    // Optional additive metadata: older manifests have no packet-level diagnostics.
+    public CaptureTimingDiagnostics? TimingDiagnostics { get; set; }
     public List<CaptureManifest> Tracks { get; set; } = [];
     public IEnumerable<CaptureChunk> AllChunks() => Version == 2 ? Tracks.SelectMany(t => t.Chunks) : Chunks;
     public string Id { get; set; } = "";

@@ -71,6 +71,56 @@ public sealed class SharedAudioServiceTests
         await Assert.ThrowsAsync<IOException>(() => second.Run());
     }
 
+    private static async Task<AudioServiceStatus> StopIfIdle(Fixture f, int? expectedPid = null)
+    {
+        using var pipe = await AudioConnection.Connect(AudioEndpoint.Resolve(f.Directory.Path), "control", default);
+        await Send(pipe, new("stop-if-idle", Data: new() { ["expectedProcessId"] = expectedPid ?? Environment.ProcessId }));
+        return AudioWire.Value<AudioServiceStatus>((await Read(pipe)).Data);
+    }
+    [Fact]
+    public async Task ConditionalStopChecksProcessIdentityAndClosesIdleServiceWithOwnersIdleConnection()
+    {
+        await using var f = new Fixture(); using var client = await f.Connect();
+        Assert.False((await StopIfIdle(f, -1)).Draining);
+        Assert.False(f.Running.IsCompleted);
+        Assert.True((await StopIfIdle(f)).Draining);
+        await f.Running.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+    [Fact]
+    public async Task ConditionalStopLeavesOtherControlConnectionsUsable()
+    {
+        await using var f = new Fixture();
+        using var other = await AudioConnection.Connect(AudioEndpoint.Resolve(f.Directory.Path), "control", default);
+        Assert.False((await StopIfIdle(f)).Draining);
+        await Send(other, new("status"));
+        Assert.True(AudioWire.Value<AudioServiceStatus>((await Read(other)).Data).Available);
+    }
+    [Fact]
+    public async Task ConditionalStopNeverCancelsAcceptedInference()
+    {
+        await using var f = new Fixture(); using var client = await f.Connect();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Host.Infer = async (_, _, _, ct) => { await release.Task.WaitAsync(ct); return Result(); };
+        var work = client.Run(f.Submission(), f.Input, _ => { }, default);
+        await Until(() => f.Host.Status().ActiveJobs == 1);
+        Assert.False((await StopIfIdle(f)).Draining);
+        Assert.False(work.IsCompleted);
+        release.SetResult(); await work;
+        Assert.False(f.Host.Status().Draining);
+    }
+    [Fact]
+    public async Task ConditionalStopNeverInterruptsAnActiveRecording()
+    {
+        await using var f = new Fixture();
+        var capture = f.Host.CaptureManager;
+        capture.Devices = () => [new("fake", "Test output", true)];
+        capture.CreateSource = _ => new AudioCaptureTests.Source();
+        capture.FreeBytes = () => 100L << 30;
+        var recording = await capture.Start(new(Guid.NewGuid().ToString("N")));
+        Assert.False((await StopIfIdle(f)).Draining);
+        Assert.Equal(recording.Id, capture.Active?.Id);
+        Assert.Equal("Recording", capture.Status(recording.Id).State);
+    }
     [Fact]
     public async Task MultiplexedParentAndWorkerRequestsSerializeAndReturnOwnedResults()
     {

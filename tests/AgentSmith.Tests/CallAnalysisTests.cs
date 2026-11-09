@@ -82,6 +82,20 @@ public sealed class CallAnalysisTests
         return (analysis, job);
     }
     [Fact]
+    public async Task NormallyStoppedCaptureWarningsRemainIncompleteInAnalysisWithoutInterruptConsent()
+    {
+        using var directory = new TestDirectory(); var backend = new Backend();
+        var (analysis, job) = Prepared(directory.Path, backend); using var owned = analysis;
+        job.Coverage.Add(new(16000, 160, "DeviceDiscontinuity", "mic"));
+        analysis.Store.Save(job);
+        Assert.False(job.Options.AllowInterrupted);
+        var result = await analysis.Run(job.Id, false, false, _ => { }, null, null, default);
+        Assert.Equal("CompletedWithGaps", result.State);
+        Assert.Contains(result.Coverage, c => c.TrackId == "mic" && c.Kind == "DeviceDiscontinuity");
+        Assert.True(backend.Calls > 0);
+        Assert.False(File.Exists(analysis.Store.FileFor(job.Id, "summary.md")));
+    }
+    [Fact]
     public async Task OverlapIsPreservedAndSummaryIsOnlyExplicit()
     {
         using var directory = new TestDirectory(); var backend = new Backend(); var (analysis, job) = Prepared(directory.Path, backend); using var owned = analysis;

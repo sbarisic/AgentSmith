@@ -28,6 +28,7 @@ public sealed partial class AudioServiceHost
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool draining;
     private bool stopRequested;
+    private bool idleExit;
     private readonly ConcurrentDictionary<string, Task> watchers = new();
     private Job? active;
     private int nextPeer;
@@ -76,7 +77,12 @@ public sealed partial class AudioServiceHost
                     if (peers.Count >= 48) { pipe.Dispose(); continue; }
                     var id = Interlocked.Increment(ref nextPeer);
                     var peer = new Peer(this, pipe, id);
-                    peers[id] = peer;
+                    lock (sync)
+                    {
+                        // Conditional shutdown has already established that no other peer needs us.
+                        if (idleExit) { pipe.Dispose(); continue; }
+                        peers[id] = peer;
+                    }
                     var handler = Task.Run(peer.Run); handlers[id] = handler;
                     _ = handler.ContinueWith(t => { handlers.TryRemove(id, out _); }, TaskScheduler.Default);
                 }
@@ -319,6 +325,21 @@ public sealed partial class AudioServiceHost
                     var message = await AudioWire.Read(pipe, Closed.Token);
                     if (!inference)
                     {
+                        if (message.Type == "stop-if-idle")
+                        {
+                            bool stop;
+                            lock (host.sync)
+                            {
+                                stop = message.Data?["expectedProcessId"]?.GetValue<int>() == Environment.ProcessId &&
+                                    !host.draining && host.jobs.Count == 0 && host.captures.Active is null &&
+                                    !host.peers.Values.Any(p => p != this && !p.Closed.IsCancellationRequested &&
+                                        !(p.inference && p.process == pid));
+                                if (stop) { host.idleExit = true; host.draining = true; }
+                            }
+                            try { await Send(new("status", message.Id, AudioWire.Data(host.Status())), Closed.Token); }
+                            finally { if (stop) host.Stop(false); }
+                            return;
+                        }
                         if (message.Type.StartsWith("capture.", StringComparison.Ordinal))
                         {
                             // The five-second pre-command idle limit must not truncate a large export.

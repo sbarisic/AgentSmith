@@ -30,7 +30,8 @@ public sealed class CallMetadata
 public sealed record SavedCall(CaptureManifest Capture, CallMetadata Metadata, RecordingAnalysisJob? Analysis)
 {
     public string Title => Metadata.Title.Length > 0 ? Metadata.Title : Capture.Started.ToLocalTime().ToString("g");
-    public string Detail => $@"{Capture.Started.ToLocalTime():g} · {TimeSpan.FromSeconds(Capture.DurationSeconds):hh\:mm\:ss} · {(Capture.State is "Recording" or "Starting" or "Finalizing" ? Capture.State : Metadata.Test && !Metadata.Kept ? "Test — Keep or Delete" : Analysis?.State ?? "Transcription pending")}";
+    public string Detail => $@"{Capture.Started.ToLocalTime():g} · {TimeSpan.FromSeconds(Capture.DurationSeconds):hh\:mm\:ss} · {(Capture.State is "Recording" or "Starting" or "Finalizing" ? Capture.State : Metadata.Test && !Metadata.Kept ? "Test — Keep or Delete" : Analysis?.State ?? "Transcription pending")}" +
+        (Capture.State == "Completed" && !string.IsNullOrWhiteSpace(Capture.Error) ? " · Audio warnings" : "");
 }
 public sealed record TranscriptLine(string Id, double Start, double End, string SpeakerId, string Speaker, string Text, string Track)
 {
@@ -46,6 +47,8 @@ public sealed class CallRecorder : IDisposable
     private readonly HttpClient http = new();
     private ChatModelSelection? displayedModel;
     public string? LastStartId { get; private set; }
+    private int? ownedServiceProcess;
+    public bool HasOwnedService => ownedServiceProcess is not null;
     public RecorderPreferences Preferences { get; }
     public CallRecorder(string? directory, string serviceExecutable)
     {
@@ -81,11 +84,19 @@ public sealed class CallRecorder : IDisposable
             .OrderByDescending(c => c.Capture.Started).ToArray();
     }
     public Task<AudioServiceStatus> Status(CancellationToken ct = default) => AudioServiceControl.Status(DataDirectory, ct);
+    public Task PrepareTranscription(Action<string> progress, CancellationToken ct) =>
+        LocalAudioInstallation.Setup(DataDirectory, progress, ct);
     public async Task EnsureService(CancellationToken ct)
     {
         if ((await Status(ct)).Available) return;
         if (!File.Exists(executable)) throw new UserFacingException("Place the matching smith.exe next to the GUI, or launch with --smith <path>.");
-        await AudioServiceControl.Start(DataDirectory, executable, [], ct);
+        await AudioServiceControl.Start(DataDirectory, executable, [], ct, pid => ownedServiceProcess = pid);
+    }
+    public async Task ReleaseService(CancellationToken ct)
+    {
+        if (ownedServiceProcess is not { } pid) return;
+        await AudioServiceControl.ReleaseOwnedService(DataDirectory, pid, ct);
+        ownedServiceProcess = null;
     }
     public static CaptureDevice[] Devices()
     {
@@ -128,7 +139,8 @@ public sealed class CallRecorder : IDisposable
         }
         // Transcribe/Resume never invokes a summary provider, even after a previous summary attempt.
         using (Analysis.Store.Lease(job.Id)) { job.Options = job.Options with { NoSummary = true }; Analysis.Store.Save(job); }
-        return await Analysis.Run(job.Id, retryFailed, retryUncertain, progress, null, null, ct, Preferences.MaxMinutes, Preferences.MaxRequests, Preferences.StorageGiB);
+        return await Analysis.Run(job.Id, retryFailed, retryUncertain, progress, null, null, ct, Preferences.MaxMinutes, Preferences.MaxRequests, Preferences.StorageGiB,
+            retryOnly: retryFailed || retryUncertain);
     }
     public string ModelDescription()
     {
@@ -173,7 +185,7 @@ public sealed class CallRecorder : IDisposable
         var meta = Metadata(captureId); if (meta.AnalysisId is null) return "Generate a summary after transcription.";
         var path = Analysis.Store.FileFor(meta.AnalysisId, "summary.md"); if (!File.Exists(path)) return "No completed summary. Click Generate summary to send transcript evidence to the configured model.";
         var job = Analysis.Store.Read(meta.AnalysisId); job.SpeakerNames = meta.SpeakerNames; job.SummaryLanguage = Preferences.SummaryLanguage;
-        return (job.SummaryRevision != RecordingAnalysis.SummaryRevision(job) ? "Summary outdated: speaker names or language changed. Generate again to update.\n\n" : "") + File.ReadAllText(path);
+        return (job.SummaryRevision != RecordingAnalysis.SummaryRevision(job) ? "Summary outdated: speaker names or language changed. Select Update summary.\n\n" : "") + File.ReadAllText(path);
     }
     public string Coverage(string captureId)
     {

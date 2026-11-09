@@ -32,6 +32,16 @@ The headless smoke mode requires an explicit disposable data directory with the 
 
 ## Pending live acceptance
 
+### 2026-11-09 capture timing regression check
+
+- Affected audio/capture/analysis suite: **154 passed, 3 skipped**. Includes the observed 16 kHz device-position / 48 kHz sample mismatch, recorded QPC jitter, preservation of flagged packets, normal paired stop with warnings, and analysis retaining CompletedWithGaps.
+- Published-package smoke passed under a non-elevated account, including one-request GUI close and shutdown of its owned service. Evidence: `artifacts/recorder-timing-fix-check/package-smoke.json`.
+- With explicit user permission, recorded Galaxy Buds+ microphone and output for ten seconds in an isolated local data directory. Actual duration: **10.180432 seconds**. Capture completed normally. Microphone: **857 packets, 0 position regressions, 0 overlapping frames discarded, 39 Windows discontinuity flags (including the initial packet)**. The saved manifest retains 38 post-start glitch coverage intervals and missing-audio coverage, including device startup delay.
+- The output delivered **zero packets** because no audio was playing; its inferred-silence coverage was retained. This check does **not** validate call-output sound, speech intelligibility, recognition, Teams/VM behavior, or glitch-free Bluetooth operation. No playback or inference was performed. The isolated diagnostic service shut down afterward; the existing shared service was untouched.
+- Local diagnostic evidence: `artifacts/galaxy-buds-live-check/audio/recordings/f6c4bdfe66934dc2a9d754e692c2d2e4/manifest.json`. Recorded audio remains local and is excluded from version control.
+
+### Remaining scenarios
+
 - Actual headset calls in Teams and inside a VM routed through Windows host audio.
 - A real two-hour call, listening checks at beginning/middle/end, device unplugging, and Teams mute versus independent recorder mute.
 - Human-reviewed English, Croatian, and Slovenian speech recognition and speaker attribution. Automated language checks establish accepted language settings only.

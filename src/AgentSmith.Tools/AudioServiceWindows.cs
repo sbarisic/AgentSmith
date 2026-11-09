@@ -95,7 +95,7 @@ internal static class AudioServiceWindows
             if (identity.User?.Value != Sid) throw new IOException("Audio service peer belongs to another user.");
         return (int)pid;
     }
-    internal static void Launch(string executable, IReadOnlyList<string> arguments)
+    internal static int Launch(string executable, IReadOnlyList<string> arguments)
     {
         if (!IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out var inJob)) throw new Win32Exception();
         var startup = new Startup { Size = Marshal.SizeOf<Startup>() };
@@ -106,6 +106,7 @@ internal static class AudioServiceWindows
             throw new UserFacingException("Cannot start a detached audio service (Windows error " + Marshal.GetLastWin32Error() +
                 "). Run smith service run in a separate terminal outside the enclosing process job.");
         CloseHandle(info.Thread); CloseHandle(info.Process);
+        return checked((int)info.ProcessId);
     }
     [StructLayout(LayoutKind.Sequential)] private struct Security { public int Length; public IntPtr Descriptor; public int Inherit; }
     [StructLayout(LayoutKind.Sequential)] private struct Startup { public int Size; public IntPtr Reserved, Desktop, Title; public uint X, Y, XSize, YSize, XChars, YChars, Fill, Flags; public ushort Show, ReservedSize; public IntPtr ReservedPointer, Input, Output, Error; }

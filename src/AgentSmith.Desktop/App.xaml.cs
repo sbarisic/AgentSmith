@@ -28,6 +28,7 @@ public partial class App : System.Windows.Application
             var window = new MainWindow(recorder);
             if (smoke)
             {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 try { await window.RunSmokeCheck(); }
                 finally { recorder.Dispose(); }
                 Shutdown(0); return;

@@ -172,6 +172,8 @@ internal sealed partial class AudioCaptureManager : IDisposable
         private long startQpc;
         private long stopQpc;
         private long lastPacketEnd = -1;
+        private long lastPacketPosition = -1;
+        private long nextPacketQpc;
         private long nextPacketFrame;
         private long chunkStart;
         private int chunkIndex;
@@ -205,6 +207,7 @@ internal sealed partial class AudioCaptureManager : IDisposable
         public void Start()
         {
             startQpc = SharedStart == 0 ? owner.Now() : SharedStart; manifest.StartQpc = startQpc;
+            manifest.TimingDiagnostics = new();
             lock (sync) { manifest.State = "Recording"; store.Save(manifest); }
             try { source.Start(); done = Task.Run(Write); }
             catch { manifest.State = "Failed"; throw; }
@@ -251,23 +254,61 @@ internal sealed partial class AudioCaptureManager : IDisposable
                         Interlocked.Add(ref queuedBytes, -packet.Data.Length);
                         lock (sync)
                         {
-                            if (packet.TimestampError || packet.Qpc <= 0) { Fail("Invalid capture timestamp; coverage is uncertain."); break; }
-                            var target = lastPacketEnd == packet.Position && !packet.Discontinuity ? nextPacketFrame : FrameAt(packet.Qpc);
-                            var count = packet.Data.Length / manifest.BlockAlign;
-                            if (packet.Discontinuity && lastPacketEnd >= 0 || lastPacketEnd >= 0 && packet.Position < lastPacketEnd)
+                            var diagnostics = manifest.TimingDiagnostics!;
+                            diagnostics.Packets++;
+                            if (packet.Discontinuity) diagnostics.DeviceDiscontinuities++;
+                            if (packet.TimestampError || packet.Qpc <= 0)
                             {
-                                manifest.Error ??= "Device reported discontinuous audio; inspect manifest coverage for uncertain intervals.";
+                                diagnostics.TimestampErrors++;
+                                Fail("Invalid capture timestamp; coverage is uncertain."); break;
+                            }
+                            var count = packet.Data.Length / manifest.BlockAlign;
+                            var timestampFrame = FrameAt(packet.Qpc);
+                            // Device positions can use the hardware rate (e.g. 16 kHz Bluetooth)
+                            // while shared-mode packets contain 48 kHz samples. Compare successive
+                            // positions, never a hardware position with a client-format sample count.
+                            var positionRegressed = lastPacketPosition >= 0 && packet.Position <= lastPacketPosition;
+                            if (positionRegressed) diagnostics.PositionRegressions++;
+                            if (lastPacketPosition >= 0 && !positionRegressed && packet.Position != lastPacketEnd)
+                                diagnostics.PositionUnitMismatches++;
+                            // Some shared-mode drivers reset/stall the device counter. A valid QPC
+                            // that agrees with the saved sample timeline (within one rounding frame)
+                            // independently confirms continuity. Never override a Windows glitch flag.
+                            var timestampFallback = positionRegressed && !packet.Discontinuity &&
+                                Math.Abs(timestampFrame - nextPacketFrame) <= 1;
+                            if (timestampFallback) diagnostics.TimestampFallbacks++;
+                            // Packet timestamps on shared Bluetooth endpoints jitter by several ms.
+                            // Within 20 ms, a forward counter and no WASAPI glitch flag establish
+                            // continuity. Use sample counts for placement and periodic QPC anchors
+                            // for clock drift; do not insert/drop samples on every jittery timestamp.
+                            var continuous = lastPacketPosition >= 0 && !positionRegressed && !packet.Discontinuity &&
+                                Math.Abs(packet.Qpc - nextPacketQpc) <= 200_000;
+                            var target = continuous || timestampFallback
+                                ? nextPacketFrame : timestampFrame;
+                            if ((positionRegressed || packet.Discontinuity || lastPacketPosition >= 0 && packet.Position != lastPacketEnd) && diagnostics.Observations.Count < 8)
+                                diagnostics.Observations.Add(new(lastPacketEnd, packet.Position, packet.Qpc, nextPacketFrame, timestampFrame, packet.Discontinuity));
+                            if (packet.Discontinuity && lastPacketEnd >= 0)
+                            {
+                                manifest.Error ??= "Windows reported an audio capture glitch; inspect coverage for uncertain intervals.";
                                 manifest.Coverage.Add(new(manifest.Frames, Math.Max(1, target - manifest.Frames), "DeviceDiscontinuity"));
                             }
+                            else if (positionRegressed && !timestampFallback)
+                            {
+                                manifest.Error ??= "The audio device position moved backwards and its timestamps could not confirm continuous audio; inspect coverage.";
+                                manifest.Coverage.Add(new(manifest.Frames, Math.Max(1, target - manifest.Frames), "PositionUncertain"));
+                            }
                             lastPacketEnd = packet.Position + count;
+                            lastPacketPosition = packet.Position;
+                            nextPacketQpc = packet.Qpc + (long)Math.Round(count * 10_000_000d / manifest.SampleRate);
+                            // Retain every delivered sample, including flagged packets. QPC jitter
+                            // is not evidence of duplicate audio. Normalization uses saved anchors.
+                            target = Math.Max(target, manifest.Frames);
                             nextPacketFrame = target + count;
                             if (target > manifest.Frames) Silence(target - manifest.Frames);
-                            // QPC rounding can overlap a frame; discard only the overlapping frames, never stretch audio.
-                            var skip = Math.Min(count, Math.Max(0, manifest.Frames - target));
-                            if (manifest.TrackId.Length > 0 && count > skip && (manifest.Anchors.Count == 0 || manifest.Frames > manifest.Anchors[^1].Frame && packet.Qpc - manifest.Anchors[^1].Qpc >= 10_000_000))
-                                manifest.Anchors.Add(new(manifest.Frames, packet.Qpc + (long)(skip * 10_000_000d / manifest.SampleRate)));
+                            if (manifest.TrackId.Length > 0 && (manifest.Anchors.Count == 0 || manifest.Frames > manifest.Anchors[^1].Frame && packet.Qpc - manifest.Anchors[^1].Qpc >= 10_000_000))
+                                manifest.Anchors.Add(new(manifest.Frames, packet.Qpc));
                             var savedStart = manifest.Frames;
-                            Append(packet.Data.AsSpan(checked((int)skip * manifest.BlockAlign)));
+                            Append(packet.Data);
                             if (packet.Muted) AddCoverage(savedStart, manifest.Frames - savedStart, "IntentionalMute");
                         }
                     }
@@ -299,7 +340,10 @@ internal sealed partial class AudioCaptureManager : IDisposable
                     if (Volatile.Read(ref pendingError) is null) Silence(Math.Max(0, FrameAt(stopQpc) - manifest.Frames));
                     manifest.TimelineSeconds = Math.Max(0, (stopQpc - startQpc) / 10_000_000d);
                     FinalizeChunk();
-                    manifest.State = manifest.Error is null ? "Completed" : "Interrupted";
+                    // A normal stop completes capture even if some packets carried gap warnings.
+                    // Coverage still makes analysis CompletedWithGaps. Only a fatal/forced stop
+                    // requires the interrupted-capture consent/resume flow.
+                    manifest.State = Volatile.Read(ref pendingError) is null ? "Completed" : "Interrupted";
                     manifest.Ended = DateTimeOffset.UtcNow; store.Save(manifest);
                 }
             }

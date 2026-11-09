@@ -74,13 +74,14 @@ public static partial class LocalAudioInstallation
         var root = Path.GetFullPath(Path.Combine(dataDirectory, "audio")); Directory.CreateDirectory(root);
         // Cross-process setup lock; inference continues using the previous generation.
         using var setupLock = new FileStream(Path.Combine(root, "setup.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(bundle, "downloads.json")))!;
         var status = Status(dataDirectory, bundle);
-        if (status.Transcription && status.Classification && JsonNode.Parse(File.ReadAllText(Path.Combine(status.Location, "ready.json")))?["fingerprint"]?.ToString() == Fingerprint(bundle))
+        if (status.Transcription && status.Classification && (manifest["diarization"] is null || status.Diarization) &&
+            JsonNode.Parse(File.ReadAllText(Path.Combine(status.Location, "ready.json")))?["fingerprint"]?.ToString() == Fingerprint(bundle))
         { CleanupLocked(dataDirectory, progress); progress(status.Message); return; }
         var id = Guid.NewGuid().ToString("N");
         var directory = Path.Combine(root, "installations", id); Directory.CreateDirectory(directory);
         var downloads = Path.Combine(root, "downloads"); Directory.CreateDirectory(downloads);
-        var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(bundle, "downloads.json")))!;
         var files = new Dictionary<string, string>();
         try
         {

@@ -47,7 +47,7 @@ public sealed partial class RecordingAnalysis : IDisposable
     }
     public async Task<RecordingAnalysisJob> Run(string id, bool retryFailed, bool retryUncertain, Action<string> progress,
         Func<string, CancellationToken, Task<string>>? summarize, string? modelIdentity, CancellationToken cancellation,
-        int? maxMinutes = null, int? maxRequests = null, double? maxStorageGiB = null)
+        int? maxMinutes = null, int? maxRequests = null, double? maxStorageGiB = null, bool retryOnly = false)
     {
         using var lease = Store.Lease(id);
         var job = Store.Read(id);
@@ -92,10 +92,13 @@ public sealed partial class RecordingAnalysis : IDisposable
                     foreach (var component in chunk.Components.Keys.ToArray())
                         if (committed[component]?["status"]?.ToString() == "succeeded") chunk.Components[component] = "Succeeded";
                 }
-                var needed = chunk.Components.Where(c => c.Value != "Succeeded").Select(c => c.Key).ToArray();
+                var needed = chunk.Components.Where(c => c.Value switch {
+                    "Succeeded" => false,
+                    "Failed" => retryFailed,
+                    "Submitted" or "Uncertain" => retryUncertain,
+                    _ => !retryOnly
+                }).Select(c => c.Key).ToArray();
                 if (needed.Length == 0) continue;
-                if (needed.Any(c => chunk.Components[c] is "Submitted" or "Uncertain") && !retryUncertain || needed.Any(c => chunk.Components[c] == "Failed") && !retryFailed)
-                    continue;
                 using var space = await Store.Reserve(10 * 1024 * 1024, job.Options.MaxStorageGiB, ct);
                 job.Stage = "Inference"; progress($"Analysis {id} · {job.ProcessedSeconds:0}/{job.TotalAudioSeconds:0}s · chunk {chunk.Index + 1}/{job.Chunks.Count}");
                 var clip = Store.FileFor(id, "inference.wav");

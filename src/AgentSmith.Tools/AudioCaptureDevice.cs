@@ -42,7 +42,8 @@ internal sealed class WindowsCaptureSource : ICaptureSource
         device = devices.GetDevice(id);
         try
         {
-            var builder = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithBufferLength(100);
+            var builder = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithBufferLength(100)
+                .WithMmcssThreadPriority("Audio");
             if (device.DataFlow == DataFlow.Render) builder = builder.WithLoopbackCapture();
             recorder = builder.Build();
             recorder.DataAvailable += (bytes, flags, position, qpc) => Data?.Invoke(bytes, checked((long)position), checked((long)qpc),

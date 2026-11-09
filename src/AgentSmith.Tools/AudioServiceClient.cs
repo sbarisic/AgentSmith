@@ -24,12 +24,13 @@ public static class AudioServiceControl
                 "Audio service unavailable. Run smith service start with the same --data-dir. " + (ex is UserFacingException ? ex.Message : ""));
         }
     }
-    public static async Task<AudioServiceStatus> Start(string dataDirectory, string executable, IReadOnlyList<string> prefix, CancellationToken ct = default)
+    public static async Task<AudioServiceStatus> Start(string dataDirectory, string executable, IReadOnlyList<string> prefix, CancellationToken ct = default, Action<int>? onLaunched = null)
     {
         var endpoint = AudioEndpoint.Resolve(dataDirectory, true);
         var status = await Status(dataDirectory, ct);
         if (status.Available) return status;
-        AudioServiceWindows.Launch(executable, prefix.Concat(new[] { "service", "run", "--data-dir", endpoint.Directory, "--json" }).ToArray());
+        var launched = AudioServiceWindows.Launch(executable, prefix.Concat(new[] { "service", "run", "--data-dir", endpoint.Directory, "--json" }).ToArray());
+        onLaunched?.Invoke(launched);
         var timer = Stopwatch.StartNew();
         while (timer.Elapsed < TimeSpan.FromSeconds(15))
         {
@@ -52,12 +53,35 @@ public static class AudioServiceControl
         }
         return status with { Message = "Audio service is draining accepted work; inspect smith service status." };
     }
-    private static async Task<AudioServiceStatus> Exchange(AudioEndpoint endpoint, bool stop, bool force, CancellationToken ct)
+    /// <summary>Stop only the expected process, with an atomic server-side check for other clients or work.</summary>
+    public static async Task ReleaseOwnedService(string dataDirectory, int expectedProcessId, CancellationToken ct = default)
+    {
+        var status = await Status(dataDirectory, ct);
+        if (!status.Available || status.ProcessId != expectedProcessId) return;
+        Process process;
+        try { process = Process.GetProcessById(expectedProcessId); }
+        catch (ArgumentException) { return; } // Already exited since the status reply.
+        using (process)
+        {
+            var timer = Stopwatch.StartNew();
+            do
+            {
+                if (process.HasExited) return;
+                status = await Exchange(AudioEndpoint.Resolve(dataDirectory), false, false, ct, expectedProcessId);
+                if (status.Draining) { await process.WaitForExitAsync(ct); return; }
+                // Allow our cancelled inference and short-lived control connections to finish.
+                await Task.Delay(100, ct);
+            } while (timer.Elapsed < TimeSpan.FromSeconds(3));
+            // Another client/work still needs the shared service; never force its shutdown.
+        }
+    }
+    private static async Task<AudioServiceStatus> Exchange(AudioEndpoint endpoint, bool stop, bool force, CancellationToken ct, int? idleProcessId = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(2));
         using var pipe = await AudioConnection.Connect(endpoint, "control", timeout.Token);
         using var gate = new SemaphoreSlim(1);
-        await AudioWire.Write(pipe, new(stop ? "stop" : "status", Data: new() { ["force"] = force }), gate, timeout.Token);
+        await AudioWire.Write(pipe, new(idleProcessId is not null ? "stop-if-idle" : stop ? "stop" : "status",
+            Data: new() { ["force"] = force, ["expectedProcessId"] = idleProcessId }), gate, timeout.Token);
         var result = await AudioWire.Read(pipe, timeout.Token);
         if (result.Type != "status") throw AudioConnection.Failure(result);
         return AudioWire.Value<AudioServiceStatus>(result.Data);

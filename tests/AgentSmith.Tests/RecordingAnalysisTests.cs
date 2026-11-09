@@ -52,6 +52,26 @@ public sealed class RecordingAnalysisTests
         Assert.Equal(frames, chunks[^1].End);
     }
     [Fact]
+    public async Task ExplicitRetriesOnlyRunTheRequestedFailureClassAndKeepPendingWork()
+    {
+        using var directory = new TestDirectory(); var backend = new Backend();
+        var (analysis, job) = Prepared(directory.Path, backend); using var owned = analysis;
+        job.Chunks[0].Components["transcription"] = "Failed";
+        job.Chunks[0].Components["diarization"] = "Uncertain";
+        analysis.Store.Save(job);
+        var failed = await analysis.Run(job.Id, true, false, _ => { }, null, null, default, retryOnly: true);
+        Assert.Equal("Succeeded", failed.Chunks[0].Components["transcription"]);
+        Assert.Equal("Uncertain", failed.Chunks[0].Components["diarization"]);
+        Assert.All(failed.Chunks.Skip(1), c => Assert.All(c.Components.Values, s => Assert.Equal("Pending", s)));
+        Assert.Equal(new[] { "transcription" }, Assert.Single(backend.Components));
+        var uncertain = await analysis.Run(job.Id, false, true, _ => { }, null, null, default, retryOnly: true);
+        Assert.Equal(new[] { "diarization" }, backend.Components[1]);
+        Assert.All(uncertain.Chunks[0].Components.Values, s => Assert.Equal("Succeeded", s));
+        Assert.All(uncertain.Chunks.Skip(1), c => Assert.All(c.Components.Values, s => Assert.Equal("Pending", s)));
+        var resumed = await analysis.Run(job.Id, false, false, _ => { }, null, null, default);
+        Assert.Equal("Completed", resumed.State); Assert.Equal(4, backend.Calls);
+    }
+    [Fact]
     public async Task CompletedChunksReuseWithoutServiceAndExportRemainsReadable()
     {
         using var directory = new TestDirectory(); var backend = new Backend(); var (analysis, job) = Prepared(directory.Path, backend);

@@ -7,17 +7,25 @@ Build a Windows x64 folder containing the desktop app, matching CLI/service, and
 ./artifacts/recorder-win-x64/AgentSmith.Recorder.exe
 ```
 
-The app runs as the current user; administrator rights are not requested. Existing AgentSmith audio engines, accounts, and saved model defaults are reused. Install engines with `smith audio setup`; configure a summary provider with the existing CLI commands. Setup guidance includes `--data-dir` when applicable. Recordings can be made without installed transcription engines.
+The app runs as the current user; administrator rights are not requested. Startup automatically checks the local audio installation and downloads/installs missing or outdated components using the existing managed setup. Existing installations and verified download caches are reused; an up-to-date installation does not reinstall. A visible banner shows setup progress, cancellation, and a Retry action if setup fails. Saved recordings remain usable and recording is available after a failed/cancelled setup; Transcribe and Resume transcription retry preparation automatically. If a shared capture is already active at launch, setup waits until transcription is requested after recording. Custom `--data-dir` is respected. Accounts and saved model defaults are reused; configure a summary provider with the existing CLI commands.
 
 The GUI accepts `--data-dir <directory>` and, for development, `--smith <matching-executable>`. Keep the published GUI and CLI together. Stop an older idle service explicitly before upgrading; the app does not replace incompatible running services.
 
 ## Recording a call
 
-The main panel has two tabs. **Recording** contains Record, Stop and transcribe, and Generate summary. **Configuration** contains call output and microphone selection, transcription and summary languages, the ten-second audio test, and advanced processing limits/retry options. Use Save configuration to remember changes; settings are also saved when recording or processing starts.
+The main panel has three tabs. **Recording** contains Record, Stop and transcribe, and Generate summary. **Configuration** contains call output and microphone selection, transcription and summary languages, the ten-second audio test, and advanced processing limits/retry options. **Review** contains transcription/resume, test Keep/Delete, transcript search, playback and track selection, coverage, exports, and recording/analysis deletion. Use Save changes to remember changes; settings are also saved when recording or processing starts.
 
-Select the output carrying the call and your microphone in Configuration. A headset is the supported baseline. Use the ten-second test to check both sides, then play it back in Recording and choose Keep test or Delete test.
+New recordings default to `New call — yyyy-MM-dd HH:mm:ss` using local time. The timestamp refreshes when recording starts; custom titles are preserved.
 
-During recording, Cancel recording stops and keeps the audio without starting transcription. During transcription or summary generation, Pause processing saves completed work for explicit resume. These controls appear only when relevant; capture itself does not pause. Summary is the default result view, with Transcript and Details & export beside it. Recording and analysis deletion are under Manage selected recording in the library.
+Select the output carrying the call and your microphone in Configuration. A headset is the supported baseline. Use the ten-second test to check both sides, then play it back in Review and choose Keep test or Delete test.
+
+Device lists refresh automatically when Windows reports an added, removed, renamed, enabled/disabled, or default audio device change. Current selections are preserved; a missing selected device is restored automatically when the same endpoint reconnects. Updates wait until recording or processing finishes, so an active recording never switches endpoints. Refresh devices remains available as a manual fallback.
+
+Use Windows defaults loads the current Windows communications output and microphone, falling back to multimedia defaults. Save changes remembers the selected device IDs across launches. If saved devices are disconnected at startup, the app waits and selects them when they become available. It does not substitute other devices or follow later changes to Windows defaults unless you choose Use Windows defaults again.
+
+Recording shows a compact output/microphone display beside the controls. While recording, it reflects the active capture's actual devices, including captures started by another client. Unavailable selections show the last known device name instead of a blank selector; reconnecting restores the selection without another click.
+
+During recording, Cancel recording stops and keeps the audio without starting transcription. During transcription or summary generation, Pause processing saves completed work for explicit resume. These controls appear only when relevant; capture itself does not pause. The Recording tab shows the summary directly, without nested tabs or review controls. Review has Transcript and Details & export tabs; deletion is under Manage selected recording in Details & export. Summary citations open Review for timestamp playback.
 
 Record and Stop control the shared audio service. Stop finalizes both tracks and starts local transcription for normal recordings. Test recordings require explicit transcription. A changed default device never redirects an active recording. Device failures finalize the call as interrupted; analyzing retained parts requires explicit acknowledgment.
 
@@ -27,7 +35,7 @@ Call audio includes every application playing on the selected output. For VM cal
 
 ## Reviewing results
 
-Search the transcript; double-click a row or press Enter to play from its timestamp. The playback selector offers both tracks, call only, or microphone only. Speaker names can be renamed locally without modifying recognition evidence. Transcript text editing and automatic echo cancellation are not included.
+Search the transcript; double-click a row or press Enter to play from its timestamp. The playback button shows Play, Pause, or Replay: pausing preserves your position, and Replay at the end starts the recording from the beginning. The playback selector offers both tracks, call only, or microphone only. Speaker names can be renamed locally without modifying recognition evidence. Transcript text editing and automatic echo cancellation are not included.
 
 Generate summary is a separate action. It sends retained transcript evidence to the displayed configured provider; the audio stays local. Summaries retain citations to source segments. Changing speaker names or summary language marks a previous summary outdated. Summary failure does not remove the transcript. English, Croatian, and Slovenian have dedicated language choices; additional Whisper language codes are accepted in advanced settings.
 
@@ -37,12 +45,22 @@ Export results creates a new directory with timestamped TXT/SRT, original struct
 
 Closing your recording asks to stop and exit; transcription remains pending. Closing processing asks to pause and exit. No tray mode is used. An existing recording started by another client is shown, but merely closing the GUI does not stop it. A crashed GUI can leave service-owned recording active; reopen and use Stop.
 
+The app starts the matching hidden audio service when needed and tracks the exact process it launched. Normal exit waits for that service and its helper to stop after recording/processing cleanup, provided no other client or work needs them. A service that was already running before the app needed it is left alone. The conditional shutdown never forces another client's recording or inference to stop. If shutdown fails, the window stays open with an error so closing can be retried.
+
 Completed work is retained. Resume is explicit, and failed/uncertain retries have separate checkboxes. Uncertain retries may repeat a request whose response was lost. Storage limits never delete older calls automatically. Advanced controls retain the defaults of 10 GiB per recording/analysis store, a 1 GiB free-disk reserve, and 30 minutes/100 summary requests per processing attempt. Increase limits or resume when necessary.
 
 Version 1 recordings and analyses remain readable. New paired recordings and analysis jobs use version 2. The named-pipe service protocol is version 4; GUI, CLI, and service must use the matching build. Live transcription, speakerphone echo cancellation, per-application capture, account onboarding, transcript editing, and embedded chat are deferred.
 
 ## Acceptance boundaries
 
+Capture diagnostics distinguish Windows-reported glitches from inconsistent device position counters. Shared-mode Bluetooth positions may advance at a different rate than delivered samples. Forward positions, no glitch flag, and packet timestamps agreeing within 20 ms allow continuous sample placement; periodic timestamp anchors retain drift correction. Backwards/stalled counters require agreement within one frame. Delivered packets are preserved instead of trimming them against jittery timestamps. Capture threads use Windows multimedia scheduling priority.
+
+A normal Stop completes recording and proceeds to transcription even when nonfatal glitches were reported. Such recordings show Audio warnings; coverage is retained and analysis reports CompletedWithGaps. Device loss, invalid timestamps, storage failures, forced stops, and crashes still require interrupted-recording confirmation. Existing recordings retain their original state and coverage; previously discarded samples cannot be recovered by upgrading.
+
 Automated fixtures cover capture, mute, paired failure recovery, storage, timing, analysis overlap/reuse, summaries, and compatibility. Published-package checks use disposable data and synthetic audio. They do not establish headset/Teams/VM compatibility on every machine, transcription quality, or a successful real two-hour call.
 
 Before treating those scenarios as accepted, run a two-hour Teams call and a VM call with a headset, verify both tracks at beginning/middle/end, test device unplugging and the two mute controls, and review English/Croatian/Slovenian speech against human transcripts. Record hardware, routing, recognition errors, and timing results. Mixed-language accuracy remains exploratory.
+
+Transcription actions have separate buttons: Transcribe creates the first analysis, Resume transcription continues pending work, Retry failed steps retries only failed components, and Retry uncertain steps explicitly repeats only requests with unknown outcomes. Completed analysis with audio gaps alone offers no redundant transcription action. Summary actions likewise show Generate summary, Resume summary, or Update summary only when applicable. The Recording tab renders compact summary headings, bullets, emphasis, and timestamp citations; analysis IDs and export metadata remain in Details & export and exported files.
+
+After generation, the Call summary card leads with the result in readable body text. A single summary point is displayed as a paragraph; longer summaries retain bullets and sections. Provider information, the accuracy note, and coverage warnings are grouped under the collapsed Summary details section. Provider disclosure remains expanded before the first summary request.
