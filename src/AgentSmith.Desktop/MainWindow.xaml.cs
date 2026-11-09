@@ -114,6 +114,11 @@ public partial class MainWindow : Window
         await CheckAutomaticSetupRecovery();
         PresentationSmokeCheck.Run();
         CheckDeviceSelectionRefresh();
+        var libraryCount = LibraryList.Items.Count;
+        LibrarySearch.Text = "no fixture matches this search";
+        if (LibraryList.Items.Count != 0 || CopySummaryButton.IsEnabled) throw new InvalidOperationException("Recording search did not clear unavailable actions.");
+        LibrarySearch.Text = "";
+        if (LibraryList.Items.Count != libraryCount || Selected is null) throw new InvalidOperationException("Clearing recording search did not restore the library.");
         Measure(new Size(1280, 900)); Arrange(new Rect(0, 0, 1280, 900)); UpdateLayout();
         // Exercise all tab contents without opening a window or capturing a device.
         foreach (var size in new[] { new Size(1264, 861), new Size(984, 681) })
@@ -124,6 +129,15 @@ public partial class MainWindow : Window
             WriteSmokePreview($"{name}-{size.Width}.png", size);
             if (tab.Content is not FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 }) throw new InvalidOperationException($"{tab.Name} layout failed.");
         }
+        // Render the shipped dark resources without changing Windows settings or showing a window.
+        var dictionaries = System.Windows.Application.Current.Resources.MergedDictionaries;
+        var originalTheme = dictionaries[0];
+        dictionaries[0] = new ResourceDictionary { Source = new Uri("pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.Dark.xaml") };
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        WorkspaceTabs.SelectedItem = RecordingTab;
+        WriteSmokePreview("recording-tab-dark.png", new Size(1264, 861));
+        dictionaries[0] = originalTheme;
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
         WorkspaceTabs.SelectedItem = ReviewTab; ResultsTabs.SelectedItem = TranscriptTab; UpdateLayout();
         if (Selected is { } call)
         {
@@ -391,8 +405,8 @@ public partial class MainWindow : Window
             RecordingOutput.Text = "Output: " + (output?.Name ?? OutputDevicePlaceholder.Text);
             RecordingMicrophone.Text = "Mic: " + (microphone?.Name ?? MicrophoneDevicePlaceholder.Text);
         }
-        RecordingOutput.Foreground = output is null ? System.Windows.Media.Brushes.SaddleBrown : System.Windows.Media.Brushes.DarkSlateGray;
-        RecordingMicrophone.Foreground = microphone is null ? System.Windows.Media.Brushes.SaddleBrown : System.Windows.Media.Brushes.DarkSlateGray;
+        RecordingOutput.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+        RecordingMicrophone.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
     }
     private void SaveSettings()
     {
@@ -421,11 +435,38 @@ public partial class MainWindow : Window
     }
     private void RefreshLibrary(string? selectId = null)
     {
+        var revealRecording = selectId is not null;
         selectId ??= Selected?.Capture.Id;
         loading = true; var calls = recorder.Library(); LibraryList.ItemsSource = calls;
-        LibraryList.SelectedItem = calls.FirstOrDefault(c => c.Capture.Id == selectId) ?? calls.FirstOrDefault(); loading = false;
+        if (revealRecording) LibrarySearch.Clear();
+        FilterLibrary();
+        LibraryList.SelectedItem = LibraryList.Items.OfType<SavedCall>().FirstOrDefault(c => c.Capture.Id == selectId) ?? LibraryList.Items.OfType<SavedCall>().FirstOrDefault(); loading = false;
         ShowSelected();
     }
+    private void LibrarySearchChanged(object sender, TextChangedEventArgs e)
+    {
+        if (loading || LibraryList?.ItemsSource is null) return;
+        FilterLibrary();
+        if (LibraryList.SelectedItem is null && LibraryList.Items.Count > 0) LibraryList.SelectedIndex = 0;
+    }
+    private void FilterLibrary()
+    {
+        var query = LibrarySearch.Text.Trim();
+        System.Windows.Data.CollectionViewSource.GetDefaultView(LibraryList.ItemsSource).Filter = item =>
+            item is SavedCall call && (query.Length == 0 || call.Title.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
+                call.Detail.Contains(query, StringComparison.CurrentCultureIgnoreCase));
+    }
+    private void OpenConfigurationClick(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedItem = ConfigurationTab;
+    private async void CopySummaryClick(object sender, RoutedEventArgs e) => await Guard(() =>
+    {
+        if (Selected is { } call && !string.IsNullOrWhiteSpace(recorder.Summary(call.Capture.Id)))
+        {
+            var document = SummaryView.Document;
+            Clipboard.SetText(new System.Windows.Documents.TextRange(document.ContentStart, document.ContentEnd).Text.Trim());
+            StatusText.Text = "Summary copied.";
+        }
+        return Task.CompletedTask;
+    });
     private void ShowSelected()
     {
         if (Selected is not { } call)
@@ -448,7 +489,7 @@ public partial class MainWindow : Window
         StopButton.Visibility = capturing ? Visibility.Visible : Visibility.Collapsed;
         CancelRecordingButton.Visibility = capturing && ownsCapture && testDeadline is null ? Visibility.Visible : Visibility.Collapsed;
         CancelRecordingButton.IsEnabled = !busy && !closing;
-        StopButton.Content = testDeadline is null ? "■ Stop and transcribe" : "■ Stop test";
+        StopButton.Content = testDeadline is null ? "Stop and transcribe" : "Stop test";
         MuteInput.Visibility = LevelPanel.Visibility = capturing ? Visibility.Visible : Visibility.Collapsed;
         PauseButton.Visibility = busy && workCancellation is not null ? Visibility.Visible : Visibility.Collapsed;
         PauseButton.Content = preparingTranscription ? "Cancel setup" : "Pause processing";
@@ -476,6 +517,7 @@ public partial class MainWindow : Window
         }
         var job = Selected?.Analysis;
         var hasSummary = job is not null && File.Exists(recorder.Analysis.Store.FileFor(job.Id, "summary.md"));
+        CopySummaryButton.IsEnabled = hasSummary;
         var summaryPending = job is { Stage: "Summary", State: "Paused" or "Interrupted" or "Running" };
         var summaryOutdated = false;
         if (hasSummary && job is not null && Selected is { } saved)
@@ -702,7 +744,11 @@ public partial class MainWindow : Window
             playback.Select(PlaybackTrack.SelectedIndex);
         }
     }
-    private void UpdatePlaybackLabel() => PlayButton.Content = playback?.AtEnd == true ? "Replay" : playback?.Playing == true ? "Pause" : "Play";
+    private void UpdatePlaybackLabel()
+    {
+        PlayButton.Content = playback?.AtEnd == true ? "Replay" : playback?.Playing == true ? "Pause playback" : "Play";
+        PlayButton.Tag = playback?.AtEnd == true ? "\uE72C" : playback?.Playing == true ? "\uE769" : "\uE768";
+    }
     private async void PlayClick(object sender, RoutedEventArgs e) => await Guard(() => { EnsurePlayback(); playback?.Toggle(); return Task.CompletedTask; });
     private async void PlaybackSeek(object sender, RoutedPropertyChangedEventArgs<double> e)
     { if (!sliderUpdating && IsLoaded) await Guard(() => { EnsurePlayback(); playback?.Seek(e.NewValue); return Task.CompletedTask; }); }

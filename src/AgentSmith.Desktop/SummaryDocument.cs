@@ -12,6 +12,7 @@ internal static class SummaryDocument
     {
         var document = new FlowDocument { FontFamily = new FontFamily("Segoe UI"), FontSize = 17,
             PagePadding = new Thickness(0), LineHeight = 26, TextAlignment = TextAlignment.Left };
+        document.SetResourceReference(FlowDocument.ForegroundProperty, "TextFillColorPrimaryBrush");
         var lines = markdown.Replace("\r", "").Split('\n');
         var singlePoint = lines.Count(l => Regex.IsMatch(l.Trim(), @"^(?:[-*]|\d+\.)\s+")) == 1;
         System.Windows.Documents.List? list = null;
@@ -50,6 +51,7 @@ internal static class SummaryDocument
                     {
                         var label = TimeSpan.FromSeconds(row.Start).ToString(row.Start < 3600 ? @"mm\:ss" : @"hh\:mm\:ss");
                         var link = new Hyperlink(new Run(label)) { ToolTip = "Play source · " + row.Speaker + " · " + row.Time + "–" + TimeSpan.FromSeconds(row.End).ToString(@"hh\:mm\:ss") };
+                        link.SetResourceReference(Hyperlink.ForegroundProperty, "AccentTextFillColorPrimaryBrush");
                         link.Click += (_, _) => seek(row.Start);
                         paragraph.Inlines.Add(link);
                     }
