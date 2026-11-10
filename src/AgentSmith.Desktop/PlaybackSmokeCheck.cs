@@ -44,7 +44,7 @@ internal static class PlaybackSmokeCheck
             throw new InvalidOperationException($"Play did not restart from the beginning after {scenario}.");
     }
 
-    private sealed class SilentOutput : IWavePlayer
+    internal sealed class SilentOutput : IWavePlayer
     {
         private IWaveProvider? source;
         public PlaybackState PlaybackState { get; private set; }

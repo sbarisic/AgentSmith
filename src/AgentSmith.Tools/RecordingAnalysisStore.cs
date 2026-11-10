@@ -30,6 +30,7 @@ public sealed class RecordingAnalysisJob
     public List<RecordingAnalysisChunk> Chunks { get; set; } = [];
     public string Reconciliation { get; set; } = "titanet-cosine-v1;threshold=.75;margin=.10";
     public string? SummaryModel { get; set; }
+    public string? CompletedSummaryModel { get; set; }
     public string SummaryLanguage { get; set; } = "en";
     public Dictionary<string, string> SpeakerNames { get; set; } = [];
     public string? SummaryRevision { get; set; }

@@ -9,6 +9,8 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        RecorderTheme.Apply();
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += ThemeChanged;
         try
         {
             string? directory = null; var executable = Path.Combine(AppContext.BaseDirectory, "smith.exe");
@@ -41,5 +43,11 @@ public partial class App : System.Windows.Application
             else MessageBox.Show(ex.Message, "AgentSmith Recorder", MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(1);
         }
+    }
+    private void ThemeChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e) => Dispatcher.BeginInvoke(new Action(() => RecorderTheme.Apply()));
+    protected override void OnExit(ExitEventArgs e)
+    {
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= ThemeChanged;
+        base.OnExit(e);
     }
 }

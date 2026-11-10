@@ -10,8 +10,8 @@ internal static class SummaryDocument
 {
     internal static FlowDocument Create(string markdown, IReadOnlyList<TranscriptLine> transcript, Action<double> seek)
     {
-        var document = new FlowDocument { FontFamily = new FontFamily("Segoe UI"), FontSize = 17,
-            PagePadding = new Thickness(0), LineHeight = 26, TextAlignment = TextAlignment.Left };
+        var document = new FlowDocument { FontFamily = new FontFamily("Segoe UI"), FontSize = 14,
+            PagePadding = new Thickness(0), LineHeight = 21, TextAlignment = TextAlignment.Left };
         document.SetResourceReference(FlowDocument.ForegroundProperty, "TextFillColorPrimaryBrush");
         var lines = markdown.Replace("\r", "").Split('\n');
         var singlePoint = lines.Count(l => Regex.IsMatch(l.Trim(), @"^(?:[-*]|\d+\.)\s+")) == 1;
@@ -31,9 +31,9 @@ internal static class SummaryDocument
             {
                 line = heading.Groups[2].Value;
                 if (line == "Recording analysis") line = "Summary";
-                paragraph.FontSize = heading.Groups[1].Length == 1 ? 20 : 16;
+                paragraph.FontSize = heading.Groups[1].Length == 1 ? 16 : 14;
                 paragraph.FontWeight = FontWeights.SemiBold;
-                paragraph.Margin = new Thickness(0, 4, 0, 12);
+                paragraph.Margin = new Thickness(0, 4, 0, 8);
             }
             else if (bullet.Success) line = bullet.Groups[1].Value;
             var cursor = 0;

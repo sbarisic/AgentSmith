@@ -4,6 +4,25 @@ Date: 2026-10-29. This record distinguishes implementation checks from live-call
 
 ## Completed checks
 
+### 2026-11-09 recorder agent settings and orange interface
+
+- Added independent recorder agent preferences, account/model discovery, browser sign-in using the existing protected vault, and explicit summary restart with completed-summary provenance retained.
+- The focused recorder/authentication/summary suite passed **23 tests**, including successful synthetic sign-in with both active-account policies, explicit account selection, cancellation, offline catalogs, preference reload, and failed replacement preservation. OAuth exchange and catalogs use test handlers; no real account sign-in or inference was performed.
+- The full unit run reported **650 passed, 2 failed, 3 skipped**. Both failures were existing verification fixtures selecting the machine's default .NET 11 preview SDK. Rerunning the verification and recorder-agent fixtures with a temporary .NET 10 SDK scope passed **18 tests**. The later focused run includes three additional account tests. This is not a claim that the entire suite was rerun in the corrected environment.
+- The self-contained package passed desktop/service/export smoke checks with disposable synthetic recordings: navigation, saved versus draft agent settings, stale catalog cancellation, offline saving, model ID selection, playback replay, device handling, and owned-service shutdown. Evidence: `artifacts/recorder-design-smoke/package-smoke.json`.
+- Headless screenshots were inspected for the compact orange light/dark design, configuration, transcript rows, and the minimum window size. The fixture renders 100%, 125%, 150%, and 200% DPI previews; this does not establish interactive behavior on every monitor. Source palettes and typography are centralized in `src/AgentSmith.Desktop/RecorderTheme.xaml`.
+- Builds used installed .NET SDK **10.0.400** through a temporary build-directory pin. The repository's **10.0.401** pin was left unchanged.
+- Live browser sign-in, real-provider summary quality, physical keyboard navigation, and hardware/display combinations remain separate live acceptance checks. No existing recording was retranscribed or sent to a provider during this work.
+
+### 2026-11-09 tab and playback follow-up
+
+- Top navigation reserves focus-border space, and workspace tabs use a plain horizontal header panel with rounded borders. Headless layout checks confirm the content's vertical position stays fixed across Home, Recordings, and Configuration.
+- The summary model and settings button share the card's top row. The fixture checks right alignment and removal of the empty action row for completed summaries.
+- Playback controls now use an orange slider with elapsed/total time and ten-second skip buttons. Silent-output checks cover drag preview, cancelled drag restoration, seek completion while playing, and skip clamping at both ends. Published package smoke checks, including existing replay and export checks, passed.
+- Compact light and dark previews were inspected. These checks use synthetic audio and do not claim a new physical-device listening test.
+
+### Original recorder verification
+
 - Release unit suite: **592 passed, 3 skipped**. Results: `tests/AgentSmith.Tests/TestResults/recorder-unit-final.trx`.
 - Release integration suite: **351 passed**. Results: `tests/AgentSmith.IntegrationTests/TestResults/recorder-integration-final.trx`.
 - After the final capture/normalization adjustments, affected call, transport, and recording-analysis tests passed again: **39 passed**. An earlier focused capture regression run also passed all 26 tests.
@@ -49,3 +68,10 @@ The headless smoke mode requires an explicit disposable data directory with the 
 - Interactive playback listening, close/pause behavior during real recording/processing, and keyboard use across target hardware/display setups.
 
 These scenarios require explicit live testing; no live-call compatibility or recognition-accuracy claim is made by the automated results.
+
+## Compact recorder and precise transcript playback
+
+- The default window is 1060 x 740 logical pixels, with no outer Recording-tab scrollbar. Saved recordings offer New; its title and device overrides are a separate draft. Starting and transcribing no longer save unfinished Configuration edits.
+- Headless desktop checks cover draft retention, device disconnect/reconnect, unchanged global device preferences, fractional seeks, 0.1-second keyboard increments, overlapping highlights, end boundaries, silent gaps and track filtering. Light/dark previews include the expanded transcript row and range markers.
+- Translation fixtures verify selected-passage-only requests, summary language, no tools, cached success, language/model/source separation, cancellation and provider failure without modifying transcript evidence. Twelve focused recorder/translation tests passed.
+- These checks use synthetic audio and a fixture provider. Live translation quality, hardware playback alignment and interactive device recording remain manual checks; millisecond display precision does not imply millisecond speech alignment accuracy.

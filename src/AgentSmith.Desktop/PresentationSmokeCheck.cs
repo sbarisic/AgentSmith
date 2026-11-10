@@ -27,7 +27,7 @@ internal static class PresentationSmokeCheck
         var visible = new TextRange(document.ContentStart, document.ContentEnd).Text;
         if (visible.Contains("#") || visible.Contains("Analysis:") || visible.Contains("coverage.json") || visible.Contains("callc000000s00000"))
             throw new InvalidOperationException("Summary leaked export syntax or identifiers.");
-        if (document.Blocks.Count != 1 || document.FontSize < 16)
+        if (document.Blocks.Count != 1 || document.FontSize < 14)
             throw new InvalidOperationException("Short summary was buried in export metadata or displayed too small.");
         var paragraph = document.Blocks.OfType<Paragraph>().Single();
         if (!paragraph.Inlines.OfType<Bold>().Any()) throw new InvalidOperationException("Summary emphasis was not rendered.");
@@ -36,7 +36,7 @@ internal static class PresentationSmokeCheck
         if (sought != 1 || citation.ToolTip?.ToString()?.Contains("Alex") != true)
             throw new InvalidOperationException("Summary citation did not seek to the exact source.");
         var longer = SummaryDocument.Create("## Decisions\n\n- First point.\n\n- Second point.", [], _ => { });
-        if (longer.Blocks.Count != 2 || longer.Blocks.FirstBlock is not Paragraph { FontSize: 16 } ||
+        if (longer.Blocks.Count != 2 || longer.Blocks.FirstBlock is not Paragraph { FontSize: 14 } ||
             longer.Blocks.OfType<System.Windows.Documents.List>().Single().ListItems.Count != 2)
             throw new InvalidOperationException("Longer summary lost its section heading or bullet list.");
     }

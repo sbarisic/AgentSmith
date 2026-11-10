@@ -6,7 +6,7 @@ namespace AgentSmith.Tools;
 
 public sealed partial class RecordingAnalysis
 {
-    public async Task<RecordingAnalysisJob> CompleteSummary(string id, Func<string, CancellationToken, Task<string>>? summarize, string identity, CancellationToken ct, bool retryUncertain = false)
+    public async Task<RecordingAnalysisJob> CompleteSummary(string id, Func<string, CancellationToken, Task<string>>? summarize, string identity, CancellationToken ct, bool retryUncertain = false, bool restart = false)
     {
         using var lease = Store.Lease(id);
         var job = Store.Read(id);
@@ -14,6 +14,10 @@ public sealed partial class RecordingAnalysis
         try
         {
             if (summarize is null) throw new UserFacingException("Configure a summary model; local evidence remains saved.");
+            ct.ThrowIfCancellationRequested();
+            // Preserve legacy completed provenance before replacing the pending identity.
+            if (File.Exists(Store.FileFor(id, "summary.md"))) job.CompletedSummaryModel ??= job.SummaryModel;
+            if (restart) job.SummaryModel = identity;
             job.State = "Running"; job.Stage = "Summary"; job.Options = job.Options with { NoSummary = false }; Store.Save(job);
             await Summarize(job, summarize, identity, retryUncertain, _ => { }, deadline.Token);
             job.Stage = "Done"; job.Error = null;
@@ -102,6 +106,7 @@ public sealed partial class RecordingAnalysis
         var output = Store.FileFor(job.Id, "summary.md");
         await File.WriteAllTextAsync(output + ".new", report.ToString(), new UTF8Encoding(false), ct); RecordingAnalysisStore.CommitFile(output + ".new", output);
         job.SummaryRevision = SummaryRevision(job);
+        job.CompletedSummaryModel = identity;
     }
     public static string SummaryRevision(RecordingAnalysisJob job) => FileOperations.Hash(Encoding.UTF8.GetBytes(job.SummaryLanguage + "\n" + string.Join("\n", job.SpeakerNames.OrderBy(p => p.Key).Select(p => p.Key + "=" + p.Value))));
     internal static void ValidateSummary(JsonObject parsed, HashSet<string> allowed)

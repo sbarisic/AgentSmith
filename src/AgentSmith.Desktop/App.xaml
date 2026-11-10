@@ -3,12 +3,13 @@
     <ResourceDictionary>
       <ResourceDictionary.MergedDictionaries>
         <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml"/>
+        <ResourceDictionary Source="RecorderTheme.xaml"/>
       </ResourceDictionary.MergedDictionaries>
       <!-- Keep Microsoft's control templates, focus cues and theme resources. -->
-      <Style TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}"><Setter Property="Padding" Value="14,8"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="MinHeight" Value="36"/></Style>
-      <Style TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}"><Setter Property="Padding" Value="10,8"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
-      <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}"><Setter Property="MinHeight" Value="36"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
-      <Style TargetType="TabItem" BasedOn="{StaticResource DefaultTabItemStyle}"><Setter Property="Padding" Value="18,12"/></Style>
+      <Style TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}"><Setter Property="FontSize" Value="{DynamicResource Recorder.FontBody}"/><Setter Property="Padding" Value="12,6"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="MinHeight" Value="30"/></Style>
+      <Style TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}"><Setter Property="FontSize" Value="{DynamicResource Recorder.FontBody}"/><Setter Property="Padding" Value="9,6"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
+      <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}"><Setter Property="FontSize" Value="{DynamicResource Recorder.FontBody}"/><Setter Property="MinHeight" Value="30"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
+      <Style TargetType="TabItem" BasedOn="{StaticResource DefaultTabItemStyle}"><Setter Property="FontSize" Value="{DynamicResource Recorder.FontBody}"/><Setter Property="Padding" Value="18,12"/></Style>
       <Style TargetType="TabControl" BasedOn="{StaticResource DefaultTabControlStyle}"/>
       <Style TargetType="ListBox" BasedOn="{StaticResource DefaultListBoxStyle}"><Setter Property="Background" Value="Transparent"/></Style>
       <Style TargetType="ListBoxItem" BasedOn="{StaticResource DefaultListBoxItemStyle}"><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style>

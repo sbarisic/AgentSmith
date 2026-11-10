@@ -10,6 +10,7 @@ namespace AgentSmith.Application;
 
 public sealed class RecorderPreferences
 {
+    public ChatModelSelection? SummaryAgent { get; set; }
     public string? OutputId { get; set; }
     public string? MicrophoneId { get; set; }
     public string Language { get; set; } = "auto";
@@ -35,23 +36,24 @@ public sealed record SavedCall(CaptureManifest Capture, CallMetadata Metadata, R
 }
 public sealed record TranscriptLine(string Id, double Start, double End, string SpeakerId, string Speaker, string Text, string Track)
 {
+    public string DisplayTime => "[" + TimeSpan.FromSeconds(Start).ToString(Start < 3600 ? @"mm\:ss" : @"hh\:mm\:ss") + "]";
     public string Time => TimeSpan.FromSeconds(Start).ToString(@"hh\:mm\:ss");
 }
 
-public sealed class CallRecorder : IDisposable
+public sealed partial class CallRecorder : IDisposable
 {
     public string DataDirectory { get; }
     public RecordingAnalysis Analysis { get; }
     private readonly string metadataDirectory;
     private readonly string executable;
-    private readonly HttpClient http = new();
-    private ChatModelSelection? displayedModel;
+    private readonly HttpClient http;
     public string? LastStartId { get; private set; }
     private int? ownedServiceProcess;
     public bool HasOwnedService => ownedServiceProcess is not null;
-    public RecorderPreferences Preferences { get; }
-    public CallRecorder(string? directory, string serviceExecutable)
+    public RecorderPreferences Preferences { get; private set; }
+    public CallRecorder(string? directory, string serviceExecutable, HttpMessageHandler? handler = null)
     {
+        http = handler is null ? new HttpClient() : new HttpClient(handler);
         DataDirectory = AudioCaptureDevices.ResolveDirectory(SmithPaths.DataDirectory(directory));
         executable = Path.GetFullPath(serviceExecutable);
         metadataDirectory = Path.Combine(DataDirectory, "desktop");
@@ -60,10 +62,13 @@ public sealed class CallRecorder : IDisposable
         var path = Path.Combine(metadataDirectory, "preferences.json");
         Preferences = File.Exists(path) ? RecordingAnalysisStore.ReadJson<RecorderPreferences>(path) : new();
     }
-    public void SavePreferences()
+    public void SavePreferences(RecorderPreferences? draft = null)
     {
-        RecordingAnalysis.ValidateOptions(new(Language: Preferences.Language, MaxMinutes: Preferences.MaxMinutes, MaxRequests: Preferences.MaxRequests, MaxStorageGiB: Preferences.StorageGiB));
-        RecordingAnalysisStore.WriteJson(Path.Combine(metadataDirectory, "preferences.json"), Preferences);
+        var candidate = draft ?? Preferences;
+        if (candidate.SummaryAgent is { } agent) RecorderAgents.Validate(agent);
+        RecordingAnalysis.ValidateOptions(new(Language: candidate.Language, MaxMinutes: candidate.MaxMinutes, MaxRequests: candidate.MaxRequests, MaxStorageGiB: candidate.StorageGiB));
+        RecordingAnalysisStore.WriteJson(Path.Combine(metadataDirectory, "preferences.json"), candidate);
+        Preferences = candidate;
     }
     private string MetadataPath(string id)
     {
@@ -103,15 +108,16 @@ public sealed class CallRecorder : IDisposable
         // Enumeration opens no capture streams and starts no service.
         return AudioCaptureDevices.List();
     }
-    public async Task<CaptureManifest> Start(string title, bool test, CancellationToken ct)
+    public async Task<CaptureManifest> Start(string title, bool test, CancellationToken ct, string? outputId = null, string? microphoneId = null)
     {
         SavePreferences();
-        if (Preferences.OutputId is null || Preferences.MicrophoneId is null) throw new UserFacingException("Select both call output and microphone.");
+        outputId ??= Preferences.OutputId; microphoneId ??= Preferences.MicrophoneId;
+        if (outputId is null || microphoneId is null) throw new UserFacingException("Select both call output and microphone.");
         await EnsureService(ct);
         var id = Guid.NewGuid().ToString("N");
         LastStartId = id;
         SaveMetadata(id, new() { Title = title.Trim(), Test = test, Language = Preferences.Language });
-        var request = new CaptureStart(id, Preferences.OutputId, Preferences.StorageGiB, MicrophoneId: Preferences.MicrophoneId);
+        var request = new CaptureStart(id, outputId, Preferences.StorageGiB, MicrophoneId: microphoneId);
         return (await AudioCaptureControl.Request(DataDirectory, "start", JsonSerializer.SerializeToNode(request)!.AsObject(), ct)).Deserialize<CaptureManifest>()!;
     }
     public async Task<CaptureManifest> CaptureStatus(string id, CancellationToken ct = default) =>
@@ -144,19 +150,30 @@ public sealed class CallRecorder : IDisposable
     }
     public string ModelDescription()
     {
-        try { var selected = RecordingModels.Resolve(new SessionStore(DataDirectory)); displayedModel = selected; return $"{selected.Provider} / {selected.Model}"; }
-        catch (UserFacingException ex) { displayedModel = null; return ex.Message; }
+        try { var selected = SummaryAgent(); return $"{selected.Provider} / {selected.Model}"; }
+        catch (UserFacingException) { return "Choose a summary agent in Settings."; }
     }
-    public async Task<RecordingAnalysisJob> Summarize(string captureId, bool retryUncertain, CancellationToken ct)
+    public ChatModelSelection SummaryAgent()
+    {
+        var selection = Preferences.SummaryAgent ?? RecordingModels.Resolve(new SessionStore(DataDirectory));
+        if (selection.Provider == ModelProvider.ChatGpt && selection.AccountId.Length == 0)
+        {
+            var vault = new CredentialVault(DataDirectory, new WindowsSecretProtector());
+            selection = selection with { AccountId = vault.Active().Id };
+        }
+        return selection;
+    }
+    public static string AgentIdentity(ChatModelSelection selection) => $"{selection.Provider}|{selection.Endpoint}|{selection.Model}|{selection.AccountId}";
+    public async Task<RecordingAnalysisJob> Summarize(string captureId, bool retryUncertain, CancellationToken ct, bool restart = false)
     {
         var meta = Metadata(captureId); var id = meta.AnalysisId ?? throw new UserFacingException("Transcribe the recording first.");
         var store = new SessionStore(DataDirectory);
-        var selection = displayedModel ?? throw new UserFacingException("Configure a default summary model with smith model, then refresh recordings and devices.");
+        var selection = SummaryAgent();
         var summaryLanguage = Preferences.SummaryLanguage;
         var session = new Session { Model = selection.Model, AccountId = selection.AccountId, Connection = selection.Connection() };
         var vault = new CredentialVault(DataDirectory, new WindowsSecretProtector());
         var auth = new ChatGptAuth(http, vault, new IdentityValidator());
-        await RecordingModels.Configure(session, http, vault, auth, ct);
+        await RecordingModels.Configure(session, http, vault, auth, ct, summaryOnly: true);
         var client = new SessionModelClient(store, session, RecordingModels.Client(session, http, token => auth.AccessTokenAsync(session.AccountId, token)));
         using (Analysis.Store.Lease(id))
         {
@@ -164,7 +181,7 @@ public sealed class CallRecorder : IDisposable
             job.Options = job.Options with { MaxMinutes = Preferences.MaxMinutes, MaxRequests = Preferences.MaxRequests, MaxStorageGiB = Preferences.StorageGiB }; Analysis.Store.Save(job);
         }
         return await Analysis.CompleteSummary(id, (prompt, token) => RecordingModels.Summarize(session, client, prompt, summaryLanguage, token),
-            $"{session.Connection.Provider}|{session.Connection.Endpoint}|{session.Model}|{session.AccountId}", ct, retryUncertain);
+            $"{session.Connection.Provider}|{session.Connection.Endpoint}|{session.Model}|{session.AccountId}", ct, retryUncertain, restart);
     }
     public TranscriptLine[] Transcript(string captureId)
     {

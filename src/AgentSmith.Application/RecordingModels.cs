@@ -24,7 +24,7 @@ public static class RecordingModels
         return new(selectedModel, selectedProvider, endpoint ?? compatible?.Endpoint ?? DefaultEndpoint(selectedProvider),
             compatible?.AccountId ?? "", output == 0 ? compatible?.MaxOutputTokens ?? (selectedProvider == ModelProvider.ChatGpt ? 16384 : 8192) : output);
     }
-    public static async Task Configure(Session session, HttpClient http, CredentialVault Vault, ChatGptAuth Auth, CancellationToken ct)
+    public static async Task Configure(Session session, HttpClient http, CredentialVault Vault, ChatGptAuth Auth, CancellationToken ct, bool summaryOnly = false)
     {
         if (session.Connection.MaxOutputTokens == 0) session.Connection.MaxOutputTokens = session.Connection.Provider == ModelProvider.ChatGpt ? 16384 : 8192;
         if (!Enum.IsDefined(session.Connection.Provider)) throw new UserFacingException("Use provider chatgpt, lmstudio, or local.");
@@ -32,7 +32,7 @@ public static class RecordingModels
         if (session.Connection.Provider == ModelProvider.LmStudio)
         {
             var model = (await new LmStudioModelClient(http, session.Connection).ModelsAsync(ct)).SingleOrDefault(m => m.Id == session.Model && m.Loaded) ?? throw new UserFacingException("Selected LM Studio model is not loaded. Run smith models --provider lmstudio.");
-            if (!model.ToolUse) throw new UserFacingException("Local agent models must advertise trained tool use.");
+            if (!summaryOnly && !model.ToolUse) throw new UserFacingException("Local agent models must advertise trained tool use.");
             session.Connection.LoadedContextTokens = model.ContextTokens; session.AccountId = "";
             session.Connection.Capabilities = new() { ContextTokens = model.ContextTokens, Vision = model.Vision, Source = "LM Studio loaded instance", Confidence = "reported" };
         }

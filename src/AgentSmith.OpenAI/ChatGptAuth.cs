@@ -95,8 +95,9 @@ public sealed class IdentityValidator
 public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, IdentityValidator validator, string applicationName = "AgentSmith")
 {
     public async Task<Account> LoginAsync(string? accountId, Action<string> notify, CancellationToken ct,
-        Func<string, CancellationToken, Task<string?>>? manualCallback = null)
+        Func<string, CancellationToken, Task<string?>>? manualCallback = null, bool setActiveAccount = true)
     {
+        ct.ThrowIfCancellationRequested();
         Account? previous;
         string hostId;
         using (vault.Acquire())
@@ -155,6 +156,7 @@ public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, Identity
         using var tokens = await ExchangeAsync(new() { ["grant_type"] = "authorization_code", ["client_id"] = callback.ClientId, ["code"] = callback.Code, ["code_verifier"] = attempt.Verifier, ["redirect_uri"] = redirect, ["resource"] = OAuthProtocol.Resource }, ct);
         var token = tokens.RootElement.GetProperty("id_token").GetString()!;
         var identity = await validator.ValidateAsync(token, callback.ClientId, attempt.Nonce, previous?.Subject, ct);
+        ct.ThrowIfCancellationRequested();
         using (vault.Acquire())
         {
             var data = vault.Read();
@@ -163,7 +165,7 @@ public sealed class ChatGptAuth(HttpClient http, CredentialVault vault, Identity
             account.Scopes = []; // A new sign-in must establish permission again.
             ApplyTokens(account, tokens.RootElement);
             if (!data.Accounts.Contains(account)) data.Accounts.Add(account);
-            data.ActiveId = account.Id;
+            if (setActiveAccount) data.ActiveId = account.Id;
             vault.Write(data);
             return account;
         }
