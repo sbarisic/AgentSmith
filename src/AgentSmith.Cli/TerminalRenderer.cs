@@ -42,8 +42,6 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
         { workflow = Text(data, "workflow"); guideStyle = TerminalTheme.Guide(workflow); }
         switch (type)
         {
-            case "audio.progress":
-                runningStatus = Text(data, "message"); if (Verbose) MessageText("› " + runningStatus, "info"); break;
             case "web.search.progress":
                 runningStatus = Text(data, "message") == "Web search completed" ? "Thinking" : "Searching web";
                 MessageText("› " + Text(data, "message"), "info"); break;
@@ -151,13 +149,9 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
                 {
                     if (result.ValueKind != JsonValueKind.Object) break;
                     if (ToolFailure(result, data)) { }
-                    else if (Text(data, "name") == "audio_read" && !Verbose) MessageText("Audio evidence read · " + Text(result, "view") + (Flag(result, "hasMore") ? " · more pages available" : ""), "dim");
-                    else if (Text(result, "kind") == "recording-result" && !Verbose) MessageText("Recording analysis · " + Text(result, "state") + (Flag(result, "reused") ? " · reused saved evidence" : "") + (result.TryGetProperty("durationSeconds", out _) ? $" · {Number(result, "processedSeconds"):0.0}/{Number(result, result.TryGetProperty("totalAudioSeconds", out _) ? "totalAudioSeconds" : "durationSeconds"):0.0}s processed" : ""), "dim");
-                    else if (Text(result, "kind") == "recording-catalog" && !Verbose) MessageText("Recording metadata listed", "dim");
-                    else if (Text(result, "kind") is "recording-result" or "recording-catalog") MessageText(result.GetRawText());
                     else if (RoutineResult(data, result)) { }
                     else if (Text(data, "name") is "agent_spawn" or "agent_wait" or "agent_result" or "agent_cancel" or "agent_message") WorkerResult(Text(data, "name"), result);
-                    else if (Text(result, "kind") is "audio-analysis" or "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
+                    else if (Text(result, "kind") is "workspace-image" or "web-image" or "workspace-map" or "http-response") InspectionResult(result);
                     else if (Text(result, "kind") is "web-search" or "web-page") WebResult(result);
                     else if (Text(data, "name") is "workflow_read" or "workflow_update" or "workflow_finish"
                         || result.TryGetProperty("targetKind", out _) && result.TryGetProperty("current", out _)) WorkflowResult(result);
@@ -502,7 +496,7 @@ public sealed partial class TerminalRenderer(TextWriter output, bool color, int 
             MessageText("Artifact " + Text(data, "artifactId") + " · " + Text(data, "state"), "accent");
             if (data.TryGetProperty("text", out var text)) MessageText(text.GetString() ?? "");
             if (data.TryGetProperty("matches", out var matches)) foreach (var match in matches.EnumerateArray()) MessageText("[" + Text(match, "stream") + "] " + Text(match, "excerpt"));
-            if (Flag(data, "hasMore")) MessageText("Next page: /artifact " + Text(data, "artifactId") + (Text(data, "view") is { Length: > 0 } audioView ? " audio " + audioView + " " : " read ") + Text(data, "cursor"), "dim");
+            if (Flag(data, "hasMore")) MessageText("Next page: /artifact " + Text(data, "artifactId") + " read " + Text(data, "cursor"), "dim");
         }
     }
     private void Verification(JsonElement data)

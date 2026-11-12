@@ -1,5 +1,7 @@
 # AgentSmith: idea and implementation plan
 
+> Audio and recorder sections below are historical. These features moved to [Linguacode](https://github.com/sbarisic/Linguacode) on 2026-11-12 and are no longer included in AgentSmith.
+
 ## Explicit exit and Windows output recording
 
 Interactive `chat` and `resume` disable System.CommandLine's automatic Ctrl+C termination handler. The chat owns cancellation: idle Ctrl+C clears the entire unsent composer draft; active Ctrl+C cancels owned work and holds follow-ups. Standalone commands retain their existing handlers. Question pickers return typed outcomes; Esc temporarily enters command mode with an isolated composer draft, and empty Enter restores the same picker state. `/exit` performs common cancellation and queue hold, reports any active recording, and leaves pending decisions recoverable. Redirected EOF remains an external interruption.
@@ -12,7 +14,7 @@ Recording directories have a current-user DACL and exclusive leases, separate fr
 
 Graceful shutdown waits for recording finalization as well as inference drainage. Forced stop marks recording Interrupted. Startup recovery exclusively leases abandoned recordings, repairs RIFF/data/fact lengths to complete retained frames and preserves the uncertain trailing interval. Recovery never starts a device. Export leases exclude deletion; links and unexpected subdirectories are rejected. The default aggregate storage budget is 10 GiB, warning at 80%, with a 1 GiB free-disk reserve. No retention timer or automatic deletion is added.
 
-Terminal capture management does not construct `CliApp` or access conversation/provider state. Chat clients persist capture references in a separate additive `capture_references` table, without rewriting a runner's session snapshot. A reference is metadata, not an artifact grant. Capture selection while a turn runs is saved in a separate pending-selection table, then applied to the authoritative session after cleanup or on reload. Whole-recording analysis has a separate client-owned store and explicit artifact attachment. See [capture acceptance](WINDOWS_RECORDING_ACCEPTANCE.md) and [analysis acceptance](FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
+Terminal capture management does not construct `CliApp` or access conversation/provider state. Chat clients persist capture references in a separate additive `capture_references` table, without rewriting a runner's session snapshot. A reference is metadata, not an artifact grant. Capture selection while a turn runs is saved in a separate pending-selection table, then applied to the authoritative session after cleanup or on reload. Whole-recording analysis has a separate client-owned store and explicit artifact attachment. See [capture acceptance](https://github.com/sbarisic/Linguacode/blob/main/docs/history/WINDOWS_RECORDING_ACCEPTANCE.md) and [analysis acceptance](https://github.com/sbarisic/Linguacode/blob/main/docs/history/FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
 
 ## Local audio evidence and shared service
 
@@ -30,7 +32,7 @@ The five-minute monotonic deadline includes preparation, connection, upload, que
 
 Explicit `smith audio setup` still stages private generations with manifest hashes, locked binary packages and offline self-tests before replacing the current pointer. No inference path installs dependencies or downloads weights. Raw audio remains local; returned text and labels can enter the configured chat provider context. Service protocol, helper protocol and artifact schema are separate. Results retain service/helper identity, generation/fingerprint and connection/upload/queue/inference timings alongside decode, model-load and component timings.
 
-See [LOCAL_AUDIO_SERVICE_ACCEPTANCE.md](LOCAL_AUDIO_SERVICE_ACCEPTANCE.md) for service verification and [plan.md](plan.md) for current delivery and unverified criteria.
+See [LOCAL_AUDIO_SERVICE_ACCEPTANCE.md](https://github.com/sbarisic/Linguacode/blob/main/docs/history/LOCAL_AUDIO_SERVICE_ACCEPTANCE.md) for service verification and [plan.md](plan.md) for current delivery and unverified criteria.
 
 ## Client-owned recording analysis
 
@@ -339,7 +341,6 @@ src/
   AgentSmith.Tools/              Built-in file and process tools
   AgentSmith.Storage/            SQLite persistence and artifact storage
   AgentSmith.Cli/                Initial user interface
-  AgentSmith.Desktop/            Added after the CLI workflow is sound
 tests/
   AgentSmith.Tests/              State, protocol, recovery, and tool tests
   AgentSmith.IntegrationTests/   Temporary-workspace and opt-in live tests
@@ -666,4 +667,4 @@ Capture start may launch the compatible service. Requested whole-recording analy
 
 Console Ctrl+C events enqueue an idle-clear signal for the input loop; key-delivered Ctrl+C follows the same draft clearing path. Active cancellation preserves follow-up drafts, and picker input ignores Ctrl+C. Esc command mode has a separate disposable draft. Clearing removes draft references only; storage cleanup and chat exit remain separate.
 
-See [acceptance and limitations](SIMPLE_RECORDING_ACCEPTANCE.md).
+See [acceptance and limitations](https://github.com/sbarisic/Linguacode/blob/main/docs/history/SIMPLE_RECORDING_ACCEPTANCE.md).

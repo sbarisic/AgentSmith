@@ -40,7 +40,6 @@ internal sealed partial class CliApp
     }
     internal void SetConversation(Session session)
     {
-        if (activeRun is null) ApplyCaptureSelection(session);
         currentConversation = session.Id;
         input.SetContext(session);
         input.SetHistory(session);

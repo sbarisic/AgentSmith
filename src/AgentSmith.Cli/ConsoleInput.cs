@@ -57,7 +57,6 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
     internal bool DecisionCommands { get; private set; }
     public string Draft => draft;
     public string Status { get; set; } = "";
-    internal string RecordingStatus { get; set; } = "";
     internal Func<Task>? PollStatus { get; set; }
     private Task statusPoll = Task.CompletedTask;
     private long nextStatusPoll;
@@ -162,7 +161,6 @@ internal sealed class ConsoleInput(bool interactive, TextReader? reader = null, 
         }
         var status = ResumeConfirmation ? "Type continue to resume · Alt+V is available in the chat composer afterward" : blockFocus >= 0 && blockFocus < blocks.Count ? blocks[blockFocus].Label + " · Enter preview · Delete remove · Tab composer"
             : suggestions.Count > 0 ? "↑/↓ select · Tab/Enter complete · Esc dismiss" : Status.Length == 0 ? "Enter send · Ctrl+C clear · ↑/↓ history · Alt+V paste · /help" : Status + " · Esc cancel · Enter queue · ↑/↓ history";
-        if (RecordingStatus.Length > 0) status = RecordingStatus + " · " + status;
         if (color) Console.Write(TerminalTheme.Style("dim"));
         Console.WriteLine(status[..Math.Min(status.Length, width)]);
         var prefix = Status.Length == 0 ? "you › " : "next › ";

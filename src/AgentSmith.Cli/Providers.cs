@@ -67,7 +67,7 @@ internal sealed partial class CliApp
     }
     public async Task ConfigureModel(Session session, CancellationToken ct)
     {
-        await AgentSmith.Application.RecordingModels.Configure(session, http, Vault, Auth, ct);
+        await ProviderConfiguration.Configure(session, http, Vault, Auth, ct);
     }
 
     internal async Task RefreshWorker(WorkerProfile profile, CancellationToken ct)

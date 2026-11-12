@@ -10,7 +10,6 @@ internal sealed partial class CliApp
         exitRequested = true;
         CancelActive();
         Store.HoldQueue(session.Id, "CLI exit");
-        await RecordingExitNotice();
     }
 
     private async Task<string?> ReadDecision(Question question, Session session, CancellationToken ct)

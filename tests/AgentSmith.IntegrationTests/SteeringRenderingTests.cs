@@ -6,20 +6,7 @@ namespace AgentSmith.IntegrationTests;
 
 public sealed class SteeringRenderingTests
 {
-    [Fact]
-    public void AudioAnalysisUsesContentBlockAndRetainedArtifact()
-    {
-        using var output = new StringWriter(); var renderer = new TerminalRenderer(output, false);
-        var call = new ToolCall { Id = "listen", Name = "audio_listen", Arguments = Json.Serialize(new { path = "tone.wav", question = "What sound?", startSeconds = 2, durationSeconds = 5 }) };
-        renderer.Render("tool.started", new { id = call.Id, name = call.Name, activity = Activity.Describe(new(), call) });
-        renderer.Render("tool.completed", new { id = call.Id, name = call.Name, content = Json.Serialize(new {
-            kind = "audio-analysis", path = "tone.wav", model = "audio-model", analysis = "Tone\u001b[31m", startSeconds = 2,
-            durationSeconds = 5, partial = true, truncated = false, artifactId = "audio-artifact" }) });
-        var text = output.ToString();
-        Assert.Contains("Listen to audio", text); Assert.Contains("Audio analysis", text);
-        Assert.Contains("Selected clip only", text); Assert.Contains("/artifact audio-artifact", text);
-        Assert.DoesNotContain('\u001b', text);
-    }
+
     [Fact]
     public void WorkerActionsUseAliasesAndHumanLabels()
     {

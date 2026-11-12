@@ -1,7 +1,5 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/AgentSmith.Application/AgentSmith.Application.csproj" />
-    <Project Path="src/AgentSmith.Desktop/AgentSmith.Desktop.csproj" />
     <Project Path="src/AgentSmith.BuildLogger/AgentSmith.BuildLogger.csproj" />
     <Project Path="src/AgentSmith.Cli/AgentSmith.Cli.csproj" />
     <Project Path="src/AgentSmith.Core/AgentSmith.Core.csproj" />

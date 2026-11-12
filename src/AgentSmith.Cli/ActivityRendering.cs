@@ -82,13 +82,6 @@ public sealed partial class TerminalRenderer
     {
         switch (Text(data, "kind"))
         {
-            case "audio-analysis":
-                MessageText("Audio · " + Text(data, "path") + " · " + Text(data, "model"), "info");
-                MessageText("Start " + Number(data, "startSeconds").ToString("0.0") + "s · duration " + (data.TryGetProperty("durationSeconds", out var duration) && duration.ValueKind == JsonValueKind.Number ? duration.GetDouble().ToString("0.0") + "s" : "unavailable"), "dim");
-                ContentBlock("Audio analysis", Verbose ? Text(data, "analysis") : Text(data, "completion") is { Length: > 0 } completion ? completion : Text(data, "summary") is { Length: > 0 } summary ? summary : "Analysis retained; see the assistant response or artifact.");
-                if (Flag(data, "partial")) MessageText("Selected clip only; the rest of the file was not analyzed.", "dim");
-                if (Flag(data, "truncated")) MessageText("Audio model response reached its output limit.", "status-warning");
-                MessageText("Retained analysis: /artifact " + Text(data, "artifactId"), "dim"); break;
             case "web-image":
             case "workspace-image":
                 var imageSource = Text(data, "path");

@@ -1,5 +1,7 @@
 # AgentSmith implementation status and future work
 
+> Audio and recorder sections below are historical. These features moved to [Linguacode](https://github.com/sbarisic/Linguacode) on 2026-11-12 and are no longer included in AgentSmith.
+
 ## TOML configuration defaults (29 October 2026)
 
 - [x] Provider sections `[chatgpt]`, `[local]` and `[lmstudio]` retain independent model connections. New templates include all seven sections with explanatory comments; explicit provider selection reads that provider's settings, and model saves preserve other providers. Existing flat files remain readable. Verified with 386 passing Release integration tests, including sectioned CLI startup/resume, provider switching, comments, missing keys, inline/dotted tables and validation. Refreshed the local Windows x64 executable and updated the user's config with a backup, preserving the active ChatGPT model.
@@ -47,7 +49,7 @@ Installed audio tools remain available when the service is stopped. Matching dur
 - [x] Full Release verification: 542 unit/runtime/real-model tests and 324 integration tests passed without failures or skips; eight Python helper tests passed.
 - [x] Self-contained Windows publication to the existing PATH folder, fresh published-service/CLI smoke, updated help/README/design and service left available.
 
-Measurements, commands and evidence are in [LOCAL_AUDIO_SERVICE_ACCEPTANCE.md](LOCAL_AUDIO_SERVICE_ACCEPTANCE.md). Sampled peak private memory for three clients decreased from 3.465 GiB with independent helpers to 1.512 GiB with the shared service; throughput and latency remain workload-dependent.
+Measurements, commands and evidence are in [LOCAL_AUDIO_SERVICE_ACCEPTANCE.md](https://github.com/sbarisic/Linguacode/blob/main/docs/history/LOCAL_AUDIO_SERVICE_ACCEPTANCE.md). Sampled peak private memory for three clients decreased from 3.465 GiB with independent helpers to 1.512 GiB with the shared service; throughput and latency remain workload-dependent.
 
 ### Additional acceptance not yet performed
 
@@ -80,7 +82,7 @@ Recording and file management use NAudio.Wasapi 3.1.0 in the shared service, ind
 - [x] Full Release suite with real models: 555 unit/runtime and 324 integration tests, zero failures/skips; eight Python helper tests. Final targeted regressions and published-console checks also passed.
 - [x] Self-contained local Windows publication, updated help/README/design and service available with no recording active. No Git commit, push or automatic startup registration.
 
-Commands, evidence, final regression counts and measurement limits: [WINDOWS_RECORDING_ACCEPTANCE.md](WINDOWS_RECORDING_ACCEPTANCE.md).
+Commands, evidence, final regression counts and measurement limits: [WINDOWS_RECORDING_ACCEPTANCE.md](https://github.com/sbarisic/Linguacode/blob/main/docs/history/WINDOWS_RECORDING_ACCEPTANCE.md).
 
 ### Additional recording acceptance not yet performed
 
@@ -110,7 +112,7 @@ Speaker reconciliation uses local TitaNet embeddings, chronological matching and
 - [x] Full Release suites: 572 unit/runtime/real-model and 327 integration tests passed, zero failures/skips; five decoder and eight Python helper tests passed. Final format/pagination checks passed separately.
 - [x] Self-contained local publication and fresh-process evidence reads/export, VBR transcription/summary, cached resume and chat attachment. No commit or push.
 
-Commands, IDs, timings, memory/storage measurements, discovered races and limitations are in [FULL_RECORDING_ANALYSIS_ACCEPTANCE.md](FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
+Commands, IDs, timings, memory/storage measurements, discovered races and limitations are in [FULL_RECORDING_ANALYSIS_ACCEPTANCE.md](https://github.com/sbarisic/Linguacode/blob/main/docs/history/FULL_RECORDING_ANALYSIS_ACCEPTANCE.md).
 
 ### Additional analysis acceptance not yet completed
 
@@ -124,7 +126,7 @@ Live transcription, microphone mixing, per-application capture and cross-recordi
 
 ## Simple recording conversations and draft clearing: delivered
 
-Acceptance: [commands, results, measurements and limitations](SIMPLE_RECORDING_ACCEPTANCE.md).
+Acceptance: [commands, results, measurements and limitations](https://github.com/sbarisic/Linguacode/blob/main/docs/history/SIMPLE_RECORDING_ACCEPTANCE.md).
 
 - [x] Capture start/stop retain the chat selection; busy selection persists independently and is restored safely after work or restart.
 - [x] `/audio recordings`, `/audio summarize [capture-id]`, `/audio transcript [cursor]` and `/audio coverage [cursor]`; numbered fallback and existing commands retained.
